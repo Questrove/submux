@@ -1,0 +1,2 @@
+# 保证 shell 脚本始终是 LF 行尾(curl | bash 才不会因 \r 出错)
+*.sh text eol=lf

@@ -13,6 +13,18 @@ submux 自身不跑代理,只做「订阅加工厂」:输入多个订阅 → 合
 - **Web 控制台 + 鉴权**(登录 + 订阅 token)
 - **聚合 `Subscription-Userinfo`**:汇总各源流量与到期
 
+## 一键安装(Linux / macOS)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash
+```
+
+装好后 `submux` 即在 PATH 中。带 systemd 服务(Linux):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --service
+```
+
 ## 构建
 
 ```sh
