@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>submux 控制台</title>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#222}
+ h1{font-size:1.4rem} h2{font-size:1.1rem;margin-top:2rem;border-bottom:1px solid #ddd;padding-bottom:.3rem}
+ input,textarea,button{font:inherit;padding:.4rem;margin:.2rem 0;box-sizing:border-box}
+ input[type=text],input[type=password],textarea{width:100%}
+ textarea{height:180px;font-family:monospace}
+ table{width:100%;border-collapse:collapse;margin:.5rem 0}
+ th,td{border:1px solid #ddd;padding:.4rem;text-align:left;font-size:.88rem;vertical-align:top}
+ .err{color:#c00} .ok{color:#070} .muted{color:#888;font-size:.85rem}
+ button{cursor:pointer} .row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
+ .hidden{display:none}
+ code{background:#f4f4f4;padding:.2rem .4rem;border-radius:3px;word-break:break-all}
+</style>
+</head>
+<body>
+<h1>submux 控制台</h1>
+<div id="msg" class="muted"></div>
+
+<section id="view-init" class="hidden">
+ <h2>首次初始化</h2>
+ <p class="muted">设置管理员密码(至少 6 位)。同时会自动生成订阅 token。</p>
+ <input type="password" id="init-pw" placeholder="管理员密码">
+ <button onclick="doInit()">初始化</button>
+</section>
+
+<section id="view-login" class="hidden">
+ <h2>登录</h2>
+ <input type="password" id="login-pw" placeholder="密码">
+ <button onclick="doLogin()">登录</button>
+</section>
+
+<section id="view-dash" class="hidden">
+ <div class="row" style="justify-content:space-between">
+   <span class="muted">已登录</span><button onclick="doLogout()">退出</button>
+ </div>
+
+ <h2>订阅输出</h2>
+ <p>订阅 URL: <code id="sub-url">—</code></p>
+ <div class="row"><button onclick="copySub()">复制</button><button onclick="resetToken()">重置 token</button></div>
+
+ <h2>订阅源</h2>
+ <table id="src-table"><thead><tr><th>名称</th><th>URL</th><th>UA</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+ <div class="row">
+   <input type="text" id="ns-name" placeholder="名称" style="width:120px">
+   <input type="text" id="ns-url" placeholder="订阅 URL" style="flex:1">
+   <input type="text" id="ns-ua" placeholder="UA(可空)" style="width:140px">
+   <button onclick="addSource()">添加源</button>
+ </div>
+
+ <h2>覆盖配置(Merge YAML)</h2>
+ <textarea id="ov" placeholder="prepend-rules:&#10;  - DOMAIN-SUFFIX,example.com,DIRECT"></textarea>
+ <button onclick="saveOverride()">保存覆盖</button>
+
+ <h2>设置</h2>
+ <div class="row"><label style="width:110px">base_url</label><input type="text" id="set-base" placeholder="https://sub.example.com" style="flex:1"></div>
+ <div class="row"><label style="width:110px">拉取间隔(秒)</label><input type="text" id="set-interval" style="width:140px"></div>
+ <button onclick="saveSettings()">保存设置</button>
+</section>
+
+<script>
+const $=s=>document.querySelector(s);
+let SOURCES=[];
+function msg(t,cls){const m=$('#msg');m.textContent=t;m.className=cls||'muted';}
+function esc(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function api(method,path,body){
+ const opt={method,headers:{}};
+ if(body!==undefined){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(body);}
+ const r=await fetch(path,opt);
+ if(!r.ok){throw new Error((await r.text()).trim()||('HTTP '+r.status));}
+ const ct=r.headers.get('content-type')||'';
+ return ct.includes('json')?r.json():r.text();
+}
+function show(v){for(const id of ['init','login','dash'])$('#view-'+id).classList.toggle('hidden',id!==v);}
+
+async function boot(){
+ try{const s=await api('GET','/api/status');
+  if(!s.initialized)show('init');
+  else if(!s.authed)show('login');
+  else{show('dash');await loadAll();}
+ }catch(e){msg('加载失败: '+e.message,'err');}
+}
+async function doInit(){try{await api('POST','/api/init',{password:$('#init-pw').value});msg('已初始化','ok');show('dash');await loadAll();}catch(e){msg(e.message,'err');}}
+async function doLogin(){try{await api('POST','/api/login',{password:$('#login-pw').value});msg('');show('dash');await loadAll();}catch(e){msg('登录失败: '+e.message,'err');}}
+async function doLogout(){await api('POST','/api/logout');show('login');}
+
+async function loadAll(){await Promise.all([loadSources(),loadOverride(),loadSettings()]);}
+
+async function loadSources(){
+ SOURCES=await api('GET','/api/sources');
+ const tb=$('#src-table tbody');tb.innerHTML='';
+ for(const s of SOURCES){
+  const tr=document.createElement('tr');
+  const status=s.last_error?('<span class=err>'+esc(s.last_error)+'</span>')
+    :(s.last_success_at?('<span class=ok>'+esc(s.last_success_at)+'</span>'):'<span class=muted>未拉取</span>');
+  tr.innerHTML=`<td>${esc(s.name)}</td><td class=muted>${esc(s.url)}</td><td>${esc(s.user_agent)}</td>`+
+   `<td><input type=checkbox ${s.enabled?'checked':''} onchange="toggleSrc(${s.id},this.checked)"></td>`+
+   `<td>${status}</td>`+
+   `<td><button onclick="refreshSrc(${s.id})">刷新</button> <button onclick="delSrc(${s.id})">删除</button></td>`;
+  tb.appendChild(tr);
+ }
+}
+async function addSource(){try{await api('POST','/api/sources',{name:$('#ns-name').value,url:$('#ns-url').value,user_agent:$('#ns-ua').value});$('#ns-name').value=$('#ns-url').value=$('#ns-ua').value='';await loadSources();}catch(e){msg(e.message,'err');}}
+async function delSrc(id){if(!confirm('删除该源?'))return;await api('DELETE','/api/sources/'+id);await loadSources();}
+async function refreshSrc(id){msg('刷新中…');try{const r=await api('POST','/api/sources/'+id+'/refresh');msg(r.ok?'刷新成功':'刷新失败: '+(r.error||''),r.ok?'ok':'err');}catch(e){msg(e.message,'err');}await loadSources();}
+async function toggleSrc(id,enabled){const s=SOURCES.find(x=>x.id===id);if(!s)return;try{await api('PUT','/api/sources/'+id,{name:s.name,url:s.url,user_agent:s.user_agent,enabled,sort_order:s.sort_order});}catch(e){msg(e.message,'err');}await loadSources();}
+
+async function loadOverride(){const o=await api('GET','/api/override');$('#ov').value=o.content||'';}
+async function saveOverride(){try{await api('PUT','/api/override',{content:$('#ov').value});msg('覆盖已保存','ok');}catch(e){msg(e.message,'err');}}
+
+async function loadSettings(){
+ const s=await api('GET','/api/settings');
+ $('#set-base').value=s.base_url||'';
+ $('#set-interval').value=s.fetch_interval_sec||'';
+ $('#sub-url').textContent=s.sub_url||(location.origin+'/sub/'+s.output_token);
+}
+async function saveSettings(){try{await api('PUT','/api/settings',{base_url:$('#set-base').value,fetch_interval_sec:parseInt($('#set-interval').value)||0});msg('设置已保存','ok');await loadSettings();}catch(e){msg(e.message,'err');}}
+async function resetToken(){if(!confirm('重置 token?旧订阅链接将失效'))return;await api('POST','/api/settings/reset-token');await loadSettings();msg('token 已重置','ok');}
+function copySub(){navigator.clipboard.writeText($('#sub-url').textContent);msg('已复制','ok');}
+
+boot();
+</script>
+</body>
+</html>
