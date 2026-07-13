@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"submux/internal/store"
 )
@@ -14,7 +15,7 @@ func TestRunOnceFetchesOnlyEnabled(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
-		w.Write([]byte("proxies: []\n"))
+		w.Write([]byte("proxies:\n  - {name: A, type: vless, server: example.com, port: 443, uuid: id}\n"))
 	}))
 	defer srv.Close()
 
@@ -41,7 +42,7 @@ func TestRunOnceFetchesOnlyEnabled(t *testing.T) {
 func TestRunOnceContinuesAfterOneError(t *testing.T) {
 	st := newTestStore(t)
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("proxies: []\n"))
+		w.Write([]byte("proxies:\n  - {name: A, type: vless, server: example.com, port: 443, uuid: id}\n"))
 	}))
 	defer good.Close()
 	badID, _ := st.CreateSource(store.Source{Name: "bad", URL: "http://127.0.0.1:1/nope"})
@@ -57,5 +58,40 @@ func TestRunOnceContinuesAfterOneError(t *testing.T) {
 	gc, err := st.GetCache(goodID)
 	if err != nil || gc.Raw == "" {
 		t.Fatalf("good source should still be fetched: %v %+v", err, gc)
+	}
+}
+
+func TestLoopAppliesChangedIntervalImmediately(t *testing.T) {
+	var hits int32
+	hit := make(chan struct{}, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		select {
+		case hit <- struct{}{}:
+		default:
+		}
+		w.Write([]byte("proxies:\n  - {name: A, type: vless, server: example.com, port: 443, uuid: id}\n"))
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	_, _ = st.CreateSource(store.Source{Name: "A", URL: srv.URL})
+	st.SetSetting("fetch_interval_sec", "3600")
+	f := NewFetcher(st)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.Loop(ctx, time.Hour)
+
+	select {
+	case <-hit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("initial fetch did not run")
+	}
+	st.SetSetting("fetch_interval_sec", "1")
+	f.NotifyIntervalChanged()
+	select {
+	case <-hit:
+	case <-time.After(2500 * time.Millisecond):
+		t.Fatalf("changed interval was not applied; hits=%d", atomic.LoadInt32(&hits))
 	}
 }

@@ -8,7 +8,8 @@ submux 自身不跑代理,只做「订阅加工厂」:输入多个订阅 → 合
 
 - **多源合并**:去重、加来源前缀(`[源名] 节点名`)
 - **声明式覆盖**(Merge YAML:`prepend-`/`append-`/深合并),无需脚本引擎
-- **按 UA 多格式输出**:Clash YAML / Base64(sing-box 规划中)
+- **按 UA 多格式输出**:Clash YAML / 严格 Base64(vless、vmess、trojan、ss、hysteria2;sing-box 规划中)
+- **多种上游格式**:Clash YAML / 明文分享链接 / Base64 分享链接订阅
 - **上游拉取缓存**:解耦「客户端拉取频率」与「上游拉取频率」,避免机场限流;上游失败时用上次缓存降级
 - **Web 控制台 + 鉴权**(登录 + 订阅 token)
 - **聚合 `Subscription-Userinfo`**:汇总各源流量与到期
@@ -31,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/insta
 CGO_ENABLED=0 go build -o submux ./cmd/submux
 ```
 
-纯 Go(`modernc.org/sqlite`,免 cgo),可交叉编译为各平台单文件。
+纯 Go(`bbolt`,免 cgo),可交叉编译为各平台单文件。
 
 ## 运行
 
@@ -43,9 +44,11 @@ SUBMUX_DB=submux.db ./submux
 
 ## 使用
 
-1. 控制台「订阅源」添加机场订阅(填 URL,UA 可留空),点「刷新」拉取。
+1. 控制台「订阅源」添加机场订阅(支持 Clash YAML 或常见分享链接订阅;UA 可留空),点「刷新」拉取。
 2. 「覆盖配置」写 Merge YAML(见下)。
 3. 「订阅输出」复制订阅 URL,导入 mihomo / clash 等客户端;不同客户端按 UA 自动得到合适格式。
+
+UA 识别采用安全默认值:`clash` / `mihomo` / `meta` 返回 Clash YAML;`v2rayN` / `v2rayNG` / `NekoBox` / `Hiddify` 返回 Base64;未知 UA 和尚无专用适配器的客户端回退 `default_format`。Base64 转换遇到不支持的协议或无法无损表达的传输选项时会整体失败并使用对应格式的 last-good,不会静默丢节点。协议兼容边界见 [`docs/PROTOCOLS.md`](docs/PROTOCOLS.md)。
 
 ### 覆盖 YAML 示例
 
@@ -100,7 +103,7 @@ WantedBy=multi-user.target
 |----|------|------|
 | `listen_addr` | `127.0.0.1:8080` | 监听地址(重启生效) |
 | `base_url` | (空) | 生成订阅 URL 的外部地址 |
-| `fetch_interval_sec` | `10800` | 后台拉取上游间隔(秒) |
+| `fetch_interval_sec` | `10800` | 后台拉取上游间隔(60–604800 秒,保存后立即生效) |
 | `output_update_interval_hours` | `24` | 输出给客户端的 `Profile-Update-Interval` |
 | `output_token` | (随机) | 订阅 URL token,可一键重置 |
 
@@ -109,9 +112,10 @@ WantedBy=multi-user.target
 - 密码 bcrypt 哈希;会话 HMAC 签名 cookie(`HttpOnly` + `SameSite`)
 - 订阅 token 常量时间比较;重置后旧链接立即失效
 - 覆盖为纯数据合并,无脚本执行,无注入面
+- 上游响应限制为 10 MiB;空订阅或不可解析订阅不会覆盖上次成功缓存
 
 ## Roadmap
 
-sing-box 适配器、多 profile、本机内核管控(旁路由 / TUN)、base64 支持 vmess/trojan/ss。
+sing-box 适配器、多 profile、本机内核管控(旁路由 / TUN)、TUIC 分享链接支持。
 
 设计文档见 [`docs/DESIGN.md`](docs/DESIGN.md)。

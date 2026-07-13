@@ -78,7 +78,7 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue // 该源还没有缓存
 		}
-		nodes, err := parse.ParseClash(c.Raw)
+		nodes, err := parse.ParseSubscription(c.Raw)
 		if err != nil || len(nodes) == 0 {
 			continue
 		}
@@ -127,7 +127,7 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveLastGoodOr(w http.ResponseWriter, format, reason string) {
 	reason = strings.ReplaceAll(strings.ReplaceAll(reason, "\n", " "), "\r", " ")
 	if lg, err := s.store.GetLastGood(format); err == nil && len(lg) > 0 {
-		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+		w.Header().Set("Content-Type", output.ContentType(format))
 		w.Header().Set("Content-Disposition", "attachment; filename=submux")
 		w.Header().Set("X-Submux-Degraded", reason)
 		_, _ = w.Write(lg)

@@ -33,10 +33,15 @@ func ParseClash(raw string) ([]Node, error) {
 		return nil, fmt.Errorf("proxies is not a list")
 	}
 	var nodes []Node
-	for _, item := range list {
+	for i, item := range list {
 		m, ok := item.(map[string]any)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("proxy %d is not an object", i)
+		}
+		name, nameOK := m["name"].(string)
+		kind, typeOK := m["type"].(string)
+		if !nameOK || name == "" || !typeOK || kind == "" {
+			return nil, fmt.Errorf("proxy %d is missing name or type", i)
 		}
 		nodes = append(nodes, Node(m))
 	}

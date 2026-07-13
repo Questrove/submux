@@ -8,18 +8,23 @@ import (
 	"net/http"
 	"time"
 
+	"submux/internal/parse"
 	"submux/internal/store"
 )
 
+const maxUpstreamBytes = 10 << 20
+
 type Fetcher struct {
-	store  *store.Store
-	client *http.Client
+	store           *store.Store
+	client          *http.Client
+	intervalChanged chan struct{}
 }
 
 func NewFetcher(s *store.Store) *Fetcher {
 	return &Fetcher{
-		store:  s,
-		client: &http.Client{Timeout: 30 * time.Second},
+		store:           s,
+		client:          &http.Client{Timeout: 30 * time.Second},
+		intervalChanged: make(chan struct{}, 1),
 	}
 }
 
@@ -30,8 +35,20 @@ func (f *Fetcher) FetchOne(ctx context.Context, src store.Source) error {
 		_ = f.store.UpsertCacheError(src.ID, err.Error())
 		return err
 	}
-	// M1:节点解析在 M2 引入,这里 nodes_json 先存空数组。
-	if err := f.store.UpsertCacheSuccess(src.ID, raw, "[]", userinfoJSON); err != nil {
+	nodes, err := parse.ParseSubscription(raw)
+	if err != nil || len(nodes) == 0 {
+		if err == nil {
+			err = fmt.Errorf("subscription contains no nodes")
+		}
+		_ = f.store.UpsertCacheError(src.ID, err.Error())
+		return err
+	}
+	nodesJSON, err := json.Marshal(nodes)
+	if err != nil {
+		_ = f.store.UpsertCacheError(src.ID, err.Error())
+		return err
+	}
+	if err := f.store.UpsertCacheSuccess(src.ID, raw, string(nodesJSON), userinfoJSON); err != nil {
 		return err
 	}
 	return nil
@@ -51,9 +68,12 @@ func (f *Fetcher) download(ctx context.Context, src store.Source) (raw, userinfo
 	if resp.StatusCode != http.StatusOK {
 		return "", "", fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBytes+1))
 	if err != nil {
 		return "", "", err
+	}
+	if len(body) > maxUpstreamBytes {
+		return "", "", fmt.Errorf("upstream body exceeds %d bytes", maxUpstreamBytes)
 	}
 	uiJSON := ""
 	if u, ok := ParseUserinfo(resp.Header.Get("Subscription-Userinfo")); ok {
@@ -85,17 +105,49 @@ func (f *Fetcher) RunOnce(ctx context.Context) error {
 	return nil
 }
 
-// Loop 立即跑一次,然后每 interval 跑一次,直到 ctx 取消。
-func (f *Fetcher) Loop(ctx context.Context, interval time.Duration) {
+// NotifyIntervalChanged 让后台循环立即重新读取拉取间隔。
+func (f *Fetcher) NotifyIntervalChanged() {
+	select {
+	case f.intervalChanged <- struct{}{}:
+	default:
+	}
+}
+
+// Loop 立即跑一次,然后按可动态更新的间隔运行,直到 ctx 取消。
+func (f *Fetcher) Loop(ctx context.Context, fallback time.Duration) {
 	_ = f.RunOnce(ctx)
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(f.currentInterval(fallback))
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-timer.C:
 			_ = f.RunOnce(ctx)
+			resetTimer(timer, f.currentInterval(fallback))
+		case <-f.intervalChanged:
+			resetTimer(timer, f.currentInterval(fallback))
 		}
 	}
+}
+
+func (f *Fetcher) currentInterval(fallback time.Duration) time.Duration {
+	seconds, err := f.store.GetSettingInt("fetch_interval_sec", int(fallback/time.Second))
+	if err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if fallback <= 0 {
+		return 3 * time.Hour
+	}
+	return fallback
+}
+
+func resetTimer(timer *time.Timer, d time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(d)
 }

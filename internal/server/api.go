@@ -5,12 +5,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 
+	"submux/internal/override"
 	"submux/internal/store"
+)
+
+const (
+	minFetchIntervalSec = 60
+	maxFetchIntervalSec = 7 * 24 * 60 * 60
 )
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -66,8 +73,14 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Name, URL, UserAgent string
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Name == "" || body.URL == "" {
-		http.Error(w, "name and url required", http.StatusBadRequest)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	body.Name = strings.TrimSpace(body.Name)
+	body.URL = strings.TrimSpace(body.URL)
+	if body.Name == "" || !validHTTPURL(body.URL) {
+		http.Error(w, "name and valid http(s) url required", http.StatusBadRequest)
 		return
 	}
 	id, err := s.store.CreateSource(store.Source{Name: body.Name, URL: body.URL, UserAgent: body.UserAgent})
@@ -91,6 +104,12 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	body.Name = strings.TrimSpace(body.Name)
+	body.URL = strings.TrimSpace(body.URL)
+	if body.Name == "" || !validHTTPURL(body.URL) {
+		http.Error(w, "name and valid http(s) url required", http.StatusBadRequest)
 		return
 	}
 	src := store.Source{
@@ -151,6 +170,10 @@ func (s *Server) handlePutOverride(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if _, err := override.Apply(map[string]any{}, body.Content); err != nil {
+		http.Error(w, "invalid override yaml: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	if err := s.store.SetOverride(body.Content); err != nil {
 		http.Error(w, "save failed", http.StatusInternalServerError)
 		return
@@ -183,15 +206,41 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	s.store.SetSetting("base_url", body.BaseURL)
+	body.BaseURL = strings.TrimRight(strings.TrimSpace(body.BaseURL), "/")
+	if body.BaseURL != "" && !validHTTPURL(body.BaseURL) {
+		http.Error(w, "base_url must be an absolute http(s) url", http.StatusBadRequest)
+		return
+	}
+	if body.FetchIntervalSec != 0 && (body.FetchIntervalSec < minFetchIntervalSec || body.FetchIntervalSec > maxFetchIntervalSec) {
+		http.Error(w, "fetch_interval_sec must be between 60 and 604800", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.SetSetting("base_url", body.BaseURL); err != nil {
+		http.Error(w, "save failed", http.StatusInternalServerError)
+		return
+	}
 	if body.FetchIntervalSec > 0 {
-		s.store.SetSetting("fetch_interval_sec", strconv.Itoa(body.FetchIntervalSec))
+		if err := s.store.SetSetting("fetch_interval_sec", strconv.Itoa(body.FetchIntervalSec)); err != nil {
+			http.Error(w, "save failed", http.StatusInternalServerError)
+			return
+		}
+		if s.fetcher != nil {
+			s.fetcher.NotifyIntervalChanged()
+		}
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) handleResetToken(w http.ResponseWriter, r *http.Request) {
 	tok := randomHex(24)
-	s.store.SetSetting("output_token", tok)
+	if err := s.store.SetSetting("output_token", tok); err != nil {
+		http.Error(w, "reset failed", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{"output_token": tok})
+}
+
+func validHTTPURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
 }

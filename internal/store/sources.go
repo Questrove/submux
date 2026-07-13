@@ -85,9 +85,15 @@ func (s *Store) listSources(enabledOnly bool) ([]Source, error) {
 func (s *Store) UpdateSource(src Source) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("sources"))
-		if b.Get(itob(src.ID)) == nil {
+		current := b.Get(itob(src.ID))
+		if current == nil {
 			return fmt.Errorf("no source with id %d", src.ID)
 		}
+		var old Source
+		if err := json.Unmarshal(current, &old); err != nil {
+			return err
+		}
+		src.CreatedAt = old.CreatedAt
 		src.UserAgent = defStr(src.UserAgent, "clash-verge/v2.0.0")
 		src.UpdatedAt = nowRFC3339()
 		buf, e := json.Marshal(src)
