@@ -10,8 +10,10 @@ func SelectByUA(ua, defaultFormat string) Adapter {
 		return ClashAdapter{}
 	case strings.Contains(l, "sing-box"), strings.Contains(l, "sing_box"):
 		return byName(defaultFormat) // sing-box 适配器属二期,暂回退默认
-	default:
+	case strings.Contains(l, "v2rayn"), strings.Contains(l, "v2rayng"), strings.Contains(l, "nekobox"), strings.Contains(l, "hiddify"):
 		return Base64Adapter{}
+	default:
+		return byName(defaultFormat)
 	}
 }
 

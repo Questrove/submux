@@ -53,3 +53,10 @@ func TestParseClashInvalid(t *testing.T) {
 		t.Fatalf("expected error for invalid yaml")
 	}
 }
+
+func TestParseClashRejectsMalformedProxyInsteadOfPartialResult(t *testing.T) {
+	raw := "proxies:\n  - {name: valid, type: vless, server: example.com, port: 443, uuid: id}\n  - not-an-object\n"
+	if nodes, err := ParseClash(raw); err == nil || len(nodes) != 0 {
+		t.Fatalf("want strict proxy validation, got nodes=%#v err=%v", nodes, err)
+	}
+}

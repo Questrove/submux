@@ -37,8 +37,8 @@ submux 是一个**订阅聚合 / 配置编排服务**(subscription multiplexer):
 | 模块 | 包 | 职责 |
 |------|-----|------|
 | A HTTP 层 | `internal/server` | 路由、登录鉴权、`/sub/{token}` 输出端点 |
-| B 源管理 + 拉取 | `internal/source` | 源 CRUD;后台定时拉原文 → 解析 → 写缓存;手动刷新;拉失败降级 |
-| C 解析 + 合并 | `internal/parse`, `internal/merge` | 解析上游(clash yaml)→ 节点;合并多源 → clash 主模型(去重、来源前缀) |
+| B 源管理 + 拉取 | `internal/source` | 源 CRUD;后台定时拉原文 → 校验解析 → 写缓存;手动刷新;拉失败降级;10 MiB 响应上限 |
+| C 解析 + 合并 | `internal/parse`, `internal/merge` | 解析 Clash YAML / 明文或 Base64 分享链接(vless、vmess、trojan、ss、hysteria2)→ 节点;合并多源 → clash 主模型(按协议连接身份去重、来源前缀) |
 | D 覆盖引擎 | `internal/override` | 把 Merge YAML 按约定合并进主模型 |
 | E 输出适配器 | `internal/output` | `Render(主模型) → (bytes, contentType)`;UA 分发;Clash / Base64 适配器 |
 | F 存储 | `internal/store` | bbolt:源、覆盖、设置、缓存 |
@@ -90,17 +90,19 @@ tun:
 **输出请求 `GET /sub/{token}`**:
 1. 校验 token(常量时间比较),失败 → 401
 2. 读所有 enabled 源的缓存节点;全部为空 → 503
-3. **合并**:节点去重(server+port+uuid)、加来源前缀(`[源名] 节点名`)、组装 clash 主模型
+3. **合并**:按协议、端点、凭据、传输和协议选项组成的连接身份去重,加来源前缀(`[源名] 节点名`),组装 clash 主模型
 4. **覆盖**:把 Merge YAML 合并进主模型
-5. **UA 分发**:`clash`/`mihomo`/`meta` → Clash;`sing-box` → 回退默认(二期);其它 → Base64
+5. **UA 分发**:`clash`/`mihomo`/`meta` → Clash;`v2rayN`/`v2rayNG`/`NekoBox`/`Hiddify` → Base64;未知 UA 与 `sing-box` → `default_format`
 6. **渲染** → 返回,设响应头:`Subscription-Userinfo`(各源聚合)、`Content-Disposition`、`Profile-Update-Interval`
 
-**后台定时拉取**:每 `fetch_interval_sec` 对每个 enabled 源带其 UA 拉原文 → 解析 → 写缓存;失败只写 `last_error`、保留上次结果(stale-while-error)。**请求路径只读缓存,永不主动拉上游。**
+**后台定时拉取**:每 `fetch_interval_sec` 对每个 enabled 源带其 UA 拉原文 → 限制响应大小 → 解析校验 → 写缓存;失败只写 `last_error`、保留上次结果(stale-while-error)。修改间隔后后台计时器立即重置。**请求路径只读缓存,永不主动拉上游。**
 
 ## 错误处理与安全
 
 - **上游拉取失败**:用上次缓存降级,控制台标红显示错误与上次成功时间
+- **输入边界**:只接受 HTTP(S) 上游;响应最大 10 MiB;空订阅、不可解析订阅与不合法控制台配置在写入前失败
 - **覆盖 / 渲染失败**:**绝不输出未覆盖的配置**(否则本该 DIRECT 的流量可能误走代理);返回上次成功输出 + 控制台报错,无则 503
+- **格式转换边界**:Clash 主模型保留上游全部节点字段;Base64 是兼容输出,只转换 `docs/PROTOCOLS.md` 明确支持的协议和传输组合。任一节点不能无损表达即整体失败,禁止部分输出
 - **鉴权**:密码 bcrypt 哈希;HMAC 签名 session cookie(`HttpOnly` + `SameSite`);输出 token 常量时间比较、可重置
 - **部署**:默认监听 `127.0.0.1`;对外务必配反向代理 + HTTPS,订阅 URL 必须走 HTTPS 防 token 被窃
 
@@ -109,5 +111,5 @@ tun:
 - sing-box 输出适配器
 - 多 profile(不同源组合 / 覆盖 / token)
 - 本机 mihomo 内核管控(旁路由 / TUN)
-- base64 支持 vmess / trojan / ss
+- TUIC 分享链接支持
 - 覆盖编辑器换 CodeMirror

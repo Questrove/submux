@@ -129,7 +129,7 @@ func TestHandleSubDegradesOnBadOverride(t *testing.T) {
 	}
 }
 
-func TestHandleSubBase64ForUnknownUA(t *testing.T) {
+func TestHandleSubBase64ForKnownGenericClient(t *testing.T) {
 	st := newTestStore(t)
 	st.SetSetting("output_token", "secret123")
 	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
@@ -141,7 +141,7 @@ func TestHandleSubBase64ForUnknownUA(t *testing.T) {
 	defer srv.Close()
 
 	req, _ := http.NewRequest("GET", srv.URL+"/sub/secret123", nil)
-	req.Header.Set("User-Agent", "Mozilla/5.0")
+	req.Header.Set("User-Agent", "v2rayN/7.0")
 	resp := mustDo(t, http.DefaultClient, req)
 	defer resp.Body.Close()
 	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
@@ -169,5 +169,43 @@ func TestHandleSubClashForClashUA(t *testing.T) {
 	defer resp.Body.Close()
 	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "yaml") {
 		t.Fatalf("clash UA should get yaml, got %q", ct)
+	}
+}
+
+func TestHandleSubRejectsEmptyBase64Output(t *testing.T) {
+	st := newTestStore(t)
+	st.SetSetting("output_token", "secret123")
+	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
+	st.UpsertCacheSuccess(id,
+		"proxies:\n  - {name: TUIC, type: tuic, server: example.com, port: 443, password: p}\n",
+		"[]", "")
+
+	srv := httptest.NewServer(newTestServerHandler(st))
+	defer srv.Close()
+	req, _ := http.NewRequest("GET", srv.URL+"/sub/secret123", nil)
+	req.Header.Set("User-Agent", "v2rayN/7.0")
+	resp := mustDo(t, http.DefaultClient, req)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("want 503, got %d", resp.StatusCode)
+	}
+}
+
+func TestHandleSubBase64DegradedContentType(t *testing.T) {
+	st := newTestStore(t)
+	st.SetSetting("output_token", "secret123")
+	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
+	st.UpsertCacheSuccess(id,
+		"proxies:\n  - {name: VL, type: vless, server: example.com, port: 443, uuid: id}\n",
+		"[]", "")
+	st.SetLastGood("base64", []byte("bGFzdC1nb29k"))
+	st.SetOverride("\tnot: : valid")
+
+	srv := httptest.NewServer(newTestServerHandler(st))
+	defer srv.Close()
+	resp := mustGet(t, http.DefaultClient, srv.URL+"/sub/secret123")
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
+		t.Fatalf("degraded base64 content-type wrong: %q", ct)
 	}
 }

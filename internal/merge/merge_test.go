@@ -53,3 +53,23 @@ func TestMergeDedup(t *testing.T) {
 		t.Fatalf("dedup failed, got %d proxies", len(proxies))
 	}
 }
+
+func TestMergeDoesNotDedupDifferentCredentials(t *testing.T) {
+	sources := []SourceNodes{{SourceName: "AirA", Nodes: []parse.Node{
+		{"name": "SS-1", "type": "ss", "server": "1.1.1.1", "port": 443, "password": "a"},
+		{"name": "SS-2", "type": "ss", "server": "1.1.1.1", "port": 443, "password": "b"},
+	}}}
+	if got := len(Merge(sources)["proxies"].([]any)); got != 2 {
+		t.Fatalf("different credentials must not be deduplicated, got %d", got)
+	}
+}
+
+func TestMergeDoesNotDedupDifferentHysteria2PortSets(t *testing.T) {
+	sources := []SourceNodes{{SourceName: "AirA", Nodes: []parse.Node{
+		{"name": "HY-1", "type": "hysteria2", "server": "hy.example.com", "port": 443, "password": "p", "ports": "20000:30000"},
+		{"name": "HY-2", "type": "hysteria2", "server": "hy.example.com", "port": 443, "password": "p", "ports": "30001:40000"},
+	}}}
+	if got := len(Merge(sources)["proxies"].([]any)); got != 2 {
+		t.Fatalf("different port sets must not be deduplicated, got %d", got)
+	}
+}

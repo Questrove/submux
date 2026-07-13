@@ -114,3 +114,33 @@ func TestOverrideAndSettingsAPI(t *testing.T) {
 		t.Fatalf("sub_url wrong: %q", s2.SubURL)
 	}
 }
+
+func TestAPIRejectsInvalidConfiguration(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
+	defer srv.Close()
+	c := initAndClient(t, srv)
+
+	badSource := mustPost(t, c, srv.URL+"/api/sources", `{"name":"local","url":"file:///etc/passwd"}`)
+	badSource.Body.Close()
+	if badSource.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid source url: want 400, got %d", badSource.StatusCode)
+	}
+
+	req, _ := http.NewRequest("PUT", srv.URL+"/api/settings",
+		strings.NewReader(`{"base_url":"javascript:alert(1)","fetch_interval_sec":10}`))
+	req.Header.Set("Content-Type", "application/json")
+	badSettings := mustDo(t, c, req)
+	badSettings.Body.Close()
+	if badSettings.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid settings: want 400, got %d", badSettings.StatusCode)
+	}
+
+	req, _ = http.NewRequest("PUT", srv.URL+"/api/override", strings.NewReader(`{"content":"\tnot: : valid"}`))
+	req.Header.Set("Content-Type", "application/json")
+	badOverride := mustDo(t, c, req)
+	badOverride.Body.Close()
+	if badOverride.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid override: want 400, got %d", badOverride.StatusCode)
+	}
+}

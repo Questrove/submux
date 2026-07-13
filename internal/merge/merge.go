@@ -1,7 +1,9 @@
 package merge
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"submux/internal/parse"
 )
@@ -17,7 +19,7 @@ type SourceNodes struct {
 
 // Merge 把多源节点合并成一个 clash 主模型:
 //   - 节点名加来源前缀 "[源名] 原名"
-//   - 按 server+port+uuid 去重(保留首次出现)
+//   - 按协议连接身份去重(保留首次出现)
 //   - 组装基础 proxy-group(select,含全部节点 + DIRECT)与基础 rules
 func Merge(sources []SourceNodes) Config {
 	proxies := []any{}
@@ -62,7 +64,22 @@ func Merge(sources []SourceNodes) Config {
 }
 
 func dedupKey(n parse.Node) string {
-	return fmt.Sprintf("%v|%v|%v", n["server"], n["port"], n["uuid"])
+	// 名称只是展示信息；其余字段均可能改变连接语义。宁可少去重，也不能把
+	// 同一端点上不同传输、端口集、凭据或安全参数的节点错误折叠。
+	identity := make(map[string]any, len(n)-1)
+	for key, value := range n {
+		if key != "name" {
+			identity[key] = value
+		}
+	}
+	if kind, ok := identity["type"].(string); ok {
+		identity["type"] = strings.ToLower(kind)
+	}
+	b, err := json.Marshal(identity)
+	if err != nil {
+		return fmt.Sprintf("%#v", identity)
+	}
+	return string(b)
 }
 
 func cloneNode(n parse.Node) parse.Node {

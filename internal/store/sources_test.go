@@ -47,6 +47,14 @@ func TestSourcesCRUD(t *testing.T) {
 	if reread.Name != "A2" {
 		t.Fatalf("update not persisted: %q", reread.Name)
 	}
+	createdAt := reread.CreatedAt
+	if err := s.UpdateSource(Source{ID: id, Name: "A3", URL: "http://a", Enabled: true}); err != nil {
+		t.Fatalf("minimal UpdateSource: %v", err)
+	}
+	reread, _ = s.GetSource(id)
+	if reread.CreatedAt != createdAt {
+		t.Fatalf("created_at changed during update: %q -> %q", createdAt, reread.CreatedAt)
+	}
 
 	// SetSourceEnabled + ListEnabledSources
 	if err := s.SetSourceEnabled(id, false); err != nil {

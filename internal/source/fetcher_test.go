@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"submux/internal/store"
@@ -25,7 +26,7 @@ func TestFetchOneSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotUA = r.Header.Get("User-Agent")
 		w.Header().Set("Subscription-Userinfo", "upload=1; download=2; total=3; expire=4")
-		w.Write([]byte("proxies: []\n"))
+		w.Write([]byte("proxies:\n  - {name: A, type: vless, server: example.com, port: 443, uuid: id}\n"))
 	}))
 	defer srv.Close()
 
@@ -41,10 +42,10 @@ func TestFetchOneSuccess(t *testing.T) {
 		t.Fatalf("UA not sent, got %q", gotUA)
 	}
 	c, _ := st.GetCache(id)
-	if c.Raw != "proxies: []\n" {
+	if !strings.Contains(c.Raw, "type: vless") {
 		t.Fatalf("raw not cached: %q", c.Raw)
 	}
-	if c.UserinfoJSON == "" || c.LastError != "" {
+	if c.UserinfoJSON == "" || c.NodesJSON == "" || c.NodesJSON == "[]" || c.LastError != "" {
 		t.Fatalf("cache markers wrong: %+v", c)
 	}
 }
@@ -67,5 +68,39 @@ func TestFetchOneHTTPErrorIsStored(t *testing.T) {
 	c, _ := st.GetCache(id)
 	if c.LastError == "" {
 		t.Fatalf("last_error not recorded")
+	}
+}
+
+func TestFetchOneInvalidPayloadKeepsLastGoodCache(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("not a subscription"))
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	id, _ := st.CreateSource(store.Source{Name: "A", URL: srv.URL})
+	st.UpsertCacheSuccess(id, "old raw", `[{"name":"old"}]`, "old userinfo")
+	src, _ := st.GetSource(id)
+
+	if err := NewFetcher(st).FetchOne(context.Background(), src); err == nil {
+		t.Fatalf("expected invalid subscription error")
+	}
+	c, _ := st.GetCache(id)
+	if c.Raw != "old raw" || c.NodesJSON != `[{"name":"old"}]` || c.UserinfoJSON != "old userinfo" || c.LastError == "" {
+		t.Fatalf("last-good cache was not preserved: %+v", c)
+	}
+}
+
+func TestFetchOneRejectsOversizedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", maxUpstreamBytes+1)))
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	id, _ := st.CreateSource(store.Source{Name: "A", URL: srv.URL})
+	src, _ := st.GetSource(id)
+	if err := NewFetcher(st).FetchOne(context.Background(), src); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("want size error, got %v", err)
 	}
 }
