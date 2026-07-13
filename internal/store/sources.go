@@ -19,8 +19,14 @@ func (s *Store) CreateSource(src Source) (int64, error) {
 		}
 		id = int64(seq)
 		src.ID = id
+		src.Kind = defStr(src.Kind, SourceKindSubscription)
 		src.Enabled = true // M1:新建源默认启用;停用走 SetSourceEnabled
-		src.UserAgent = defStr(src.UserAgent, "clash-verge/v2.0.0")
+		if src.Kind == SourceKindSubscription {
+			src.UserAgent = defStr(src.UserAgent, "clash-verge/v2.0.0")
+		} else {
+			src.URL = ""
+			src.UserAgent = ""
+		}
 		src.CreatedAt = now
 		src.UpdatedAt = now
 		buf, e := json.Marshal(src)
@@ -94,7 +100,14 @@ func (s *Store) UpdateSource(src Source) error {
 			return err
 		}
 		src.CreatedAt = old.CreatedAt
-		src.UserAgent = defStr(src.UserAgent, "clash-verge/v2.0.0")
+		src.Kind = defStr(src.Kind, old.Kind)
+		src.Kind = defStr(src.Kind, SourceKindSubscription)
+		if src.Kind == SourceKindSubscription {
+			src.UserAgent = defStr(src.UserAgent, "clash-verge/v2.0.0")
+		} else {
+			src.URL = ""
+			src.UserAgent = ""
+		}
 		src.UpdatedAt = nowRFC3339()
 		buf, e := json.Marshal(src)
 		if e != nil {
@@ -134,7 +147,29 @@ func (s *Store) DeleteSource(id int64) error {
 		if e := b.Delete(itob(id)); e != nil {
 			return e
 		}
-		// 级联删除该源缓存
-		return tx.Bucket([]byte("source_cache")).Delete(itob(id))
+		if e := tx.Bucket([]byte("source_cache")).Delete(itob(id)); e != nil {
+			return e
+		}
+		// 级联删除该来源的规范化节点。
+		nodes := tx.Bucket([]byte("nodes"))
+		var keys [][]byte
+		if e := nodes.ForEach(func(k, v []byte) error {
+			var node NodeRecord
+			if err := json.Unmarshal(v, &node); err != nil {
+				return err
+			}
+			if node.SourceID == id {
+				keys = append(keys, append([]byte(nil), k...))
+			}
+			return nil
+		}); e != nil {
+			return e
+		}
+		for _, key := range keys {
+			if e := nodes.Delete(key); e != nil {
+				return e
+			}
+		}
+		return nil
 	})
 }

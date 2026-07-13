@@ -1,75 +1,74 @@
 # submux
 
-订阅聚合 / 配置编排服务(subscription multiplexer)。合并多个 Clash 订阅源,应用声明式 Merge YAML 覆盖,按客户端 UA 输出多格式订阅。**Go 单二进制,无运行时依赖。**
+submux 是一个 **Mihomo / sing-box 配置编排服务**。它从机场订阅和手工输入中建立统一节点库，再把 NodeSet 注入平台维护的完整配置模板，生成固定引擎、固定策略、可分享的 Profile 订阅链接。
 
-submux 自身不跑代理,只做「订阅加工厂」:输入多个订阅 → 合并 + 覆盖 → 输出一个聚合订阅 URL 给各客户端。
+submux 不运行代理内核，也不沿用机场的策略组、规则或 DNS 配置。机场只提供节点；最终行为完全由你在平台上的模板决定。
 
-## 特性
+## v2 工作流
 
-- **多源合并**:去重、加来源前缀(`[源名] 节点名`)
-- **声明式覆盖**(Merge YAML:`prepend-`/`append-`/深合并),无需脚本引擎
-- **按 UA 多格式输出**:Clash YAML / 严格 Base64(vless、vmess、trojan、ss、hysteria2;sing-box 规划中)
-- **多种上游格式**:Clash YAML / 明文分享链接 / Base64 分享链接订阅
-- **上游拉取缓存**:解耦「客户端拉取频率」与「上游拉取频率」,避免机场限流;上游失败时用上次缓存降级
-- **Web 控制台 + 鉴权**(登录 + 订阅 token)
-- **聚合 `Subscription-Userinfo`**:汇总各源流量与到期
+```text
+机场订阅 ─刷新─┐
+              ├─> 规范化节点库 ─> NodeSet ─┐
+手工分享链接 ─┘                            ├─> Profile ─> /sub/{profile-token}
+完整配置模板 ─> 不可变模板版本 ────────────┘
+```
 
-## 一键安装(Linux / macOS)
+1. 添加机场订阅来源，或创建手工来源并导入节点。
+2. 用来源、指定节点、协议、名称与标签组成可复用 NodeSet。
+3. 选择平台预置或自行维护的 Mihomo / sing-box 模板版本。
+4. 把模板插槽绑定到 NodeSet，创建 Profile。
+5. 把该 Profile 的独立订阅链接交给对应内核。
+
+这是破坏式 v2：旧的全局订阅 token、Merge Override、按 User-Agent 猜输出格式和 Base64 输出均已删除，旧 `/sub/{token}` 不兼容。
+
+## 主要能力
+
+- 机场订阅定时刷新，支持 Mihomo YAML、明文分享链接和 Base64 分享链接订阅。
+- 手工导入 VLESS、VMess、Trojan、Shadowsocks、Hysteria2 节点。
+- 节点语义指纹去重；机场改名后仍保留本地 Alias、标签、启用状态和节点 ID。
+- NodeSet 动态选择来源与节点，并支持协议、名称、标签过滤和显式排除。
+- Mihomo YAML 与 sing-box JSON 双编译器；无法无损转换时整体失败，不静默丢字段或节点。
+- 模板版本发布后不可变；Profile 固定某个版本，不会随模板更新发生隐式变化。
+- 每个 Profile 独立 token、启用状态、可选到期时间和预编译产物。
+- 编译失败保留该 Profile 的 last-good 产物，并通过 `X-Submux-Degraded` 暴露错误。
+- 首次启动预置 Mihomo 桌面/网关、sing-box 桌面/服务器四套模板。
+- Go 单二进制、内嵌控制台、bbolt 单文件存储，无 CGO 依赖。
+
+协议边界和依据见 [docs/PROTOCOLS.md](docs/PROTOCOLS.md)，领域模型与发布语义见 [docs/DESIGN.md](docs/DESIGN.md)。
+
+## 构建与运行
+
+```sh
+CGO_ENABLED=0 go build -o submux ./cmd/submux
+SUBMUX_DB=submux.db ./submux
+```
+
+默认监听 `127.0.0.1:8080`。首次打开 <http://127.0.0.1:8080> 设置管理员密码，然后按控制台的五步工作流创建 Profile。
+
+Linux / macOS 安装：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash
 ```
 
-装好后 `submux` 即在 PATH 中。带 systemd 服务(Linux):
+安装 systemd 服务：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --service
 ```
 
-## 构建
+## 配置
 
-```sh
-CGO_ENABLED=0 go build -o submux ./cmd/submux
-```
+| 项 | 默认值 | 说明 |
+|---|---:|---|
+| `SUBMUX_DB` | `submux.db` | bbolt 数据文件路径 |
+| `listen_addr` | `127.0.0.1:8080` | 监听地址（数据库设置，重启生效） |
+| `base_url` | 空 | 控制台生成 Profile 外部链接时使用 |
+| `fetch_interval_sec` | `10800` | 机场刷新间隔，范围 60–604800 秒 |
 
-纯 Go(`bbolt`,免 cgo),可交叉编译为各平台单文件。
+## 反向代理
 
-## 运行
-
-```sh
-SUBMUX_DB=submux.db ./submux
-```
-
-默认监听 `127.0.0.1:8080`。首次打开 <http://127.0.0.1:8080> 设置管理员密码,系统自动生成订阅 token。
-
-## 使用
-
-1. 控制台「订阅源」添加机场订阅(支持 Clash YAML 或常见分享链接订阅;UA 可留空),点「刷新」拉取。
-2. 「覆盖配置」写 Merge YAML(见下)。
-3. 「订阅输出」复制订阅 URL,导入 mihomo / clash 等客户端;不同客户端按 UA 自动得到合适格式。
-
-UA 识别采用安全默认值:`clash` / `mihomo` / `meta` 返回 Clash YAML;`v2rayN` / `v2rayNG` / `NekoBox` / `Hiddify` 返回 Base64;未知 UA 和尚无专用适配器的客户端回退 `default_format`。Base64 转换遇到不支持的协议或无法无损表达的传输选项时会整体失败并使用对应格式的 last-good,不会静默丢节点。协议兼容边界见 [`docs/PROTOCOLS.md`](docs/PROTOCOLS.md)。
-
-### 覆盖 YAML 示例
-
-```yaml
-prepend-rules:                 # 插到 rules 最前
-  - DOMAIN-SUFFIX,example.com,DIRECT
-  - DOMAIN-KEYWORD,mykeyword,DIRECT
-dns:
-  fallback: [tls://1.1.1.1:853]   # 数组直接覆盖
-  append-fake-ip-filter:           # 追加到 dns.fake-ip-filter
-    - "+.example.com"
-tun:
-  append-route-exclude-address:    # 追加到 tun.route-exclude-address
-    - 192.168.1.0/24
-```
-
-合并规则:`prepend-X` / `append-X` 对**同层**数组 `X` 前插 / 后插;map 字段深合并;标量与普通数组直接覆盖。沿用 Clash Verge / mihomo party 的 Merge 约定。
-
-## 部署:反向代理 + HTTPS(强烈建议)
-
-submux 默认只监听本机。**对外提供订阅务必走 HTTPS**,否则订阅 token 会被中间人窃取。Nginx 示例:
+Profile token 相当于访问凭据；对外提供订阅必须使用 HTTPS。
 
 ```nginx
 server {
@@ -81,41 +80,12 @@ server {
 }
 ```
 
-然后在控制台「设置」把 `base_url` 设为 `https://sub.example.com`,订阅 URL 即以该地址生成。
+然后把控制台 `base_url` 设置为 `https://sub.example.com`。
 
-systemd 单元示例:
+## 安全边界
 
-```ini
-[Unit]
-Description=submux
-After=network.target
-[Service]
-ExecStart=/usr/local/bin/submux
-Environment=SUBMUX_DB=/var/lib/submux/submux.db
-Restart=on-failure
-[Install]
-WantedBy=multi-user.target
-```
-
-## 配置项(控制台「设置」)
-
-| 项 | 默认 | 说明 |
-|----|------|------|
-| `listen_addr` | `127.0.0.1:8080` | 监听地址(重启生效) |
-| `base_url` | (空) | 生成订阅 URL 的外部地址 |
-| `fetch_interval_sec` | `10800` | 后台拉取上游间隔(60–604800 秒,保存后立即生效) |
-| `output_update_interval_hours` | `24` | 输出给客户端的 `Profile-Update-Interval` |
-| `output_token` | (随机) | 订阅 URL token,可一键重置 |
-
-## 安全
-
-- 密码 bcrypt 哈希;会话 HMAC 签名 cookie(`HttpOnly` + `SameSite`)
-- 订阅 token 常量时间比较;重置后旧链接立即失效
-- 覆盖为纯数据合并,无脚本执行,无注入面
-- 上游响应限制为 10 MiB;空订阅或不可解析订阅不会覆盖上次成功缓存
-
-## Roadmap
-
-sing-box 适配器、多 profile、本机内核管控(旁路由 / TUN)、TUIC 分享链接支持。
-
-设计文档见 [`docs/DESIGN.md`](docs/DESIGN.md)。
+- 管理密码使用 bcrypt，登录会话使用 HMAC 签名的 `HttpOnly` / `SameSite` Cookie。
+- 管理 API 需要会话；公开端点只能通过 192-bit 随机 Profile token 读取已发布产物。
+- 上游只接受 HTTP(S)，响应上限 10 MiB；原始订阅不会入库。
+- 模板发布、Profile 保存和节点转换均采用严格校验；失败不会覆盖 last-good。
+- sing-box 转换仅接受文档中明确支持且可保持语义的字段。

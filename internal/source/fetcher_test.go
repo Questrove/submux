@@ -42,11 +42,12 @@ func TestFetchOneSuccess(t *testing.T) {
 		t.Fatalf("UA not sent, got %q", gotUA)
 	}
 	c, _ := st.GetCache(id)
-	if !strings.Contains(c.Raw, "type: vless") {
-		t.Fatalf("raw not cached: %q", c.Raw)
-	}
-	if c.UserinfoJSON == "" || c.NodesJSON == "" || c.NodesJSON == "[]" || c.LastError != "" {
+	if c.UserinfoJSON == "" || c.LastError != "" {
 		t.Fatalf("cache markers wrong: %+v", c)
+	}
+	nodes, _ := st.ListNodes()
+	if len(nodes) != 1 || nodes[0].Protocol != "vless" {
+		t.Fatalf("normalized nodes not committed: %#v", nodes)
 	}
 }
 
@@ -79,14 +80,14 @@ func TestFetchOneInvalidPayloadKeepsLastGoodCache(t *testing.T) {
 
 	st := newTestStore(t)
 	id, _ := st.CreateSource(store.Source{Name: "A", URL: srv.URL})
-	st.UpsertCacheSuccess(id, "old raw", `[{"name":"old"}]`, "old userinfo")
+	st.UpsertCacheSuccess(id, "old userinfo")
 	src, _ := st.GetSource(id)
 
 	if err := NewFetcher(st).FetchOne(context.Background(), src); err == nil {
 		t.Fatalf("expected invalid subscription error")
 	}
 	c, _ := st.GetCache(id)
-	if c.Raw != "old raw" || c.NodesJSON != `[{"name":"old"}]` || c.UserinfoJSON != "old userinfo" || c.LastError == "" {
+	if c.UserinfoJSON != "old userinfo" || c.LastError == "" {
 		t.Fatalf("last-good cache was not preserved: %+v", c)
 	}
 }

@@ -56,7 +56,8 @@ func TestRunOnceContinuesAfterOneError(t *testing.T) {
 		t.Fatalf("bad source should record error")
 	}
 	gc, err := st.GetCache(goodID)
-	if err != nil || gc.Raw == "" {
+	nodes, _ := st.ListNodes()
+	if err != nil || gc.LastSuccessAt == "" || len(nodes) == 0 {
 		t.Fatalf("good source should still be fetched: %v %+v", err, gc)
 	}
 }

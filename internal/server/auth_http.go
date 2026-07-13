@@ -67,7 +67,6 @@ func (s *Server) handleInit(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.SetSetting("admin_pw_hash", hash)
 	s.store.SetSetting("session_secret", randomHex(32))
-	s.store.SetSetting("output_token", randomHex(24))
 	s.setSession(w)
 	writeJSON(w, map[string]any{"ok": true})
 }
