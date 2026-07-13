@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"submux/internal/node"
 	"submux/internal/parse"
 	"submux/internal/store"
 )
@@ -18,7 +19,10 @@ type Fetcher struct {
 	store           *store.Store
 	client          *http.Client
 	intervalChanged chan struct{}
+	rebuilder       interface{ RebuildAll() error }
 }
+
+func (f *Fetcher) SetRebuilder(rebuilder interface{ RebuildAll() error }) { f.rebuilder = rebuilder }
 
 func NewFetcher(s *store.Store) *Fetcher {
 	return &Fetcher{
@@ -30,6 +34,9 @@ func NewFetcher(s *store.Store) *Fetcher {
 
 // FetchOne 拉取单个源,成功写入缓存,失败记录 last_error 并返回错误。
 func (f *Fetcher) FetchOne(ctx context.Context, src store.Source) error {
+	if src.Kind != "" && src.Kind != store.SourceKindSubscription {
+		return fmt.Errorf("source %d is not a subscription source", src.ID)
+	}
 	raw, userinfoJSON, err := f.download(ctx, src)
 	if err != nil {
 		_ = f.store.UpsertCacheError(src.ID, err.Error())
@@ -43,13 +50,21 @@ func (f *Fetcher) FetchOne(ctx context.Context, src store.Source) error {
 		_ = f.store.UpsertCacheError(src.ID, err.Error())
 		return err
 	}
-	nodesJSON, err := json.Marshal(nodes)
-	if err != nil {
+	records := make([]store.NodeRecord, 0, len(nodes))
+	for _, parsedNode := range nodes {
+		record, convertErr := node.FromParsed(src.ID, store.SourceKindSubscription, parsedNode)
+		if convertErr != nil {
+			_ = f.store.UpsertCacheError(src.ID, convertErr.Error())
+			return convertErr
+		}
+		records = append(records, record)
+	}
+	if err := f.store.CommitSourceRefresh(src.ID, records, userinfoJSON); err != nil {
 		_ = f.store.UpsertCacheError(src.ID, err.Error())
 		return err
 	}
-	if err := f.store.UpsertCacheSuccess(src.ID, raw, string(nodesJSON), userinfoJSON); err != nil {
-		return err
+	if f.rebuilder != nil {
+		_ = f.rebuilder.RebuildAll()
 	}
 	return nil
 }
@@ -99,6 +114,9 @@ func (f *Fetcher) RunOnce(ctx context.Context) error {
 	for _, src := range srcs {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if src.Kind == store.SourceKindManual {
+			continue
 		}
 		_ = f.FetchOne(ctx, src) // 错误已写入缓存的 last_error
 	}

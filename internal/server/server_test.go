@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"submux/internal/compiler"
 	"submux/internal/store"
 )
 
@@ -17,195 +19,127 @@ func newTestStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	t.Cleanup(func() { st.Close() })
+	t.Cleanup(func() { _ = st.Close() })
 	return st
 }
 
-// M4:server.New 现在需要 fetcher 参数;handleSub 路径用不到,测试传 nil。
-func newTestServerHandler(st *store.Store) http.Handler { return New(st, nil).Handler() }
+func savePublishedProfile(t *testing.T, st *store.Store, profile store.Profile, artifact *store.ProfileArtifact) store.Profile {
+	t.Helper()
+	id, err := st.SaveProfile(profile)
+	if err != nil {
+		t.Fatalf("save profile: %v", err)
+	}
+	profile.ID = id
+	if artifact != nil {
+		artifact.ProfileID = id
+		if err := st.PutProfileArtifact(*artifact); err != nil {
+			t.Fatalf("save artifact: %v", err)
+		}
+	}
+	return profile
+}
 
-const upstreamClash = `proxies:
-  - {name: HK, type: vless, server: 1.1.1.1, port: 443, uuid: a}
-  - {name: JP, type: vless, server: 2.2.2.2, port: 443, uuid: b}
-`
+func TestServerInitializationFailureIsSurfaced(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := NewChecked(st, nil); err == nil {
+		t.Fatal("NewChecked accepted a closed store")
+	}
 
-func TestHandleSubOK(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	New(st, nil).Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/", nil))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("compatibility constructor hid initialization failure: %d", recorder.Code)
+	}
+}
+
+func TestHandleSubServesFixedMihomoArtifactRegardlessOfUA(t *testing.T) {
 	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
-	st.UpsertCacheSuccess(id, upstreamClash, "[]", "")
+	body := []byte("proxies:\n  - {name: fixed}\n")
+	savePublishedProfile(t, st, store.Profile{
+		Name: "desktop", Engine: compiler.EngineMihomo, Token: "mihomo-token", Enabled: true,
+	}, &store.ProfileArtifact{Body: body, ContentType: "text/yaml; charset=utf-8", Revision: "rev-1"})
 
-	srv := httptest.NewServer(newTestServerHandler(st))
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	for _, ua := range []string{"clash-verge/2.0", "v2rayN/7.0", "unknown"} {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/sub/mihomo-token", nil)
+		req.Header.Set("User-Agent", ua)
+		resp := mustDo(t, http.DefaultClient, req)
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(got) != string(body) {
+			t.Fatalf("UA %q changed fixed artifact: status=%d body=%q", ua, resp.StatusCode, got)
+		}
+		if !strings.Contains(resp.Header.Get("Content-Type"), "yaml") || resp.Header.Get("X-Submux-Revision") != "rev-1" {
+			t.Fatalf("wrong headers for UA %q: %v", ua, resp.Header)
+		}
+	}
+}
+
+func TestHandleSubServesFixedSingBoxArtifact(t *testing.T) {
+	st := newTestStore(t)
+	savePublishedProfile(t, st, store.Profile{
+		Name: "server", Engine: compiler.EngineSingBox, Token: "sing-token", Enabled: true,
+	}, &store.ProfileArtifact{Body: []byte(`{"outbounds":[]}`), ContentType: "application/json; charset=utf-8", Revision: "rev-json"})
+	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
 
-	// clash UA → yaml,含前缀节点
-	req, _ := http.NewRequest("GET", srv.URL+"/sub/secret123", nil)
-	req.Header.Set("User-Agent", "clash-verge/2.0")
-	resp := mustDo(t, http.DefaultClient, req)
+	resp := mustGet(t, http.DefaultClient, srv.URL+"/sub/sing-token")
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status %d", resp.StatusCode)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	s := string(body)
-	if !strings.Contains(s, "[AirA] HK") || !strings.Contains(s, "[AirA] JP") {
-		t.Fatalf("output missing prefixed nodes:\n%s", s)
-	}
-	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "yaml") {
-		t.Fatalf("content-type wrong: %q", ct)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("Content-Disposition"), ".json") {
+		t.Fatalf("wrong sing-box response: %d %v", resp.StatusCode, resp.Header)
 	}
 }
 
-func TestHandleSubBadToken(t *testing.T) {
+func TestHandleSubAuthorizationExpiryAndPublication(t *testing.T) {
 	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	srv := httptest.NewServer(newTestServerHandler(st))
+	savePublishedProfile(t, st, store.Profile{Name: "empty", Token: "empty-token", Enabled: true}, nil)
+	savePublishedProfile(t, st, store.Profile{Name: "disabled", Token: "disabled-token", Enabled: false}, nil)
+	savePublishedProfile(t, st, store.Profile{
+		Name: "expired", Token: "expired-token", Enabled: true,
+		ExpiresAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	}, nil)
+	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
-	r := mustGet(t, http.DefaultClient, srv.URL+"/sub/wrong")
-	defer r.Body.Close()
-	if r.StatusCode != 401 {
-		t.Fatalf("want 401, got %d", r.StatusCode)
+
+	cases := []struct {
+		token string
+		want  int
+	}{
+		{"wrong", http.StatusUnauthorized},
+		{"disabled-token", http.StatusUnauthorized},
+		{"expired-token", http.StatusGone},
+		{"empty-token", http.StatusServiceUnavailable},
+	}
+	for _, tc := range cases {
+		resp := mustGet(t, http.DefaultClient, srv.URL+"/sub/"+tc.token)
+		resp.Body.Close()
+		if resp.StatusCode != tc.want {
+			t.Fatalf("token %q: want %d, got %d", tc.token, tc.want, resp.StatusCode)
+		}
 	}
 }
 
-func TestHandleSubNoData(t *testing.T) {
+func TestHandleSubMarksLastGoodAsDegraded(t *testing.T) {
 	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	srv := httptest.NewServer(newTestServerHandler(st))
+	savePublishedProfile(t, st, store.Profile{
+		Name: "degraded", Engine: compiler.EngineMihomo, Token: "degraded-token", Enabled: true,
+	}, &store.ProfileArtifact{
+		Body: []byte("# last good\n"), ContentType: "text/yaml; charset=utf-8",
+		Revision: "old", LastError: "required slot empty\nretry failed",
+	})
+	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
-	r := mustGet(t, http.DefaultClient, srv.URL+"/sub/secret123")
-	defer r.Body.Close()
-	if r.StatusCode != 503 {
-		t.Fatalf("want 503, got %d", r.StatusCode)
-	}
-}
 
-func TestHandleSubAppliesOverride(t *testing.T) {
-	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
-	st.UpsertCacheSuccess(id, upstreamClash, "[]", "")
-	st.SetOverride("prepend-rules:\n  - DOMAIN-SUFFIX,example.com,DIRECT\n")
-
-	srv := httptest.NewServer(newTestServerHandler(st))
-	defer srv.Close()
-	req, _ := http.NewRequest("GET", srv.URL+"/sub/secret123", nil)
-	req.Header.Set("User-Agent", "clash-verge/2.0")
-	resp := mustDo(t, http.DefaultClient, req)
+	resp := mustGet(t, http.DefaultClient, srv.URL+"/sub/degraded-token")
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	s := string(body)
-	if !strings.Contains(s, "DOMAIN-SUFFIX,example.com,DIRECT") {
-		t.Fatalf("override rule not applied:\n%s", s)
-	}
-	if !strings.Contains(s, "[AirA] HK") {
-		t.Fatalf("merged nodes missing:\n%s", s)
-	}
-}
-
-func TestHandleSubDegradesOnBadOverride(t *testing.T) {
-	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
-	st.UpsertCacheSuccess(id, upstreamClash, "[]", "")
-	st.SetLastGood("clash", []byte("proxies: []\n# last-good\n"))
-	st.SetOverride("\tnot: : valid")
-
-	srv := httptest.NewServer(newTestServerHandler(st))
-	defer srv.Close()
-	req, _ := http.NewRequest("GET", srv.URL+"/sub/secret123", nil)
-	req.Header.Set("User-Agent", "clash-verge/2.0")
-	resp := mustDo(t, http.DefaultClient, req)
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("want 200 (degraded), got %d", resp.StatusCode)
-	}
-	if resp.Header.Get("X-Submux-Degraded") == "" {
-		t.Fatalf("expected degraded marker header")
-	}
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "last-good") {
-		t.Fatalf("did not serve last-good body:\n%s", string(body))
-	}
-}
-
-func TestHandleSubBase64ForKnownGenericClient(t *testing.T) {
-	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
-	st.UpsertCacheSuccess(id,
-		"proxies:\n  - {name: HK, type: vless, server: 1.1.1.1, port: 443, uuid: u}\n",
-		"[]", `{"upload":1,"download":2,"total":100,"expire":1500}`)
-
-	srv := httptest.NewServer(newTestServerHandler(st))
-	defer srv.Close()
-
-	req, _ := http.NewRequest("GET", srv.URL+"/sub/secret123", nil)
-	req.Header.Set("User-Agent", "v2rayN/7.0")
-	resp := mustDo(t, http.DefaultClient, req)
-	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
-		t.Fatalf("want base64/plain, got %q", ct)
-	}
-	if ui := resp.Header.Get("Subscription-Userinfo"); !strings.Contains(ui, "total=100") {
-		t.Fatalf("userinfo header wrong: %q", ui)
-	}
-	if resp.Header.Get("Profile-Update-Interval") == "" {
-		t.Fatalf("missing Profile-Update-Interval")
-	}
-}
-
-func TestHandleSubClashForClashUA(t *testing.T) {
-	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
-	st.UpsertCacheSuccess(id, upstreamClash, "[]", "")
-
-	srv := httptest.NewServer(newTestServerHandler(st))
-	defer srv.Close()
-	req, _ := http.NewRequest("GET", srv.URL+"/sub/secret123", nil)
-	req.Header.Set("User-Agent", "clash-verge/2.0")
-	resp := mustDo(t, http.DefaultClient, req)
-	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "yaml") {
-		t.Fatalf("clash UA should get yaml, got %q", ct)
-	}
-}
-
-func TestHandleSubRejectsEmptyBase64Output(t *testing.T) {
-	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
-	st.UpsertCacheSuccess(id,
-		"proxies:\n  - {name: TUIC, type: tuic, server: example.com, port: 443, password: p}\n",
-		"[]", "")
-
-	srv := httptest.NewServer(newTestServerHandler(st))
-	defer srv.Close()
-	req, _ := http.NewRequest("GET", srv.URL+"/sub/secret123", nil)
-	req.Header.Set("User-Agent", "v2rayN/7.0")
-	resp := mustDo(t, http.DefaultClient, req)
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("want 503, got %d", resp.StatusCode)
-	}
-}
-
-func TestHandleSubBase64DegradedContentType(t *testing.T) {
-	st := newTestStore(t)
-	st.SetSetting("output_token", "secret123")
-	id, _ := st.CreateSource(store.Source{Name: "AirA", URL: "http://x"})
-	st.UpsertCacheSuccess(id,
-		"proxies:\n  - {name: VL, type: vless, server: example.com, port: 443, uuid: id}\n",
-		"[]", "")
-	st.SetLastGood("base64", []byte("bGFzdC1nb29k"))
-	st.SetOverride("\tnot: : valid")
-
-	srv := httptest.NewServer(newTestServerHandler(st))
-	defer srv.Close()
-	resp := mustGet(t, http.DefaultClient, srv.URL+"/sub/secret123")
-	defer resp.Body.Close()
-	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") {
-		t.Fatalf("degraded base64 content-type wrong: %q", ct)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("X-Submux-Degraded"), "retry failed") {
+		t.Fatalf("last-good degradation not exposed: %d %v", resp.StatusCode, resp.Header)
 	}
 }

@@ -7,10 +7,10 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func (s *Store) UpsertCacheSuccess(sourceID int64, raw, nodesJSON, userinfoJSON string) error {
+func (s *Store) UpsertCacheSuccess(sourceID int64, userinfoJSON string) error {
 	now := nowRFC3339()
 	c := Cache{
-		SourceID: sourceID, Raw: raw, NodesJSON: nodesJSON, UserinfoJSON: userinfoJSON,
+		SourceID: sourceID, UserinfoJSON: userinfoJSON,
 		LastSuccessAt: now, LastError: "", UpdatedAt: now,
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -22,7 +22,7 @@ func (s *Store) UpsertCacheSuccess(sourceID int64, raw, nodesJSON, userinfoJSON 
 	})
 }
 
-// UpsertCacheError 只写 last_error + updated_at,保留已有 raw/nodes/userinfo/last_success_at。
+// UpsertCacheError 只写 last_error + updated_at，保留上次成功时间与流量元数据。
 func (s *Store) UpsertCacheError(sourceID int64, errMsg string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("source_cache"))

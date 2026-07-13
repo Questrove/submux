@@ -1,33 +1,53 @@
 package server
 
 import (
-	"crypto/subtle"
-	"encoding/json"
+	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
-	"submux/internal/merge"
-	"submux/internal/output"
-	"submux/internal/override"
-	"submux/internal/parse"
+	"submux/internal/compiler"
 	"submux/internal/source"
 	"submux/internal/store"
 	"submux/web"
 )
 
 type Server struct {
-	store   *store.Store
-	fetcher *source.Fetcher
+	store    *store.Store
+	fetcher  *source.Fetcher
+	compiler *compiler.Service
+	initErr  error
 }
 
 func New(st *store.Store, f *source.Fetcher) *Server {
-	return &Server{store: st, fetcher: f}
+	srv, err := NewChecked(st, f)
+	if err != nil {
+		return &Server{store: st, fetcher: f, compiler: compiler.New(st), initErr: err}
+	}
+	return srv
+}
+
+// NewChecked initializes the built-in template catalog and reports failures so
+// production startup cannot silently continue without a usable template set.
+func NewChecked(st *store.Store, f *source.Fetcher) (*Server, error) {
+	service := compiler.New(st)
+	if err := service.EnsureBuiltinTemplates(); err != nil {
+		return nil, fmt.Errorf("initialize built-in templates: %w", err)
+	}
+	if f != nil {
+		f.SetRebuilder(service)
+	}
+	return &Server{store: st, fetcher: f, compiler: service}, nil
 }
 
 func (s *Server) Handler() http.Handler {
+	if s.initErr != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, s.initErr.Error(), http.StatusInternalServerError)
+		})
+	}
 	r := chi.NewRouter()
 
 	// 公开端点
@@ -45,11 +65,29 @@ func (s *Server) Handler() http.Handler {
 		pr.Put("/api/sources/{id}", s.handleUpdateSource)
 		pr.Delete("/api/sources/{id}", s.handleDeleteSource)
 		pr.Post("/api/sources/{id}/refresh", s.handleRefreshSource)
-		pr.Get("/api/override", s.handleGetOverride)
-		pr.Put("/api/override", s.handlePutOverride)
 		pr.Get("/api/settings", s.handleGetSettings)
 		pr.Put("/api/settings", s.handlePutSettings)
-		pr.Post("/api/settings/reset-token", s.handleResetToken)
+		pr.Get("/api/nodes", s.handleListNodes)
+		pr.Post("/api/nodes/import", s.handleImportNodes)
+		pr.Put("/api/nodes/{id}", s.handleUpdateNode)
+		pr.Delete("/api/nodes/{id}", s.handleDeleteNode)
+		pr.Get("/api/node-sets", s.handleListNodeSets)
+		pr.Post("/api/node-sets", s.handleSaveNodeSet)
+		pr.Put("/api/node-sets/{id}", s.handleSaveNodeSet)
+		pr.Delete("/api/node-sets/{id}", s.handleDeleteNodeSet)
+		pr.Get("/api/templates", s.handleListTemplates)
+		pr.Post("/api/templates", s.handleSaveTemplate)
+		pr.Put("/api/templates/{id}", s.handleSaveTemplate)
+		pr.Delete("/api/templates/{id}", s.handleDeleteTemplate)
+		pr.Get("/api/templates/{id}/versions", s.handleListTemplateVersions)
+		pr.Post("/api/templates/{id}/versions", s.handlePublishTemplateVersion)
+		pr.Get("/api/profiles", s.handleListProfiles)
+		pr.Post("/api/profiles", s.handleSaveProfile)
+		pr.Put("/api/profiles/{id}", s.handleSaveProfile)
+		pr.Delete("/api/profiles/{id}", s.handleDeleteProfile)
+		pr.Post("/api/profiles/{id}/preview", s.handlePreviewProfile)
+		pr.Post("/api/profiles/{id}/publish", s.handlePublishProfile)
+		pr.Post("/api/profiles/{id}/reset-token", s.handleResetProfileToken)
 	})
 
 	// 静态控制台(兜底)
@@ -57,81 +95,38 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
-// handleSub 输出聚合订阅:校验 token → 读各源缓存 → 解析 → 合并 → 覆盖 → 按 UA 渲染。
+// handleSub 只提供已成功编译的固定引擎 Profile 产物，不再根据 UA 猜测格式。
 func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
-	want, _ := s.store.GetSetting("output_token")
-	if want == "" || subtle.ConstantTimeCompare([]byte(token), []byte(want)) != 1 {
+	profile, err := s.store.GetProfileByToken(token)
+	if err != nil || !profile.Enabled {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-
-	srcs, err := s.store.ListEnabledSources()
-	if err != nil {
-		http.Error(w, "store error", http.StatusInternalServerError)
-		return
-	}
-	var sources []merge.SourceNodes
-	var infos []source.Userinfo
-	for _, src := range srcs {
-		c, err := s.store.GetCache(src.ID)
-		if err != nil {
-			continue // 该源还没有缓存
-		}
-		nodes, err := parse.ParseSubscription(c.Raw)
-		if err != nil || len(nodes) == 0 {
-			continue
-		}
-		sources = append(sources, merge.SourceNodes{SourceName: src.Name, Nodes: nodes})
-		if c.UserinfoJSON != "" {
-			var u source.Userinfo
-			if json.Unmarshal([]byte(c.UserinfoJSON), &u) == nil {
-				infos = append(infos, u)
-			}
+	if profile.ExpiresAt != "" {
+		if expiry, parseErr := time.Parse(time.RFC3339, profile.ExpiresAt); parseErr != nil || !time.Now().Before(expiry) {
+			http.Error(w, "subscription expired", http.StatusGone)
+			return
 		}
 	}
-	if len(sources) == 0 {
-		http.Error(w, "no upstream data", http.StatusServiceUnavailable)
+	artifact, err := s.store.GetProfileArtifact(profile.ID)
+	if err != nil || len(artifact.Body) == 0 {
+		http.Error(w, "profile has no published artifact", http.StatusServiceUnavailable)
 		return
 	}
-
-	cfg := merge.Merge(sources)
-	defFmt, _ := s.store.GetSetting("default_format")
-	if defFmt == "" {
-		defFmt = "clash"
+	w.Header().Set("Content-Type", artifact.ContentType)
+	ext := ".yaml"
+	if profile.Engine == compiler.EngineSingBox {
+		ext = ".json"
 	}
-	adapter := output.SelectByUA(r.UserAgent(), defFmt)
-
-	overrideYAML, _ := s.store.GetOverride()
-	final, err := override.Apply(cfg, overrideYAML)
-	if err != nil {
-		s.serveLastGoodOr(w, adapter.Format(), "override apply failed: "+err.Error())
-		return
+	w.Header().Set("Content-Disposition", "attachment; filename=submux"+ext)
+	w.Header().Set("X-Submux-Revision", artifact.Revision)
+	if artifact.LastError != "" {
+		w.Header().Set("X-Submux-Degraded", sanitizeHeader(artifact.LastError))
 	}
-	body, ct, err := adapter.Render(final)
-	if err != nil {
-		s.serveLastGoodOr(w, adapter.Format(), "render failed: "+err.Error())
-		return
-	}
-	_ = s.store.SetLastGood(adapter.Format(), body)
-
-	interval, _ := s.store.GetSettingInt("output_update_interval_hours", 24)
-	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Content-Disposition", "attachment; filename=submux")
-	w.Header().Set("Subscription-Userinfo", source.AggregateUserinfo(infos).Header())
-	w.Header().Set("Profile-Update-Interval", strconv.Itoa(interval))
-	_, _ = w.Write(body)
+	_, _ = w.Write(artifact.Body)
 }
 
-// serveLastGoodOr 在覆盖/渲染出错时回退到上次成功输出;没有则 503。
-func (s *Server) serveLastGoodOr(w http.ResponseWriter, format, reason string) {
-	reason = strings.ReplaceAll(strings.ReplaceAll(reason, "\n", " "), "\r", " ")
-	if lg, err := s.store.GetLastGood(format); err == nil && len(lg) > 0 {
-		w.Header().Set("Content-Type", output.ContentType(format))
-		w.Header().Set("Content-Disposition", "attachment; filename=submux")
-		w.Header().Set("X-Submux-Degraded", reason)
-		_, _ = w.Write(lg)
-		return
-	}
-	http.Error(w, "config error and no last-good: "+reason, http.StatusServiceUnavailable)
+func sanitizeHeader(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "\n", " "), "\r", " ")
 }

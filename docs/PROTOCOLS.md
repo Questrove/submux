@@ -1,43 +1,76 @@
-# 协议兼容边界
+# 协议与配置兼容边界
 
-submux 的内部主模型是 Clash/Mihomo 节点。Clash YAML 输出保留模型字段;Base64 输出是分享 URI/QR JSON 的兼容适配器,并不等于任意 Clash 节点都能无损转换。
+## 原则
 
-## 设计原则
+1. 连接语义以协议项目和目标内核官方文档为准，不根据某个机场返回样本反推字段。
+2. Mihomo 与 sing-box 是两个独立目标，不假设同名字段语义相同。
+3. Mihomo 模板直接接收规范化的 Mihomo 节点对象；sing-box 必须经过显式字段转换。
+4. sing-box 转换遇到未知协议、未知字段、未知传输或语义不等价字段时，整个 Profile 编译失败并保留 last-good。
+5. 协议支持表示“当前列出的连接字段可以保持语义”，不表示任意客户端私有扩展都受支持。
 
-1. 协议语义以官方协议或项目文档为准。
-2. 没有统一分享链接 RFC 的协议,以当前主流客户端 v2rayN 的解析/生成实现作为互操作目标。
-3. 任何节点或连接选项不能在目标格式中可靠表达时,Base64 整体渲染失败并回退该格式的 last-good;不静默删节点或字段。
-4. 带宽、Hysteria2 客户端模式等本地策略不写入分享链接;Hysteria2 官方明确把它们排除在 URI 之外。
+## 输入
 
-## 支持矩阵
+机场或手工输入可使用：
 
-| 协议 | 分享链接输入 | Base64 输出 | 当前传输/扩展边界 |
-|------|--------------|-------------|-------------------|
-| VLESS | `vless://` | `vless://` | `tcp/raw`、WebSocket、gRPC;TLS、REALITY、flow、encryption、SNI、ALPN、fingerprint |
-| Trojan | `trojan://` | `trojan://` | `tcp/raw`、WebSocket、gRPC;默认 TLS,支持 REALITY 兼容查询字段 |
-| VMess | v2rayN QR JSON | v2rayN QR JSON | `tcp/raw`、WebSocket、gRPC、TLS;REALITY 和不能表达的传输选项拒绝转换 |
-| Shadowsocks | SIP002 | SIP002 | 标准 AEAD 与 AEAD-2022;AEAD-2022 使用百分号编码的明文 userinfo;支持 `obfs-local`/Clash `obfs` 与 `v2ray-plugin` 的明确选项 |
-| Hysteria2 | `hysteria2://`、`hy2://` | `hysteria2://` | 官方 auth、端口、obfs、SNI、证书跳过验证、证书 pin;输出兼容 v2rayN 的 `mport`;不输出带宽和客户端模式 |
+- 完整 Mihomo/Clash YAML 的 `proxies` 数组；
+- 每行一个分享链接；
+- Base64 编码的分享链接列表。
 
-不在表中的协议(当前包括 TUIC)或未列出的传输会触发严格转换错误。Clash YAML 源中的这些节点仍可原样进入 Clash 输出。
+严格解析的分享链接协议：
 
-## UA 分发
+| 协议 | 输入形式 | 已解析能力 |
+|---|---|---|
+| VLESS | `vless://` | TCP/raw、WebSocket、gRPC、TLS、REALITY、flow、SNI、ALPN、uTLS 指纹 |
+| VMess | v2rayN JSON `vmess://` | TCP/raw、WebSocket、gRPC、TLS、SNI、ALPN、cipher、alterId |
+| Trojan | `trojan://` | TCP/raw、WebSocket、gRPC、TLS、REALITY、SNI、ALPN |
+| Shadowsocks | SIP002 `ss://` | AEAD/AEAD-2022、`obfs-local`、`v2ray-plugin` 明确选项 |
+| Hysteria2 | `hysteria2://` / `hy2://` | auth、多端口、obfs、SNI、insecure、证书 pin |
 
-- Clash/Mihomo/Meta 客户端返回 Clash YAML。
-- v2rayN/v2rayNG/NekoBox/Hiddify 返回 Base64。
-- sing-box 尚无专用适配器,与未知 UA 一样回退设置项 `default_format`(默认 Clash),避免错误猜测为 Base64。
+TUIC 等未列出的分享链接会被拒绝。Mihomo YAML 中的其他节点类型仍可进入节点库并用于 Mihomo Profile，但进入 sing-box Profile 会严格失败。
 
-## 规范与兼容来源
+## Mihomo 编译器
 
-- [Hysteria2 URI Scheme](https://v2.hysteria.network/docs/developers/URI-Scheme/)
-- [Shadowsocks SIP002 URI Scheme](https://shadowsocks.org/doc/sip002.html)
-- [Shadowsocks SIP022 AEAD-2022](https://shadowsocks.org/doc/sip022.html)
-- [Xray VLESS outbound](https://xtls.github.io/en/config/outbounds/vless.html)
-- [Xray transport](https://xtls.github.io/en/config/transport.html)
-- [Xray REALITY transport](https://xtls.github.io/en/config/transports/reality.html)
-- [Trojan-Go share URL draft](https://p4gefau1t.github.io/trojan-go/developer/url/)
-- [Mihomo Hysteria2 fields](https://wiki.metacubex.one/config/proxies/hysteria2/)
-- [Mihomo VLESS fields](https://wiki.metacubex.one/config/proxies/vless/)
-- [Mihomo VMess fields](https://wiki.metacubex.one/config/proxies/vmess/)
-- [Mihomo Shadowsocks fields](https://wiki.metacubex.one/config/proxies/ss/)
-- [v2rayN share-link formatter source](https://github.com/2dust/v2rayN/tree/master/v2rayN/ServiceLib/Handler/Fmt)
+节点配置按原对象复制，只改成 Profile 内确定性唯一名称。编译器负责：
+
+- 校验 `proxy-groups` 存在、组名唯一、插槽目标存在；
+- 把节点添加到顶层 `proxies`；
+- 按 `append/replace` 写入目标组的 `proxies`；
+- 校验策略组成员与 `rules` 的目标引用存在；
+- 保留未参与编译的完整模板配置。
+
+节点本身的最终 schema 由 Mihomo 内核校验。官方文档：[代理节点通用字段](https://wiki.metacubex.one/en/config/proxies/)、[策略组](https://wiki.metacubex.one/config/proxy-groups/)、[URL-Test](https://wiki.metacubex.one/config/proxy-groups/url-test/)、[TUN](https://wiki.metacubex.one/en/config/inbound/tun/)、[DNS](https://wiki.metacubex.one/en/config/dns/)。
+
+## sing-box 编译器
+
+目标配置为当前 sing-box JSON 结构；平台预置模板标注为 1.14。模板中的 selector/urltest 与路由引用会严格校验。官方基础结构见 [Configuration](https://sing-box.sagernet.org/configuration/)、[Selector](https://sing-box.sagernet.org/configuration/outbound/selector/)、[URLTest](https://sing-box.sagernet.org/configuration/outbound/urltest/)、[Route Rule Action](https://sing-box.sagernet.org/configuration/route/rule_action/)。
+
+### 映射矩阵
+
+| Mihomo 节点 | sing-box outbound | 支持字段 |
+|---|---|---|
+| `vless` | `vless` | endpoint、uuid、flow、network、packet_encoding、TLS/REALITY、ws/grpc transport |
+| `vmess` | `vmess` | endpoint、uuid、security、alter_id、network、packet_encoding、TLS、ws/grpc transport |
+| `trojan` | `trojan` | endpoint、password、network、TLS/REALITY、ws/grpc transport |
+| `ss` | `shadowsocks` | endpoint、method、password、obfs-local/v2ray-plugin 选项 |
+| `hysteria2` / `hy2` | `hysteria2` | endpoint、server_ports、hop_interval、up/down Mbps、salamander/gecko obfs、password、SNI/insecure/ALPN |
+
+通用可转换字段包括 `interface-name → bind_interface`、`routing-mark → routing_mark`、`tfo → tcp_fast_open`、`mptcp → tcp_multi_path`。对应官方结构：[Dial Fields](https://sing-box.sagernet.org/configuration/shared/dial/)、[TLS](https://sing-box.sagernet.org/configuration/shared/tls/)、[V2Ray Transport](https://sing-box.sagernet.org/configuration/shared/v2ray-transport/)。
+
+协议字段依据：[VLESS](https://sing-box.sagernet.org/configuration/outbound/vless/)、[VMess](https://sing-box.sagernet.org/configuration/outbound/vmess/)、[Trojan](https://sing-box.sagernet.org/configuration/outbound/trojan/)、[Shadowsocks](https://sing-box.sagernet.org/configuration/outbound/shadowsocks/)、[Hysteria2](https://sing-box.sagernet.org/configuration/outbound/hysteria2/)。
+
+### 明确拒绝的情况
+
+- 非 ws/grpc/tcp/raw 的 V2Ray transport；或 transport option 中无等价目标字段的选项。
+- VLESS `encryption` 非空且非 `none`。
+- 未列出的协议或任何节点未知字段。
+- `udp` 非布尔值；缺失或 `false` 会显式转换为 sing-box `network: tcp`，避免其默认同时开启 TCP/UDP。
+- 非默认 `ip-version`，因为它需要 Profile 级 DNS resolver 策略，不能安全地局部猜测。
+- Mihomo `dialer-proxy` 和未显式转换的 smux 扩展。
+- REALITY 缺少 public key，或包含 sing-box 当前客户端 schema 无等价字段的扩展。
+- Hysteria2 URI `pinSHA256`。
+
+最后一项是刻意的语义边界：Hysteria2 官方 URI 把 `pinSHA256` 定义为服务器**证书**的 SHA-256 指纹，而 sing-box TLS 的 `certificate_public_key_sha256` 是**公钥**摘要，不能直接复制。来源：[Hysteria2 URI Scheme](https://v2.hysteria.network/docs/developers/URI-Scheme/)、[sing-box TLS](https://sing-box.sagernet.org/configuration/shared/tls/#certificate_public_key_sha256)。带该字段的节点仍可用于 Mihomo Profile。
+
+## sing-box 版本边界
+
+平台模板使用新 DNS server 对象格式、route action 和合并后的 TUN `address` 字段，避免继续生成已经迁移的旧配置。版本变化依据：[sing-box Migration](https://sing-box.sagernet.org/migration/)。自定义模板应在 `engine_version` 中记录实际目标版本；升级内核时发布新模板版本，再显式迁移 Profile。

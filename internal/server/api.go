@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"submux/internal/override"
 	"submux/internal/store"
 )
 
@@ -36,15 +35,19 @@ func idParam(r *http.Request) (int64, error) {
 }
 
 type sourceDTO struct {
-	ID            int64  `json:"id"`
-	Name          string `json:"name"`
-	URL           string `json:"url"`
-	UserAgent     string `json:"user_agent"`
-	Enabled       bool   `json:"enabled"`
-	SortOrder     int    `json:"sort_order"`
-	LastSuccessAt string `json:"last_success_at"`
-	LastError     string `json:"last_error"`
-	Userinfo      string `json:"userinfo"`
+	ID            int64    `json:"id"`
+	Kind          string   `json:"kind"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	Tags          []string `json:"tags,omitempty"`
+	URL           string   `json:"url,omitempty"`
+	UserAgent     string   `json:"user_agent,omitempty"`
+	Enabled       bool     `json:"enabled"`
+	SortOrder     int      `json:"sort_order"`
+	NodeCount     int      `json:"node_count"`
+	LastSuccessAt string   `json:"last_success_at,omitempty"`
+	LastError     string   `json:"last_error,omitempty"`
+	Userinfo      string   `json:"userinfo,omitempty"`
 }
 
 func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
@@ -53,13 +56,24 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		return
 	}
+	nodes, _ := s.store.ListNodes()
+	counts := make(map[int64]int)
+	for _, value := range nodes {
+		counts[value.SourceID]++
+	}
 	out := make([]sourceDTO, 0, len(srcs))
 	for _, src := range srcs {
 		d := sourceDTO{
-			ID: src.ID, Name: src.Name, URL: src.URL, UserAgent: src.UserAgent,
-			Enabled: src.Enabled, SortOrder: src.SortOrder,
+			ID: src.ID, Kind: src.Kind, Name: src.Name, Description: src.Description,
+			Tags: src.Tags, URL: src.URL, UserAgent: src.UserAgent,
+			Enabled: src.Enabled, SortOrder: src.SortOrder, NodeCount: counts[src.ID],
 		}
-		if c, err := s.store.GetCache(src.ID); err == nil {
+		if src.Kind == store.SourceKindSubscription {
+			c, err := s.store.GetCache(src.ID)
+			if err != nil {
+				out = append(out, d)
+				continue
+			}
 			d.LastSuccessAt = c.LastSuccessAt
 			d.LastError = c.LastError
 			d.Userinfo = c.UserinfoJSON
@@ -71,19 +85,31 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name, URL, UserAgent string
+		Kind        string   `json:"kind"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Tags        []string `json:"tags"`
+		URL         string   `json:"url"`
+		UserAgent   string   `json:"user_agent"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	body.Name = strings.TrimSpace(body.Name)
 	body.URL = strings.TrimSpace(body.URL)
-	if body.Name == "" || !validHTTPURL(body.URL) {
-		http.Error(w, "name and valid http(s) url required", http.StatusBadRequest)
+	body.Kind = strings.TrimSpace(body.Kind)
+	if body.Kind == "" {
+		body.Kind = store.SourceKindSubscription
+	}
+	if body.Name == "" || !validSource(body.Kind, body.URL) {
+		http.Error(w, "name and a valid source kind/url are required", http.StatusBadRequest)
 		return
 	}
-	id, err := s.store.CreateSource(store.Source{Name: body.Name, URL: body.URL, UserAgent: body.UserAgent})
+	id, err := s.store.CreateSource(store.Source{
+		Kind: body.Kind, Name: body.Name, Description: strings.TrimSpace(body.Description),
+		Tags: store.NormalizeStringSet(body.Tags), URL: body.URL, UserAgent: strings.TrimSpace(body.UserAgent),
+	})
 	if err != nil {
 		http.Error(w, "create failed", http.StatusInternalServerError)
 		return
@@ -98,22 +124,40 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name, URL, UserAgent string
-		SortOrder            int
-		Enabled              bool
+		Kind        string   `json:"kind"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Tags        []string `json:"tags"`
+		URL         string   `json:"url"`
+		UserAgent   string   `json:"user_agent"`
+		SortOrder   int      `json:"sort_order"`
+		Enabled     bool     `json:"enabled"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	body.Name = strings.TrimSpace(body.Name)
 	body.URL = strings.TrimSpace(body.URL)
-	if body.Name == "" || !validHTTPURL(body.URL) {
-		http.Error(w, "name and valid http(s) url required", http.StatusBadRequest)
+	old, err := s.store.GetSource(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if body.Kind == "" {
+		body.Kind = old.Kind
+	}
+	if body.Kind != old.Kind {
+		http.Error(w, "source kind cannot be changed", http.StatusConflict)
+		return
+	}
+	if body.Name == "" || !validSource(body.Kind, body.URL) {
+		http.Error(w, "name and a valid source kind/url are required", http.StatusBadRequest)
 		return
 	}
 	src := store.Source{
-		ID: id, Name: body.Name, URL: body.URL, UserAgent: body.UserAgent,
+		ID: id, Kind: body.Kind, Name: body.Name, Description: strings.TrimSpace(body.Description),
+		Tags: store.NormalizeStringSet(body.Tags), URL: body.URL, UserAgent: strings.TrimSpace(body.UserAgent),
 		SortOrder: body.SortOrder, Enabled: body.Enabled,
 	}
 	if err := s.store.UpdateSource(src); err != nil {
@@ -129,10 +173,31 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
+	nodeSets, _ := s.store.ListNodeSets()
+	nodes, _ := s.store.ListNodes()
+	nodeSource := make(map[int64]int64, len(nodes))
+	for _, node := range nodes {
+		nodeSource[node.ID] = node.SourceID
+	}
+	for _, nodeSet := range nodeSets {
+		for _, sourceID := range nodeSet.SourceIDs {
+			if sourceID == id {
+				http.Error(w, "source is used by node set "+strconv.FormatInt(nodeSet.ID, 10), http.StatusConflict)
+				return
+			}
+		}
+		for _, nodeID := range append(append([]int64(nil), nodeSet.NodeIDs...), nodeSet.ExcludeNodeIDs...) {
+			if nodeSource[nodeID] == id {
+				http.Error(w, "source node is used by node set "+strconv.FormatInt(nodeSet.ID, 10), http.StatusConflict)
+				return
+			}
+		}
+	}
 	if err := s.store.DeleteSource(id); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	_ = s.compiler.RebuildAll()
 	writeJSON(w, map[string]any{"ok": true})
 }
 
@@ -151,6 +216,10 @@ func (s *Server) handleRefreshSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no such source", http.StatusNotFound)
 		return
 	}
+	if src.Kind != store.SourceKindSubscription {
+		http.Error(w, "manual sources cannot be refreshed", http.StatusBadRequest)
+		return
+	}
 	ferr := s.fetcher.FetchOne(r.Context(), src)
 	resp := map[string]any{"ok": ferr == nil}
 	if ferr != nil {
@@ -159,40 +228,11 @@ func (s *Server) handleRefreshSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
-func (s *Server) handleGetOverride(w http.ResponseWriter, r *http.Request) {
-	c, _ := s.store.GetOverride()
-	writeJSON(w, map[string]any{"content": c})
-}
-
-func (s *Server) handlePutOverride(w http.ResponseWriter, r *http.Request) {
-	var body struct{ Content string }
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if _, err := override.Apply(map[string]any{}, body.Content); err != nil {
-		http.Error(w, "invalid override yaml: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := s.store.SetOverride(body.Content); err != nil {
-		http.Error(w, "save failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true})
-}
-
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	base, _ := s.store.GetSetting("base_url")
-	token, _ := s.store.GetSetting("output_token")
 	interval, _ := s.store.GetSettingInt("fetch_interval_sec", 10800)
-	subURL := ""
-	if base != "" {
-		subURL = strings.TrimRight(base, "/") + "/sub/" + token
-	}
 	writeJSON(w, map[string]any{
 		"base_url":           base,
-		"output_token":       token,
-		"sub_url":            subURL,
 		"fetch_interval_sec": interval,
 	})
 }
@@ -231,16 +271,18 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func (s *Server) handleResetToken(w http.ResponseWriter, r *http.Request) {
-	tok := randomHex(24)
-	if err := s.store.SetSetting("output_token", tok); err != nil {
-		http.Error(w, "reset failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"output_token": tok})
-}
-
 func validHTTPURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
+}
+
+func validSource(kind, rawURL string) bool {
+	switch kind {
+	case store.SourceKindSubscription:
+		return validHTTPURL(rawURL)
+	case store.SourceKindManual:
+		return rawURL == ""
+	default:
+		return false
+	}
 }

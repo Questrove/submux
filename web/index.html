@@ -1,128 +1,217 @@
-<!DOCTYPE html>
-<html lang="zh">
+<!doctype html>
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>submux 控制台</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>submux 配置编排台</title>
 <style>
- body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem;color:#222}
- h1{font-size:1.4rem} h2{font-size:1.1rem;margin-top:2rem;border-bottom:1px solid #ddd;padding-bottom:.3rem}
- input,textarea,button{font:inherit;padding:.4rem;margin:.2rem 0;box-sizing:border-box}
- input[type=text],input[type=password],textarea{width:100%}
- textarea{height:180px;font-family:monospace}
- table{width:100%;border-collapse:collapse;margin:.5rem 0}
- th,td{border:1px solid #ddd;padding:.4rem;text-align:left;font-size:.88rem;vertical-align:top}
- .err{color:#c00} .ok{color:#070} .muted{color:#888;font-size:.85rem}
- button{cursor:pointer} .row{display:flex;gap:.5rem;align-items:center;flex-wrap:wrap}
- .hidden{display:none}
- code{background:#f4f4f4;padding:.2rem .4rem;border-radius:3px;word-break:break-all}
+:root{color-scheme:light;--bg:#f5f7fb;--panel:#fff;--ink:#18212f;--muted:#677386;--line:#dfe5ee;--brand:#3157d5;--brand2:#e8edff;--danger:#bd2b3d;--ok:#147a55;--shadow:0 12px 36px rgba(31,46,80,.08)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}button,input,select,textarea{font:inherit}button{cursor:pointer;border:1px solid var(--line);border-radius:8px;background:#fff;padding:.5rem .75rem;color:var(--ink)}button:hover{border-color:#aeb9ca}.primary{background:var(--brand);border-color:var(--brand);color:#fff}.danger{color:var(--danger)}.ghost{background:transparent}.shell{max-width:1240px;margin:auto;padding:22px}.topbar{display:flex;justify-content:space-between;gap:18px;align-items:center;margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px}.logo{display:grid;place-items:center;width:38px;height:38px;border-radius:11px;background:linear-gradient(135deg,#3157d5,#7a4ed8);color:#fff;font-weight:800}.brand h1{font-size:18px;margin:0}.brand p{margin:0;color:var(--muted);font-size:12px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:18px}.auth{max-width:420px;margin:10vh auto}.auth h2{margin-top:0}.tabs{display:flex;gap:5px;overflow:auto;margin-bottom:16px;padding:5px;background:#e9edf4;border-radius:11px}.tabs button{border:0;background:transparent;white-space:nowrap}.tabs button.active{background:#fff;box-shadow:0 2px 8px rgba(30,42,70,.09);color:var(--brand);font-weight:650}.page{display:none}.page.active{display:block}.section-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:14px}.section-head h2{font-size:17px;margin:0}.section-head p{color:var(--muted);margin:3px 0 0}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px}.span-4{grid-column:span 4}.span-5{grid-column:span 5}.span-6{grid-column:span 6}.span-7{grid-column:span 7}.span-8{grid-column:span 8}.span-12{grid-column:span 12}.card{border:1px solid var(--line);border-radius:11px;padding:14px;background:#fff}.card h3{font-size:14px;margin:0 0 10px}.field{display:flex;flex-direction:column;gap:5px;margin-bottom:10px}.field label{font-size:12px;color:var(--muted);font-weight:600}.field input,.field select,.field textarea{width:100%;border:1px solid var(--line);border-radius:8px;background:#fff;padding:.58rem .65rem;color:var(--ink)}.field textarea{min-height:110px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;resize:vertical}.field textarea.code{min-height:360px}.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.actions{display:flex;gap:6px;flex-wrap:wrap}.muted{color:var(--muted)}.ok{color:var(--ok)}.err{color:var(--danger)}.badge{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;background:#eef1f5;color:#556174;font-size:11px}.badge.blue{background:var(--brand2);color:var(--brand)}.badge.green{background:#e6f6ef;color:var(--ok)}table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid var(--line);padding:10px 8px;vertical-align:top}th{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}td code{font-size:12px;word-break:break-all}.table-wrap{overflow:auto}.empty{padding:30px;text-align:center;color:var(--muted)}.notice{position:fixed;right:22px;bottom:22px;max-width:420px;padding:11px 14px;border-radius:10px;background:#172033;color:#fff;box-shadow:var(--shadow);z-index:20}.notice.err{background:#8e2332;color:#fff}.hidden{display:none!important}.slot-row{display:grid;grid-template-columns:160px 1fr;gap:10px;align-items:center;margin:7px 0}.profile-url{display:block;max-width:420px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.template-item{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line);padding:11px 0}.template-item:last-child{border:0}.template-item h4{margin:0 0 3px}.template-item p{margin:0;color:var(--muted);font-size:12px}dialog{border:0;border-radius:14px;box-shadow:0 20px 80px rgba(20,30,60,.25);padding:0;width:min(900px,92vw)}dialog::backdrop{background:rgba(18,26,42,.48)}.dialog-body{padding:18px}.dialog-body pre{max-height:65vh;overflow:auto;background:#111827;color:#e5e7eb;border-radius:9px;padding:14px;white-space:pre-wrap;word-break:break-word}.switch{width:18px;height:18px}@media(max-width:850px){.span-4,.span-5,.span-6,.span-7,.span-8{grid-column:span 12}.shell{padding:12px}.topbar{align-items:flex-start}.slot-row{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<h1>submux 控制台</h1>
-<div id="msg" class="muted"></div>
+<main class="shell">
+  <section id="auth-init" class="panel auth hidden">
+    <h2>初始化 submux</h2>
+    <p class="muted">设置管理员密码。v2 不再创建全局订阅；每个 Profile 都有独立链接。</p>
+    <div class="field"><label>管理员密码（至少 6 位）</label><input id="init-password" type="password" autocomplete="new-password"></div>
+    <button class="primary" onclick="initialize()">开始使用</button>
+  </section>
 
-<section id="view-init" class="hidden">
- <h2>首次初始化</h2>
- <p class="muted">设置管理员密码(至少 6 位)。同时会自动生成订阅 token。</p>
- <input type="password" id="init-pw" placeholder="管理员密码">
- <button onclick="doInit()">初始化</button>
-</section>
+  <section id="auth-login" class="panel auth hidden">
+    <h2>登录</h2>
+    <div class="field"><label>管理员密码</label><input id="login-password" type="password" autocomplete="current-password"></div>
+    <button class="primary" onclick="login()">登录</button>
+  </section>
 
-<section id="view-login" class="hidden">
- <h2>登录</h2>
- <input type="password" id="login-pw" placeholder="密码">
- <button onclick="doLogin()">登录</button>
-</section>
+  <section id="app" class="hidden">
+    <header class="topbar">
+      <div class="brand"><div class="logo">S</div><div><h1>submux 配置编排台</h1><p>节点库 × 模板版本 × Profile</p></div></div>
+      <button class="ghost" onclick="logout()">退出</button>
+    </header>
+    <nav class="tabs" id="tabs">
+      <button data-page="sources" class="active">1. 来源</button>
+      <button data-page="nodes">2. 节点库</button>
+      <button data-page="sets">3. NodeSet</button>
+      <button data-page="templates">4. 模板</button>
+      <button data-page="profiles">5. Profile</button>
+      <button data-page="settings">设置</button>
+    </nav>
 
-<section id="view-dash" class="hidden">
- <div class="row" style="justify-content:space-between">
-   <span class="muted">已登录</span><button onclick="doLogout()">退出</button>
- </div>
+    <section id="page-sources" class="page active">
+      <div class="section-head"><div><h2>节点来源</h2><p>机场订阅按计划刷新；手工来源用于保存自行加入的节点。</p></div></div>
+      <div class="grid">
+        <div class="card span-4">
+          <h3>添加来源</h3>
+          <div class="field"><label>类型</label><select id="source-kind" onchange="sourceKindChanged()"><option value="subscription">机场订阅</option><option value="manual">手工节点集合</option></select></div>
+          <div class="field"><label>名称</label><input id="source-name" placeholder="例如：机场 A / 自建节点"></div>
+          <div class="field" id="source-url-field"><label>订阅 URL</label><input id="source-url" placeholder="https://..."></div>
+          <div class="field" id="source-ua-field"><label>上游 User-Agent（可空）</label><input id="source-ua" placeholder="clash-verge/v2.0.0"></div>
+          <div class="field"><label>标签（逗号分隔）</label><input id="source-tags" placeholder="paid, hk"></div>
+          <button class="primary" onclick="createSource()">添加来源</button>
+        </div>
+        <div class="card span-8 table-wrap">
+          <table><thead><tr><th>来源</th><th>节点</th><th>状态</th><th>启用</th><th>操作</th></tr></thead><tbody id="source-rows"></tbody></table>
+        </div>
+      </div>
+    </section>
 
- <h2>订阅输出</h2>
- <p>订阅 URL: <code id="sub-url">—</code></p>
- <div class="row"><button onclick="copySub()">复制</button><button onclick="resetToken()">重置 token</button></div>
+    <section id="page-nodes" class="page">
+      <div class="section-head"><div><h2>统一节点库</h2><p>订阅节点随来源刷新；手工节点可编辑或删除。Alias 与标签在刷新后保留。</p></div></div>
+      <div class="grid">
+        <div class="card span-4">
+          <h3>导入手工节点</h3>
+          <div class="field"><label>手工来源</label><select id="import-source"></select></div>
+          <div class="field"><label>分享链接 / Base64 订阅 / Mihomo YAML</label><textarea id="import-content" placeholder="vless://...&#10;trojan://..."></textarea></div>
+          <button class="primary" onclick="importNodes()">导入节点</button>
+        </div>
+        <div class="card span-8 table-wrap">
+          <div class="field"><label>筛选</label><input id="node-filter" oninput="renderNodes()" placeholder="名称、协议、来源或标签"></div>
+          <table><thead><tr><th>节点</th><th>来源</th><th>协议</th><th>标签</th><th>启用</th><th>操作</th></tr></thead><tbody id="node-rows"></tbody></table>
+        </div>
+      </div>
+    </section>
 
- <h2>订阅源</h2>
- <table id="src-table"><thead><tr><th>名称</th><th>URL</th><th>UA</th><th>启用</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
- <div class="row">
-   <input type="text" id="ns-name" placeholder="名称" style="width:120px">
-   <input type="text" id="ns-url" placeholder="订阅 URL" style="flex:1">
-   <input type="text" id="ns-ua" placeholder="UA(可空)" style="width:140px">
-   <button onclick="addSource()">添加源</button>
- </div>
+    <section id="page-sets" class="page">
+      <div class="section-head"><div><h2>NodeSet</h2><p>用来源、指定节点、协议、名称和标签组成可复用的动态节点集合。</p></div></div>
+      <div class="grid">
+        <div class="card span-5">
+          <h3>新建 NodeSet</h3>
+          <div class="field"><label>名称</label><input id="set-name" placeholder="例如：付费节点 / 香港节点"></div>
+          <div class="field"><label>包含来源（可多选；来源与指定节点取并集）</label><select id="set-sources" multiple size="5"></select></div>
+          <div class="field"><label>指定节点（可多选）</label><select id="set-nodes" multiple size="7"></select></div>
+          <div class="field"><label>协议过滤（逗号分隔，可空）</label><input id="set-protocols" placeholder="vless, trojan, hysteria2"></div>
+          <div class="field"><label>名称包含（可空）</label><input id="set-name-filter" placeholder="HK"></div>
+          <div class="field"><label>必须同时具有的节点标签（逗号分隔）</label><input id="set-tags" placeholder="private, premium"></div>
+          <button class="primary" onclick="createNodeSet()">创建 NodeSet</button>
+        </div>
+        <div class="card span-7 table-wrap">
+          <table><thead><tr><th>NodeSet</th><th>选择条件</th><th>启用</th><th>操作</th></tr></thead><tbody id="set-rows"></tbody></table>
+        </div>
+      </div>
+    </section>
 
- <h2>覆盖配置(Merge YAML)</h2>
- <textarea id="ov" placeholder="prepend-rules:&#10;  - DOMAIN-SUFFIX,example.com,DIRECT"></textarea>
- <button onclick="saveOverride()">保存覆盖</button>
+    <section id="page-templates" class="page">
+      <div class="section-head"><div><h2>配置模板</h2><p>模板由平台维护，发布后形成不可变版本；已有 Profile 不会被新版本悄悄改变。</p></div></div>
+      <div class="grid">
+        <div class="card span-4">
+          <h3>模板目录</h3>
+          <div id="template-list"></div>
+          <hr style="border:0;border-top:1px solid var(--line);margin:14px 0">
+          <div class="field"><label>新模板名称</label><input id="new-template-name"></div>
+          <div class="field"><label>引擎</label><select id="new-template-engine"><option value="mihomo">Mihomo</option><option value="sing-box">sing-box</option></select></div>
+          <div class="field"><label>场景</label><input id="new-template-scenario" placeholder="desktop / server / gateway"></div>
+          <button onclick="createTemplate()">创建草稿</button>
+        </div>
+        <div class="card span-8">
+          <h3 id="template-editor-title">选择模板以发布新版本</h3>
+          <div id="template-editor" class="hidden">
+            <div class="field"><label>目标内核版本</label><input id="template-engine-version" placeholder="例如 sing-box 1.14"></div>
+            <div class="field"><label>完整配置（Mihomo YAML / sing-box JSON）</label><textarea class="code" id="template-content"></textarea></div>
+            <div class="field"><label>插槽 JSON（key、target、mode、required）</label><textarea id="template-slots" placeholder='[{"key":"primary","target":"AUTO","mode":"replace","required":true}]'></textarea></div>
+            <button class="primary" onclick="publishTemplateVersion()">校验并发布新版本</button>
+          </div>
+        </div>
+      </div>
+    </section>
 
- <h2>设置</h2>
- <div class="row"><label style="width:110px">base_url</label><input type="text" id="set-base" placeholder="https://sub.example.com" style="flex:1"></div>
- <div class="row"><label style="width:110px">拉取间隔(秒)</label><input type="text" id="set-interval" style="width:140px"></div>
- <button onclick="saveSettings()">保存设置</button>
-</section>
+    <section id="page-profiles" class="page">
+      <div class="section-head"><div><h2>Profile 与订阅链接</h2><p>每个 Profile 固定引擎、模板版本、NodeSet 绑定和独立 token，不根据客户端 UA 猜格式。</p></div></div>
+      <div class="grid">
+        <div class="card span-4">
+          <h3>创建 Profile</h3>
+          <div class="field"><label>名称</label><input id="profile-name" placeholder="我的电脑 / 家庭网关"></div>
+          <div class="field"><label>模板当前版本</label><select id="profile-template" onchange="renderProfileSlots()"></select></div>
+          <div id="profile-slots"></div>
+          <div class="field"><label>到期时间（RFC3339，可空）</label><input id="profile-expiry" placeholder="2030-01-01T00:00:00Z"></div>
+          <button class="primary" onclick="createProfile()">编译并创建</button>
+        </div>
+        <div class="card span-8 table-wrap">
+          <table><thead><tr><th>Profile</th><th>固定输出</th><th>发布状态</th><th>启用</th><th>操作</th></tr></thead><tbody id="profile-rows"></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-settings" class="page">
+      <div class="section-head"><div><h2>设置</h2><p>外部地址只用于生成 Profile 链接；不会创建全局 token。</p></div></div>
+      <div class="panel" style="max-width:680px;box-shadow:none">
+        <div class="field"><label>外部 base_url</label><input id="setting-base" placeholder="https://sub.example.com"></div>
+        <div class="field"><label>机场刷新间隔（秒，60–604800）</label><input id="setting-interval" type="number" min="60" max="604800"></div>
+        <button class="primary" onclick="saveSettings()">保存</button>
+      </div>
+    </section>
+  </section>
+</main>
+
+<dialog id="preview-dialog"><div class="dialog-body"><div class="section-head"><div><h2>编译预览</h2><p id="preview-meta"></p></div><button onclick="document.querySelector('#preview-dialog').close()">关闭</button></div><pre id="preview-content"></pre></div></dialog>
+<div id="notice" class="notice hidden"></div>
 
 <script>
 const $=s=>document.querySelector(s);
-let SOURCES=[];
-function msg(t,cls){const m=$('#msg');m.textContent=t;m.className=cls||'muted';}
-function esc(s){return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
-async function api(method,path,body){
- const opt={method,headers:{}};
- if(body!==undefined){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(body);}
- const r=await fetch(path,opt);
- if(!r.ok){throw new Error((await r.text()).trim()||('HTTP '+r.status));}
- const ct=r.headers.get('content-type')||'';
- return ct.includes('json')?r.json():r.text();
-}
-function show(v){for(const id of ['init','login','dash'])$('#view-'+id).classList.toggle('hidden',id!==v);}
+let SOURCES=[],NODES=[],NODESETS=[],TEMPLATES=[],VERSIONS=new Map(),PROFILES=[],SETTINGS={};
+const splitCSV=v=>v.split(',').map(x=>x.trim()).filter(Boolean);
+const selectedInts=sel=>[...sel.selectedOptions].map(x=>Number(x.value));
+const sourceById=id=>SOURCES.find(x=>x.id===id);
+const nodeLabel=n=>(n.alias||n.name)+' · '+n.protocol;
+function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function notify(text,error=false){const n=$('#notice');n.textContent=text;n.className='notice'+(error?' err':'');clearTimeout(notify.timer);notify.timer=setTimeout(()=>n.classList.add('hidden'),3800);}
+async function api(method,path,body){const init={method,headers:{}};if(body!==undefined){init.headers['Content-Type']='application/json';init.body=JSON.stringify(body);}const r=await fetch(path,init);if(!r.ok)throw new Error((await r.text()).trim()||`HTTP ${r.status}`);const type=r.headers.get('content-type')||'';return type.includes('json')?r.json():r.text();}
+async function action(fn,success){try{await fn();if(success)notify(success);}catch(e){notify(e.message,true);}}
 
-async function boot(){
- try{const s=await api('GET','/api/status');
-  if(!s.initialized)show('init');
-  else if(!s.authed)show('login');
-  else{show('dash');await loadAll();}
- }catch(e){msg('加载失败: '+e.message,'err');}
-}
-async function doInit(){try{await api('POST','/api/init',{password:$('#init-pw').value});msg('已初始化','ok');show('dash');await loadAll();}catch(e){msg(e.message,'err');}}
-async function doLogin(){try{await api('POST','/api/login',{password:$('#login-pw').value});msg('');show('dash');await loadAll();}catch(e){msg('登录失败: '+e.message,'err');}}
-async function doLogout(){await api('POST','/api/logout');show('login');}
+async function boot(){try{const status=await api('GET','/api/status');if(!status.initialized)return showAuth('init');if(!status.authed)return showAuth('login');await enterApp();}catch(e){notify(e.message,true);}}
+function showAuth(which){$('#auth-init').classList.toggle('hidden',which!=='init');$('#auth-login').classList.toggle('hidden',which!=='login');$('#app').classList.add('hidden');}
+async function initialize(){await action(async()=>{await api('POST','/api/init',{password:$('#init-password').value});await enterApp();},'初始化完成');}
+async function login(){await action(async()=>{await api('POST','/api/login',{password:$('#login-password').value});await enterApp();});}
+async function logout(){await api('POST','/api/logout');showAuth('login');}
+async function enterApp(){$('#auth-init').classList.add('hidden');$('#auth-login').classList.add('hidden');$('#app').classList.remove('hidden');await loadAll();}
+$('#tabs').addEventListener('click',e=>{const b=e.target.closest('[data-page]');if(!b)return;document.querySelectorAll('#tabs button').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('.page').forEach(x=>x.classList.toggle('active',x.id==='page-'+b.dataset.page));});
 
-async function loadAll(){await Promise.all([loadSources(),loadOverride(),loadSettings()]);}
+async function loadAll(){[SETTINGS,SOURCES,NODES]=await Promise.all([api('GET','/api/settings'),api('GET','/api/sources'),api('GET','/api/nodes')]);renderSettings();renderSources();renderNodes();renderSourceOptions();[NODESETS,TEMPLATES]=await Promise.all([api('GET','/api/node-sets'),api('GET','/api/templates')]);await loadVersions();renderNodeSets();renderTemplates();renderSetOptions();renderProfileTemplateOptions();PROFILES=await api('GET','/api/profiles');renderProfiles();}
 
-async function loadSources(){
- SOURCES=await api('GET','/api/sources');
- const tb=$('#src-table tbody');tb.innerHTML='';
- for(const s of SOURCES){
-  const tr=document.createElement('tr');
-  const status=s.last_error?('<span class=err>'+esc(s.last_error)+'</span>')
-    :(s.last_success_at?('<span class=ok>'+esc(s.last_success_at)+'</span>'):'<span class=muted>未拉取</span>');
-  tr.innerHTML=`<td>${esc(s.name)}</td><td class=muted>${esc(s.url)}</td><td>${esc(s.user_agent)}</td>`+
-   `<td><input type=checkbox ${s.enabled?'checked':''} onchange="toggleSrc(${s.id},this.checked)"></td>`+
-   `<td>${status}</td>`+
-   `<td><button onclick="refreshSrc(${s.id})">刷新</button> <button onclick="delSrc(${s.id})">删除</button></td>`;
-  tb.appendChild(tr);
- }
-}
-async function addSource(){try{await api('POST','/api/sources',{name:$('#ns-name').value,url:$('#ns-url').value,user_agent:$('#ns-ua').value});$('#ns-name').value=$('#ns-url').value=$('#ns-ua').value='';await loadSources();}catch(e){msg(e.message,'err');}}
-async function delSrc(id){if(!confirm('删除该源?'))return;await api('DELETE','/api/sources/'+id);await loadSources();}
-async function refreshSrc(id){msg('刷新中…');try{const r=await api('POST','/api/sources/'+id+'/refresh');msg(r.ok?'刷新成功':'刷新失败: '+(r.error||''),r.ok?'ok':'err');}catch(e){msg(e.message,'err');}await loadSources();}
-async function toggleSrc(id,enabled){const s=SOURCES.find(x=>x.id===id);if(!s)return;try{await api('PUT','/api/sources/'+id,{name:s.name,url:s.url,user_agent:s.user_agent,enabled,sort_order:s.sort_order});}catch(e){msg(e.message,'err');}await loadSources();}
+function sourceKindChanged(){const manual=$('#source-kind').value==='manual';$('#source-url-field').classList.toggle('hidden',manual);$('#source-ua-field').classList.toggle('hidden',manual);}
+async function createSource(){await action(async()=>{const kind=$('#source-kind').value;await api('POST','/api/sources',{kind,name:$('#source-name').value,url:kind==='subscription'?$('#source-url').value:'',user_agent:kind==='subscription'?$('#source-ua').value:'',tags:splitCSV($('#source-tags').value)});$('#source-name').value=$('#source-url').value=$('#source-tags').value='';await reloadSourcesAndNodes();},'来源已添加');}
+async function reloadSourcesAndNodes(){[SOURCES,NODES]=await Promise.all([api('GET','/api/sources'),api('GET','/api/nodes')]);renderSources();renderNodes();renderSourceOptions();renderSetOptions();}
+function renderSources(){const body=$('#source-rows');body.innerHTML=SOURCES.map(s=>{const status=s.kind==='manual'?'<span class="badge">手工维护</span>':s.last_error?`<span class="err">${esc(s.last_error)}</span>`:s.last_success_at?`<span class="ok">${esc(s.last_success_at)}</span>`:'<span class="muted">尚未刷新</span>';return `<tr><td><strong>${esc(s.name)}</strong><br><span class="badge ${s.kind==='subscription'?'blue':''}">${s.kind==='subscription'?'机场订阅':'手工来源'}</span> ${esc((s.tags||[]).join(', '))}<br><small class="muted">${esc(s.url||'')}</small></td><td>${s.node_count||0}</td><td>${status}</td><td><input class="switch" type="checkbox" ${s.enabled?'checked':''} onchange="toggleSource(${s.id},this.checked)"></td><td class="actions">${s.kind==='subscription'?`<button onclick="refreshSource(${s.id})">刷新</button>`:''}<button class="danger" onclick="deleteSource(${s.id})">删除</button></td></tr>`;}).join('')||'<tr><td colspan="5" class="empty">先添加机场订阅或手工来源</td></tr>';}
+async function toggleSource(id,enabled){const s=sourceById(id);await action(async()=>{await api('PUT','/api/sources/'+id,{kind:s.kind,name:s.name,description:s.description||'',tags:s.tags||[],url:s.url||'',user_agent:s.user_agent||'',sort_order:s.sort_order||0,enabled});await reloadSourcesAndNodes();});}
+async function refreshSource(id){await action(async()=>{const result=await api('POST','/api/sources/'+id+'/refresh');if(!result.ok)throw new Error(result.error||'刷新失败');await reloadSourcesAndNodes();await reloadBuildState();},'机场节点已刷新并重编译 Profile');}
+async function deleteSource(id){if(!confirm('删除来源及其节点？被 NodeSet 使用时会拒绝。'))return;await action(async()=>{await api('DELETE','/api/sources/'+id);await reloadSourcesAndNodes();},'来源已删除');}
 
-async function loadOverride(){const o=await api('GET','/api/override');$('#ov').value=o.content||'';}
-async function saveOverride(){try{await api('PUT','/api/override',{content:$('#ov').value});msg('覆盖已保存','ok');}catch(e){msg(e.message,'err');}}
+function renderSourceOptions(){const manuals=SOURCES.filter(x=>x.kind==='manual');$('#import-source').innerHTML=manuals.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')||'<option value="">请先创建手工来源</option>';}
+async function importNodes(){await action(async()=>{await api('POST','/api/nodes/import',{source_id:Number($('#import-source').value),content:$('#import-content').value});$('#import-content').value='';await reloadSourcesAndNodes();await reloadBuildState();},'节点已导入');}
+function renderNodes(){const q=$('#node-filter').value.toLowerCase();const values=NODES.filter(n=>{const s=sourceById(n.source_id);return [n.name,n.alias,n.protocol,(n.tags||[]).join(' '),s?.name].join(' ').toLowerCase().includes(q)});$('#node-rows').innerHTML=values.map(n=>{const s=sourceById(n.source_id);return `<tr><td><strong>${esc(n.alias||n.name)}</strong>${n.alias?`<br><small class="muted">原名：${esc(n.name)}</small>`:''}</td><td>${esc(s?.name||n.source_id)}</td><td><span class="badge blue">${esc(n.protocol)}</span></td><td>${esc((n.tags||[]).join(', '))||'<span class="muted">—</span>'}</td><td><input class="switch" type="checkbox" ${n.enabled?'checked':''} onchange="toggleNode(${n.id},this.checked)"></td><td class="actions"><button onclick="editNode(${n.id})">元数据</button>${n.origin==='manual'?`<button class="danger" onclick="deleteNode(${n.id})">删除</button>`:''}</td></tr>`}).join('')||'<tr><td colspan="6" class="empty">没有匹配节点</td></tr>';}
+async function toggleNode(id,enabled){await action(async()=>{await api('PUT','/api/nodes/'+id,{enabled});NODES=await api('GET','/api/nodes');renderNodes();await reloadBuildState();});}
+async function editNode(id){const n=NODES.find(x=>x.id===id);const alias=prompt('显示别名（留空使用原名）',n.alias||'');if(alias===null)return;const tags=prompt('标签（逗号分隔）',(n.tags||[]).join(', '));if(tags===null)return;await action(async()=>{await api('PUT','/api/nodes/'+id,{alias,tags:splitCSV(tags)});NODES=await api('GET','/api/nodes');renderNodes();renderSetOptions();await reloadBuildState();},'节点元数据已保存');}
+async function deleteNode(id){if(!confirm('删除这个手工节点？'))return;await action(async()=>{await api('DELETE','/api/nodes/'+id);NODES=await api('GET','/api/nodes');renderNodes();renderSetOptions();await reloadBuildState();},'节点已删除');}
 
-async function loadSettings(){
- const s=await api('GET','/api/settings');
- $('#set-base').value=s.base_url||'';
- $('#set-interval').value=s.fetch_interval_sec||'';
- $('#sub-url').textContent=s.sub_url||(location.origin+'/sub/'+s.output_token);
-}
-async function saveSettings(){try{await api('PUT','/api/settings',{base_url:$('#set-base').value,fetch_interval_sec:parseInt($('#set-interval').value)||0});msg('设置已保存','ok');await loadSettings();}catch(e){msg(e.message,'err');}}
-async function resetToken(){if(!confirm('重置 token?旧订阅链接将失效'))return;await api('POST','/api/settings/reset-token');await loadSettings();msg('token 已重置','ok');}
-function copySub(){navigator.clipboard.writeText($('#sub-url').textContent);msg('已复制','ok');}
+function renderSetOptions(){$('#set-sources').innerHTML=SOURCES.map(s=>`<option value="${s.id}">${esc(s.name)} (${s.node_count||0})</option>`).join('');$('#set-nodes').innerHTML=NODES.map(n=>`<option value="${n.id}">${esc(nodeLabel(n))}</option>`).join('');}
+async function createNodeSet(){await action(async()=>{await api('POST','/api/node-sets',{name:$('#set-name').value,source_ids:selectedInts($('#set-sources')),node_ids:selectedInts($('#set-nodes')),protocols:splitCSV($('#set-protocols').value),name_contains:$('#set-name-filter').value,tags:splitCSV($('#set-tags').value)});$('#set-name').value='';NODESETS=await api('GET','/api/node-sets');renderNodeSets();renderProfileSlots();},'NodeSet 已创建');}
+function renderNodeSets(){$('#set-rows').innerHTML=NODESETS.map(s=>{const sources=(s.source_ids||[]).map(id=>sourceById(id)?.name||id);const bits=[sources.length?'来源：'+sources.join('、'):'',s.node_ids?.length?'指定节点：'+s.node_ids.length:'',s.protocols?.length?'协议：'+s.protocols.join('/'):'',s.name_contains?'名称：'+s.name_contains:'',s.tags?.length?'标签：'+s.tags.join('+'):''].filter(Boolean);return `<tr><td><strong>${esc(s.name)}</strong><br><small class="muted">${esc(s.description||'')}</small></td><td>${esc(bits.join('；')||'全部启用节点')}</td><td><input class="switch" type="checkbox" ${s.enabled?'checked':''} onchange="toggleNodeSet(${s.id},this.checked)"></td><td><button class="danger" onclick="deleteNodeSet(${s.id})">删除</button></td></tr>`}).join('')||'<tr><td colspan="4" class="empty">创建一个 NodeSet 后才能绑定 Profile</td></tr>';}
+async function toggleNodeSet(id,enabled){const s=NODESETS.find(x=>x.id===id);await action(async()=>{await api('PUT','/api/node-sets/'+id,{...s,enabled});NODESETS=await api('GET','/api/node-sets');renderNodeSets();await reloadBuildState();});}
+async function deleteNodeSet(id){if(!confirm('删除 NodeSet？被 Profile 使用时会拒绝。'))return;await action(async()=>{await api('DELETE','/api/node-sets/'+id);NODESETS=await api('GET','/api/node-sets');renderNodeSets();renderProfileSlots();},'NodeSet 已删除');}
 
+async function loadVersions(){VERSIONS.clear();await Promise.all(TEMPLATES.map(async t=>{const list=await api('GET',`/api/templates/${t.id}/versions`);list.forEach(v=>VERSIONS.set(v.id,v));}));}
+function renderTemplates(){$('#template-list').innerHTML=TEMPLATES.map(t=>`<div class="template-item"><div><h4>${esc(t.name)}</h4><span class="badge blue">${esc(t.engine)}</span> <span class="badge">${esc(t.scenario)}</span><p>${esc(t.description||'')} · 当前 v${VERSIONS.get(t.current_version_id)?.version||'—'}</p></div><div class="actions"><button onclick="selectTemplate(${t.id})">新版本</button><button class="danger" onclick="deleteTemplate(${t.id})">删除</button></div></div>`).join('')||'<div class="empty">没有模板</div>';}
+function selectTemplate(id){const t=TEMPLATES.find(x=>x.id===id),v=VERSIONS.get(t.current_version_id);$('#template-editor').classList.remove('hidden');$('#template-editor').dataset.id=id;$('#template-editor-title').textContent=`${t.name} · 发布新版本`;$('#template-engine-version').value=v?.engine_version||'';$('#template-content').value=v?.content||'';$('#template-slots').value=JSON.stringify(v?.slots||[],null,2);}
+async function createTemplate(){await action(async()=>{const result=await api('POST','/api/templates',{name:$('#new-template-name').value,engine:$('#new-template-engine').value,scenario:$('#new-template-scenario').value,description:'',status:'draft'});TEMPLATES=await api('GET','/api/templates');await loadVersions();renderTemplates();selectTemplate(result.id);},'模板草稿已创建');}
+async function publishTemplateVersion(){await action(async()=>{const id=Number($('#template-editor').dataset.id),slots=JSON.parse($('#template-slots').value);await api('POST',`/api/templates/${id}/versions`,{engine_version:$('#template-engine-version').value,content:$('#template-content').value,slots});TEMPLATES=await api('GET','/api/templates');await loadVersions();renderTemplates();renderProfileTemplateOptions();selectTemplate(id);},'新模板版本已发布');}
+async function deleteTemplate(id){if(!confirm('删除模板及所有版本？被 Profile 使用时会拒绝。'))return;await action(async()=>{await api('DELETE','/api/templates/'+id);TEMPLATES=await api('GET','/api/templates');await loadVersions();renderTemplates();renderProfileTemplateOptions();},'模板已删除');}
+
+function renderProfileTemplateOptions(){$('#profile-template').innerHTML=TEMPLATES.filter(t=>t.current_version_id).map(t=>`<option value="${t.current_version_id}">${esc(t.name)} · v${VERSIONS.get(t.current_version_id)?.version||''}</option>`).join('');renderProfileSlots();}
+function renderProfileSlots(){const version=VERSIONS.get(Number($('#profile-template').value));$('#profile-slots').innerHTML=(version?.slots||[]).map(slot=>`<div class="slot-row"><label><strong>${esc(slot.key)}</strong>${slot.required?' *':''}<br><small class="muted">→ ${esc(slot.target)}</small></label><select data-profile-slot="${esc(slot.key)}"><option value="">不绑定</option>${NODESETS.filter(x=>x.enabled).map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select></div>`).join('');}
+async function createProfile(){await action(async()=>{const bindings=[...document.querySelectorAll('[data-profile-slot]')].filter(x=>x.value).map(x=>({slot:x.dataset.profileSlot,node_set_id:Number(x.value)}));await api('POST','/api/profiles',{name:$('#profile-name').value,template_version_id:Number($('#profile-template').value),bindings,expires_at:$('#profile-expiry').value});$('#profile-name').value='';PROFILES=await api('GET','/api/profiles');renderProfiles();},'Profile 已编译并发布');}
+function versionLabel(id){const v=VERSIONS.get(id),t=TEMPLATES.find(x=>x.id===v?.template_id);return t?`${t.name} v${v.version}`:`version ${id}`;}
+function absoluteProfileURL(p){return p.url.startsWith('http')?p.url:(SETTINGS.base_url||location.origin)+p.url;}
+function renderProfiles(){$('#profile-rows').innerHTML=PROFILES.map(p=>{const artifact=p.artifact||{};const status=artifact.last_error?`<span class="err">降级：${esc(artifact.last_error)}</span>`:artifact.last_success?`<span class="ok">已发布 ${esc(artifact.last_success)}</span>`:'<span class="muted">尚无产物</span>';return `<tr><td><strong>${esc(p.name)}</strong><br><small class="muted">${esc(versionLabel(p.template_version_id))}</small><code class="profile-url">${esc(absoluteProfileURL(p))}</code></td><td><span class="badge blue">${esc(p.engine)}</span><br><small class="muted">${(p.bindings||[]).length} 个插槽绑定</small></td><td>${status}<br><small class="muted">${esc((artifact.revision||'').slice(0,12))}</small></td><td><input class="switch" type="checkbox" ${p.enabled?'checked':''} onchange="toggleProfile(${p.id},this.checked)"></td><td class="actions"><button onclick="copyProfile(${p.id})">复制</button><button onclick="previewProfile(${p.id})">预览</button><button onclick="publishProfile(${p.id})">重编译</button><button onclick="resetProfileToken(${p.id})">换 token</button><button class="danger" onclick="deleteProfile(${p.id})">删除</button></td></tr>`}).join('')||'<tr><td colspan="5" class="empty">绑定模板与 NodeSet，创建第一条订阅链接</td></tr>';}
+async function reloadBuildState(){PROFILES=await api('GET','/api/profiles');renderProfiles();}
+async function toggleProfile(id,enabled){const p=PROFILES.find(x=>x.id===id);await action(async()=>{await api('PUT','/api/profiles/'+id,{name:p.name,template_version_id:p.template_version_id,bindings:p.bindings,enabled,expires_at:p.expires_at||''});await reloadBuildState();});}
+function copyProfile(id){const p=PROFILES.find(x=>x.id===id);navigator.clipboard.writeText(absoluteProfileURL(p));notify('订阅链接已复制');}
+async function previewProfile(id){await action(async()=>{const r=await api('POST',`/api/profiles/${id}/preview`);$('#preview-meta').textContent=`${r.content_type} · ${r.node_count} 个节点 · revision ${r.revision.slice(0,12)}`;$('#preview-content').textContent=r.content;$('#preview-dialog').showModal();});}
+async function publishProfile(id){await action(async()=>{await api('POST',`/api/profiles/${id}/publish`);await reloadBuildState();},'Profile 已重新编译');}
+async function resetProfileToken(id){if(!confirm('更换 token 后旧链接立即失效，继续？'))return;await action(async()=>{await api('POST',`/api/profiles/${id}/reset-token`);await reloadBuildState();},'Profile token 已更换');}
+async function deleteProfile(id){if(!confirm('删除 Profile 与发布产物？'))return;await action(async()=>{await api('DELETE','/api/profiles/'+id);await reloadBuildState();},'Profile 已删除');}
+
+function renderSettings(){$('#setting-base').value=SETTINGS.base_url||'';$('#setting-interval').value=SETTINGS.fetch_interval_sec||10800;}
+async function saveSettings(){await action(async()=>{await api('PUT','/api/settings',{base_url:$('#setting-base').value,fetch_interval_sec:Number($('#setting-interval').value)});SETTINGS=await api('GET','/api/settings');renderSettings();renderProfiles();},'设置已保存');}
 boot();
 </script>
 </body>

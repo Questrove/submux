@@ -1,115 +1,138 @@
-# submux 设计文档
+# submux v2 设计
 
-## 概述
+## 定位
 
-submux 是一个**订阅聚合 / 配置编排服务**(subscription multiplexer):把多个上游机场订阅合并成一份,叠加用户自定义的声明式覆盖配置,再按客户端类型输出聚合后的订阅。
+submux 是配置编排器，不是订阅文件合并器，也不运行代理内核。上游机场只拥有节点连接信息；DNS、路由、策略组、入口和运行场景都由平台模板拥有。
 
-它是一个 **Go 单二进制**,无系统 / 运行时依赖(`CGO_ENABLED=0` 可交叉编译出单文件),自带 Web 控制台。
+核心约束：
 
-**核心定位(订阅加工厂)**:submux 自己**不跑代理、不接管流量**。它只负责「输入多个订阅 → 合并 + 覆盖 → 输出一个聚合订阅 URL」,供各设备的代理客户端去订阅。
+1. 不继承机场策略，不做全局覆盖。
+2. 不根据 User-Agent 猜输出；一个 Profile 永远只对应一个引擎。
+3. 模板版本不可变，Profile 显式固定版本。
+4. 任何有损转换都必须失败，不能部分输出。
+5. 客户端请求只读预编译产物，不拉上游、不现场拼装。
 
-## 设计决策
+## 领域模型
 
-| 决策 | 选择 | 理由 |
-|------|------|------|
-| 语言 | Go,单二进制 | 体积小、无运行时依赖、好部署 |
-| 角色 | 订阅加工厂(不跑代理) | 逻辑独立、好测;本机管控以后再加 |
-| 覆盖逻辑 | **声明式 Merge YAML(零解释器)** | 覆盖本质是声明式「加 / 改」,无过程逻辑;避免塞入脚本解释器;复用 clash 生态 Merge 约定 |
-| 输出格式 | 按 UA 多格式(clash + base64) | 多客户端通用;clash 是主链路,sing-box 列二期 |
-| 访问控制 | 订阅 URL 带随机 token + 网页登录 | 对公网安全 |
-| 缓存 | 只缓存「拉上游」这层;合并 / 覆盖 / 渲染实时算 | 解耦「客户端拉取频率」与「上游拉取频率」,**避免高频穿透打爆上游被限流**;渲染毫秒级,实时算保证改动立即生效 |
-| 存储 | **bbolt**(纯 Go K-V) | 免 cgo、单文件、事务 + 崩溃安全;数据访问全是 K-V,不需要 SQL |
+| 模型 | 作用 | 关键字段 |
+|---|---|---|
+| Source | 节点来源 | `kind=subscription/manual`、URL、UA、标签、启用状态 |
+| NodeRecord | 统一节点库记录 | 来源、协议、规范化配置、语义指纹、Alias、标签、启用状态 |
+| NodeSet | 可复用的节点选择器 | 来源 ID、节点 ID、排除 ID、协议、名称、标签 |
+| Template | 模板目录元数据 | 引擎、场景、描述、当前版本 |
+| TemplateVersion | 不可变完整配置 | 完整 YAML/JSON、目标内核版本、插槽、校验和 |
+| Profile | 可发布配置实例 | 固定模板版本、插槽绑定、固定引擎、独立 token、到期时间 |
+| ProfileArtifact | 预编译产物 | body、Content-Type、revision、last-success、last-error |
 
-## 架构与组件
+模板插槽只声明节点注入目标：
 
-一个 Go 二进制,两条请求路径 + 一条后台定时任务:
-
-```
-                    ┌──────────────── submux (单 Go 二进制) ────────────────┐
-客户端(带UA) ─GET /sub/{token}─►│ [A]HTTP → [C]合并主模型 → [D]Merge覆盖 → [E]UA分发适配器 │─► clash / base64
-                    │                                                       │
-浏览器 ──登录────────►│ [A]控制台 API + [G]内嵌前端                            │
-                    │                                                       │
-  上游机场订阅 ◄──定时拉取── [B]Fetcher/缓存 ──► [F]bbolt                    │
-                    └───────────────────────────────────────────────────────┘
+```json
+{"key":"primary","target":"AUTO","mode":"replace","required":true}
 ```
 
-| 模块 | 包 | 职责 |
-|------|-----|------|
-| A HTTP 层 | `internal/server` | 路由、登录鉴权、`/sub/{token}` 输出端点 |
-| B 源管理 + 拉取 | `internal/source` | 源 CRUD;后台定时拉原文 → 校验解析 → 写缓存;手动刷新;拉失败降级;10 MiB 响应上限 |
-| C 解析 + 合并 | `internal/parse`, `internal/merge` | 解析 Clash YAML / 明文或 Base64 分享链接(vless、vmess、trojan、ss、hysteria2)→ 节点;合并多源 → clash 主模型(按协议连接身份去重、来源前缀) |
-| D 覆盖引擎 | `internal/override` | 把 Merge YAML 按约定合并进主模型 |
-| E 输出适配器 | `internal/output` | `Render(主模型) → (bytes, contentType)`;UA 分发;Clash / Base64 适配器 |
-| F 存储 | `internal/store` | bbolt:源、覆盖、设置、缓存 |
-| G Web UI | `web/`(embed.FS) | 登录、源管理、覆盖编辑、URL / 预览、状态、刷新 |
-
-**模块边界原则**:各包单一职责、通过明确接口通信、可独立测试。`output.Adapter` 是接口,新增格式只加一个实现 + 注册到 UA 分发器;`store` 接口与后端实现解耦(从 sqlite 迁到 bbolt 时其余包零改动)。
-
-## 存储模型(bbolt)
-
-bbolt 是纯 Go 的 B+tree 单文件 K-V。用 4 个 bucket,值用 JSON 序列化:
-
-| bucket | key → value |
-|--------|-------------|
-| `settings` | `admin_pw_hash` / `session_secret` / `output_token` / `fetch_interval_sec` / `output_update_interval_hours` / `listen_addr` / `base_url` / `default_format` |
-| `sources` | `id(8字节)` → Source{name,url,user_agent,enabled,sort_order,timestamps} |
-| `source_cache` | `source_id(8字节)` → Cache{raw,nodes,userinfo,last_success_at,last_error} |
-| `meta` | `override` → Merge YAML;`lastgood:<format>` → 上次成功渲染输出 |
-
-SQL 的过滤 / 排序改为内存遍历(`ListEnabled`、按 `sort_order` 排序),外键级联改为删除源时手动删对应 cache,id 用 bucket `NextSequence()`。合并后的主模型**不入库**,每次请求实时算。
-
-## 覆盖机制:Merge YAML
-
-覆盖配置是一段 YAML,按 **Clash Verge / mihomo party 的 Merge 约定**合并进主模型;submux 内部展开成标准完整 clash yaml 再输出——**客户端拿到的是普通配置,不含任何 Merge 指令**。
-
-**合并规则**:
-1. `prepend-<key>` / `append-<key>`:对**同一层级**的数组字段前插 / 后插,指令键本身不写入结果
-2. map 字段:递归深合并
-3. 标量 / 普通数组:直接覆盖
-
-示例:
-
-```yaml
-prepend-rules:                      # 插到 rules 最前
-  - DOMAIN-SUFFIX,example.com,DIRECT
-  - DOMAIN-KEYWORD,mykeyword,DIRECT
-dns:
-  fallback: [tls://1.1.1.1:853]     # 数组直接覆盖
-  append-fake-ip-filter:            # 追加到 dns.fake-ip-filter
-    - "+.example.com"
-tun:
-  append-route-exclude-address:     # 追加到 tun.route-exclude-address
-    - 192.168.1.0/24
-```
-
-覆盖引擎纯声明式、零计算、无脚本执行,因此也无注入面。
+- Mihomo 的 `target` 必须是现有 `proxy-groups[].name`。
+- sing-box 的 `target` 必须是现有 `selector` 或 `urltest` outbound tag。
+- `append` 保留模板静态成员后追加节点；`replace` 用节点结果替换目标成员。
+- `required` 插槽未绑定或解析为空时，编译失败。
 
 ## 数据流
 
-**输出请求 `GET /sub/{token}`**:
-1. 校验 token(常量时间比较),失败 → 401
-2. 读所有 enabled 源的缓存节点;全部为空 → 503
-3. **合并**:按协议、端点、凭据、传输和协议选项组成的连接身份去重,加来源前缀(`[源名] 节点名`),组装 clash 主模型
-4. **覆盖**:把 Merge YAML 合并进主模型
-5. **UA 分发**:`clash`/`mihomo`/`meta` → Clash;`v2rayN`/`v2rayNG`/`NekoBox`/`Hiddify` → Base64;未知 UA 与 `sing-box` → `default_format`
-6. **渲染** → 返回,设响应头:`Subscription-Userinfo`(各源聚合)、`Content-Disposition`、`Profile-Update-Interval`
+### 来源刷新
 
-**后台定时拉取**:每 `fetch_interval_sec` 对每个 enabled 源带其 UA 拉原文 → 限制响应大小 → 解析校验 → 写缓存;失败只写 `last_error`、保留上次结果(stale-while-error)。修改间隔后后台计时器立即重置。**请求路径只读缓存,永不主动拉上游。**
+```text
+HTTP(S) 下载（10 MiB 上限）
+  -> 解析订阅
+  -> 规范化 NodeRecord
+  -> 按连接语义计算 fingerprint
+  -> 单事务替换该来源节点 + 更新刷新元数据
+  -> 重编译所有启用 Profile
+```
 
-## 错误处理与安全
+数据库不保存上游原文，也不保存第二份序列化节点快照。刷新时相同 fingerprint 沿用 Node ID、Alias、标签和启用状态；消失的节点从该来源快照删除。单来源失败只更新 `last_error`，上一份规范化节点快照保持不变。
 
-- **上游拉取失败**:用上次缓存降级,控制台标红显示错误与上次成功时间
-- **输入边界**:只接受 HTTP(S) 上游;响应最大 10 MiB;空订阅、不可解析订阅与不合法控制台配置在写入前失败
-- **覆盖 / 渲染失败**:**绝不输出未覆盖的配置**(否则本该 DIRECT 的流量可能误走代理);返回上次成功输出 + 控制台报错,无则 503
-- **格式转换边界**:Clash 主模型保留上游全部节点字段;Base64 是兼容输出,只转换 `docs/PROTOCOLS.md` 明确支持的协议和传输组合。任一节点不能无损表达即整体失败,禁止部分输出
-- **鉴权**:密码 bcrypt 哈希;HMAC 签名 session cookie(`HttpOnly` + `SameSite`);输出 token 常量时间比较、可重置
-- **部署**:默认监听 `127.0.0.1`;对外务必配反向代理 + HTTPS,订阅 URL 必须走 HTTPS 防 token 被窃
+### NodeSet 解析
 
-## Roadmap
+来源选择与显式节点选择取并集；两者都为空表示全部启用节点。随后依次应用：
 
-- sing-box 输出适配器
-- 多 profile(不同源组合 / 覆盖 / token)
-- 本机 mihomo 内核管控(旁路由 / TUN)
-- TUIC 分享链接支持
-- 覆盖编辑器换 CodeMirror
+1. 来源和节点启用状态；
+2. 显式排除 ID；
+3. 协议过滤；
+4. 显示名称包含过滤；
+5. 必须同时具备的标签过滤。
+
+多插槽或多来源得到相同 fingerprint 时，Profile 中只生成一个节点实体。名称按稳定顺序生成；未设置 Alias 时带来源前缀，冲突时追加节点 ID。
+
+### 模板发布
+
+发布前会解析完整模板、校验插槽目标与基础引用。每次发布创建新的 TemplateVersion 并更新 Template 的 `current_version_id`，旧版本不修改。已有 Profile 仍固定旧版本；升级需要显式修改 Profile。
+
+### Profile 编译与发布
+
+```text
+Profile + TemplateVersion + bindings
+  -> 解析每个 NodeSet
+  -> 全局节点去重与确定性命名
+  -> 引擎编译器注入节点与插槽成员
+  -> 严格引用/协议字段校验
+  -> SHA-256(最终产物) 作为 revision
+  -> 原子替换该 Profile artifact
+```
+
+保存 Profile 时先 Preview，成功后才持久化并发布。来源或节点变化会自动重编译启用的 Profile。重编译失败时只更新该 artifact 的 `last_error`，原 body、revision 与 last-success 不变；公开链接继续返回 last-good，并附带 `X-Submux-Degraded`。
+
+### 订阅请求
+
+`GET /sub/{profile-token}` 只执行：token 索引查找、启用/到期校验、读取 artifact、返回固定 Content-Type。Mihomo 返回 YAML，sing-box 返回 JSON；User-Agent 不参与决策。无产物返回 503，过期返回 410，未知或禁用 token 返回 401。
+
+## 存储
+
+bbolt bucket：
+
+| bucket | 内容 |
+|---|---|
+| `settings` | 管理凭据、session secret、base URL、刷新间隔、预置模板标记 |
+| `sources` | Source |
+| `source_cache` | 流量元数据、刷新时间与错误，不含订阅原文 |
+| `nodes` | NodeRecord |
+| `node_sets` | NodeSet |
+| `templates` | Template |
+| `template_versions` | TemplateVersion |
+| `profiles` | Profile |
+| `profile_artifacts` | ProfileArtifact，以 profile ID 为 key |
+| `token_index` | 独立 token 到 profile ID 的索引 |
+| `meta` | schema version |
+
+v1 数据库首次打开时执行破坏式迁移：旧 Source 归类为 subscription；删除全局 output token、override 与全局 last-good；清除 source cache 中的原文。旧来源可在刷新后进入统一节点库。
+
+## 模块边界
+
+| 包 | 职责 |
+|---|---|
+| `internal/parse` | 上游 YAML、明文/Base64 分享链接解析 |
+| `internal/node` | NodeRecord 构造、指纹、显示名、手工导入 |
+| `internal/source` | HTTP 拉取、大小限制、刷新调度、原子提交 |
+| `internal/store` | v2 领域持久化与 token 索引 |
+| `internal/compiler` | 模板校验、NodeSet 解析、Mihomo/sing-box 编译、last-good |
+| `internal/server` | 鉴权、管理 API、固定 Profile 订阅端点 |
+| `web` | 五步配置编排控制台 |
+
+旧的 `merge`、`override` 与 `output` 包已经删除，避免新旧抽象并存。
+
+## 删除约束
+
+- 被 NodeSet 显式引用的 Source 或手工 Node 不可删除。
+- 被 Profile 绑定的 NodeSet 不可删除。
+- 任一版本被 Profile 使用的 Template 不可删除。
+- 机场节点不能逐条删除或修改连接配置；需要停用节点或刷新/删除来源。
+- 手工节点可替换连接内容，元数据可独立修改。
+
+## 平台预置模板
+
+首次运行安装四套普通、可继续发布新版本的模板：
+
+- Mihomo 桌面：本机 mixed-port、fake-ip DNS、自动测速。
+- Mihomo 网关：LAN、TUN、DNS 劫持与自动路由。
+- sing-box 桌面：本机 mixed 入口、系统代理、1.14 DNS server 格式。
+- sing-box 服务器：回环 mixed sidecar、低日志级别与持久 DNS cache。
+
+这里的“服务器”是服务器作为代理客户端/sidecar 使用，不是生成 VLESS/Trojan 服务端部署配置。
