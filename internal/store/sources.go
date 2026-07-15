@@ -20,6 +20,7 @@ func (s *Store) CreateSource(src Source) (int64, error) {
 		id = int64(seq)
 		src.ID = id
 		src.Kind = defStr(src.Kind, SourceKindSubscription)
+		normalizeSourceLifecycle(&src)
 		src.Enabled = true // M1:新建源默认启用;停用走 SetSourceEnabled
 		if src.Kind == SourceKindSubscription {
 			src.UserAgent = defStr(src.UserAgent, "clash-verge/v2.0.0")
@@ -55,6 +56,7 @@ func (s *Store) GetSource(id int64) (Source, error) {
 	if !found {
 		return Source{}, fmt.Errorf("no source with id %d", id)
 	}
+	normalizeSourceLifecycle(&src)
 	return src, nil
 }
 
@@ -62,7 +64,7 @@ func (s *Store) ListSources() ([]Source, error)        { return s.listSources(fa
 func (s *Store) ListEnabledSources() ([]Source, error) { return s.listSources(true) }
 
 func (s *Store) listSources(enabledOnly bool) ([]Source, error) {
-	var out []Source
+	out := make([]Source, 0)
 	err := s.db.View(func(tx *bolt.Tx) error {
 		return tx.Bucket([]byte("sources")).ForEach(func(_, v []byte) error {
 			var src Source
@@ -72,6 +74,7 @@ func (s *Store) listSources(enabledOnly bool) ([]Source, error) {
 			if enabledOnly && !src.Enabled {
 				return nil
 			}
+			normalizeSourceLifecycle(&src)
 			out = append(out, src)
 			return nil
 		})
@@ -102,6 +105,7 @@ func (s *Store) UpdateSource(src Source) error {
 		src.CreatedAt = old.CreatedAt
 		src.Kind = defStr(src.Kind, old.Kind)
 		src.Kind = defStr(src.Kind, SourceKindSubscription)
+		normalizeSourceLifecycle(&src)
 		if src.Kind == SourceKindSubscription {
 			src.UserAgent = defStr(src.UserAgent, "clash-verge/v2.0.0")
 		} else {
@@ -115,6 +119,24 @@ func (s *Store) UpdateSource(src Source) error {
 		}
 		return b.Put(itob(src.ID), buf)
 	})
+}
+
+func normalizeSourceLifecycle(src *Source) {
+	if src.Kind == "" {
+		src.Kind = SourceKindSubscription
+	}
+	if src.Kind != SourceKindSubscription {
+		src.LifecyclePolicy = ""
+		src.WarnBeforeDays = 0
+		src.TrustNodeNotices = false
+		return
+	}
+	if src.LifecyclePolicy != LifecycleStrict {
+		src.LifecyclePolicy = LifecycleContinuity
+	}
+	if src.WarnBeforeDays <= 0 {
+		src.WarnBeforeDays = 7
+	}
 }
 
 func (s *Store) SetSourceEnabled(id int64, enabled bool) error {
@@ -149,6 +171,28 @@ func (s *Store) DeleteSource(id int64) error {
 		}
 		if e := tx.Bucket([]byte("source_cache")).Delete(itob(id)); e != nil {
 			return e
+		}
+		if e := tx.Bucket([]byte("meta")).Delete([]byte(fmt.Sprintf("lifecycle_state:%d", id))); e != nil {
+			return e
+		}
+		events := tx.Bucket([]byte("lifecycle_events"))
+		var eventKeys [][]byte
+		if e := events.ForEach(func(k, raw []byte) error {
+			var event LifecycleEvent
+			if err := json.Unmarshal(raw, &event); err != nil {
+				return err
+			}
+			if event.SourceID == id {
+				eventKeys = append(eventKeys, append([]byte(nil), k...))
+			}
+			return nil
+		}); e != nil {
+			return e
+		}
+		for _, key := range eventKeys {
+			if e := events.Delete(key); e != nil {
+				return e
+			}
 		}
 		// 级联删除该来源的规范化节点。
 		nodes := tx.Bucket([]byte("nodes"))

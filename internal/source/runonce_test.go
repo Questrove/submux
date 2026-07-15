@@ -11,6 +11,13 @@ import (
 	"submux/internal/store"
 )
 
+type rebuildCounter struct{ calls int32 }
+
+func (r *rebuildCounter) RebuildAll() error {
+	atomic.AddInt32(&r.calls, 1)
+	return nil
+}
+
 func TestRunOnceFetchesOnlyEnabled(t *testing.T) {
 	var hits int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -94,5 +101,33 @@ func TestLoopAppliesChangedIntervalImmediately(t *testing.T) {
 	case <-hit:
 	case <-time.After(2500 * time.Millisecond):
 		t.Fatalf("changed interval was not applied; hits=%d", atomic.LoadInt32(&hits))
+	}
+}
+
+func TestSweepLifecycleRebuildsOncePerTransition(t *testing.T) {
+	st := newTestStore(t)
+	id, _ := st.CreateSource(store.Source{Name: "A", URL: "http://a", LifecyclePolicy: store.LifecycleStrict})
+	future := store.SubscriptionMetadata{ExpiresAt: time.Now().Add(time.Hour).UTC().Format(time.RFC3339), Provenance: map[string]string{"expires_at": "header"}}
+	if err := st.CommitSourceRefreshV3(id, nil, "", future, false); err != nil {
+		t.Fatal(err)
+	}
+	counter := &rebuildCounter{}
+	fetcher := NewFetcher(st)
+	fetcher.SetRebuilder(counter)
+	if err := fetcher.SweepLifecycle(); err != nil {
+		t.Fatal(err)
+	}
+	expired := store.SubscriptionMetadata{ExpiresAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339), Provenance: map[string]string{"expires_at": "header"}}
+	if err := st.CommitSourceRefreshV3(id, nil, "", expired, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := fetcher.SweepLifecycle(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fetcher.SweepLifecycle(); err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt32(&counter.calls); got != 1 {
+		t.Fatalf("want one rebuild for one transition, got %d", got)
 	}
 }

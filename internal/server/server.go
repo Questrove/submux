@@ -61,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 	r.Group(func(pr chi.Router) {
 		pr.Use(s.requireAuth)
 		pr.Get("/api/sources", s.handleListSources)
+		pr.Get("/api/lifecycle-events", s.handleListLifecycleEvents)
 		pr.Post("/api/sources", s.handleCreateSource)
 		pr.Put("/api/sources/{id}", s.handleUpdateSource)
 		pr.Delete("/api/sources/{id}", s.handleDeleteSource)
@@ -110,6 +111,10 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	artifact, err := s.store.GetProfileArtifact(profile.ID)
+	if err == nil && artifact.BlockedReason != "" {
+		http.Error(w, "profile unavailable due to upstream lifecycle policy", http.StatusServiceUnavailable)
+		return
+	}
 	if err != nil || len(artifact.Body) == 0 {
 		http.Error(w, "profile has no published artifact", http.StatusServiceUnavailable)
 		return
@@ -123,6 +128,8 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Submux-Revision", artifact.Revision)
 	if artifact.LastError != "" {
 		w.Header().Set("X-Submux-Degraded", sanitizeHeader(artifact.LastError))
+	} else if len(artifact.Warnings) > 0 {
+		w.Header().Set("X-Submux-Degraded", "upstream lifecycle warning")
 	}
 	_, _ = w.Write(artifact.Body)
 }

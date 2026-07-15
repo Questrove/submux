@@ -4,11 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
+	"submux/internal/lifecycle"
 	"submux/internal/node"
 	"submux/internal/store"
 )
@@ -26,6 +28,7 @@ type Result struct {
 	Revision    string
 	NodeCount   int
 	SlotCounts  map[string]int
+	Warnings    []string
 }
 
 type resolvedProfile struct {
@@ -35,7 +38,15 @@ type resolvedProfile struct {
 	Names    map[string]string
 	Slots    map[string][]string
 	Counts   map[string]int
+	Warnings []string
 }
+
+type BlockedError struct {
+	Reason   string
+	Warnings []string
+}
+
+func (e *BlockedError) Error() string { return e.Reason }
 
 func New(st *store.Store) *Service { return &Service{store: st} }
 
@@ -73,12 +84,18 @@ func (s *Service) CompileAndStore(profileID int64) (Result, error) {
 		artifact, _ := s.store.GetProfileArtifact(profileID)
 		artifact.ProfileID = profileID
 		artifact.LastError = compileErr.Error()
+		var blocked *BlockedError
+		if errors.As(compileErr, &blocked) {
+			artifact.BlockedReason = blocked.Reason
+			artifact.Warnings = append([]string(nil), blocked.Warnings...)
+		}
 		_ = s.store.PutProfileArtifact(artifact)
 		return Result{}, compileErr
 	}
 	artifact := store.ProfileArtifact{
 		ProfileID: profileID, Body: result.Body, ContentType: result.ContentType,
 		Revision: result.Revision, LastSuccess: time.Now().UTC().Format(time.RFC3339),
+		Warnings: append([]string(nil), result.Warnings...),
 	}
 	if err := s.store.PutProfileArtifact(artifact); err != nil {
 		return Result{}, err
@@ -143,6 +160,7 @@ func (s *Service) resolve(profile store.Profile) (resolvedProfile, error) {
 
 	slotRecords := map[string][]store.NodeRecord{}
 	counts := map[string]int{}
+	warningSet := map[string]bool{}
 	for _, slot := range version.Slots {
 		nodeSetID := bindingBySlot[slot.Key]
 		if nodeSetID == 0 {
@@ -155,14 +173,21 @@ func (s *Service) resolve(profile store.Profile) (resolvedProfile, error) {
 		if err != nil {
 			return resolvedProfile{}, fmt.Errorf("slot %q: %w", slot.Key, err)
 		}
-		records, err := s.resolveNodeSet(nodeSet)
+		resolution, err := s.resolveNodeSet(nodeSet)
 		if err != nil {
 			return resolvedProfile{}, fmt.Errorf("slot %q: %w", slot.Key, err)
 		}
-		if slot.Required && len(records) == 0 {
+		for _, warning := range resolution.warnings {
+			warningSet[warning] = true
+		}
+		if slot.Required && len(resolution.records) == 0 {
+			if resolution.strictExcluded > 0 {
+				warnings := sortedKeys(warningSet)
+				return resolvedProfile{}, &BlockedError{Reason: fmt.Sprintf("required slot %q has no nodes after strict lifecycle filtering", slot.Key), Warnings: warnings}
+			}
 			return resolvedProfile{}, fmt.Errorf("required slot %q resolved to no nodes", slot.Key)
 		}
-		slotRecords[slot.Key], counts[slot.Key] = records, len(records)
+		slotRecords[slot.Key], counts[slot.Key] = resolution.records, len(resolution.records)
 	}
 
 	allByFingerprint := map[string]store.NodeRecord{}
@@ -204,32 +229,47 @@ func (s *Service) resolve(profile store.Profile) (resolvedProfile, error) {
 			}
 		}
 	}
-	return resolvedProfile{Profile: profile, Template: version, Records: records, Names: names, Slots: slots, Counts: counts}, nil
+	return resolvedProfile{Profile: profile, Template: version, Records: records, Names: names, Slots: slots, Counts: counts, Warnings: sortedKeys(warningSet)}, nil
 }
 
-func (s *Service) resolveNodeSet(value store.NodeSet) ([]store.NodeRecord, error) {
+type nodeSetResolution struct {
+	records        []store.NodeRecord
+	warnings       []string
+	strictExcluded int
+}
+
+func (s *Service) resolveNodeSet(value store.NodeSet) (nodeSetResolution, error) {
 	if !value.Enabled {
-		return nil, fmt.Errorf("node set %q is disabled", value.Name)
+		return nodeSetResolution{}, fmt.Errorf("node set %q is disabled", value.Name)
 	}
 	nodes, err := s.store.ListNodes()
 	if err != nil {
-		return nil, err
+		return nodeSetResolution{}, err
 	}
 	sources, err := s.store.ListSources()
 	if err != nil {
-		return nil, err
+		return nodeSetResolution{}, err
 	}
 	enabledSources := map[int64]bool{}
+	sourceByID := map[int64]store.Source{}
+	statusBySource := map[int64]lifecycle.Status{}
 	for _, source := range sources {
 		enabledSources[source.ID] = source.Enabled
+		sourceByID[source.ID] = source
+		if source.Kind == store.SourceKindSubscription {
+			cache, _ := s.store.GetCache(source.ID)
+			statusBySource[source.ID] = lifecycle.Evaluate(source, cache, time.Now())
+		}
 	}
 	includeSources, includeNodes, excludeNodes := intSet(value.SourceIDs), intSet(value.NodeIDs), intSet(value.ExcludeNodeIDs)
 	protocols, requiredTags := stringSetLower(value.Protocols), stringSetLower(value.Tags)
 	selectAll := len(includeSources) == 0 && len(includeNodes) == 0
 	needle := strings.ToLower(strings.TrimSpace(value.NameContains))
 	var out []store.NodeRecord
+	warningSet := map[string]bool{}
+	strictExcluded := 0
 	for _, record := range nodes {
-		if !record.Enabled || !enabledSources[record.SourceID] || excludeNodes[record.ID] {
+		if record.Role == "notice" || !record.Enabled || !enabledSources[record.SourceID] || excludeNodes[record.ID] {
 			continue
 		}
 		if !selectAll && !includeSources[record.SourceID] && !includeNodes[record.ID] {
@@ -244,6 +284,15 @@ func (s *Service) resolveNodeSet(value store.NodeSet) ([]store.NodeRecord, error
 		if !containsAllTags(record.Tags, requiredTags) {
 			continue
 		}
+		if status, exists := statusBySource[record.SourceID]; exists {
+			for _, warning := range status.Warnings {
+				warningSet[fmt.Sprintf("source %q: %s", sourceByID[record.SourceID].Name, warning)] = true
+			}
+			if lifecycle.ShouldExclude(sourceByID[record.SourceID], status) {
+				strictExcluded++
+				continue
+			}
+		}
 		out = append(out, record)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -252,7 +301,7 @@ func (s *Service) resolveNodeSet(value store.NodeSet) ([]store.NodeRecord, error
 		}
 		return out[i].ID < out[j].ID
 	})
-	return out, nil
+	return nodeSetResolution{records: out, warnings: sortedKeys(warningSet), strictExcluded: strictExcluded}, nil
 }
 
 func compileResolved(value resolvedProfile) (Result, error) {
@@ -274,7 +323,16 @@ func compileResolved(value resolvedProfile) (Result, error) {
 	// The revision identifies the actual compiled artifact, including slot
 	// placement and deterministic generated names, not just the node set.
 	sum := sha256.Sum256(body)
-	return Result{Body: body, ContentType: contentType, Revision: hex.EncodeToString(sum[:]), NodeCount: len(value.Records), SlotCounts: value.Counts}, nil
+	return Result{Body: body, ContentType: contentType, Revision: hex.EncodeToString(sum[:]), NodeCount: len(value.Records), SlotCounts: value.Counts, Warnings: append([]string(nil), value.Warnings...)}, nil
+}
+
+func sortedKeys(values map[string]bool) []string {
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func validateSlots(slots []store.TemplateSlot) error {

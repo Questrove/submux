@@ -143,3 +143,21 @@ func TestHandleSubMarksLastGoodAsDegraded(t *testing.T) {
 		t.Fatalf("last-good degradation not exposed: %d %v", resp.StatusCode, resp.Header)
 	}
 }
+
+func TestHandleSubBlocksStrictLifecycleArtifact(t *testing.T) {
+	st := newTestStore(t)
+	savePublishedProfile(t, st, store.Profile{
+		Name: "blocked", Engine: compiler.EngineMihomo, Token: "blocked-token", Enabled: true,
+	}, &store.ProfileArtifact{
+		Body: []byte("# stale\n"), ContentType: "text/yaml; charset=utf-8",
+		Revision: "old", BlockedReason: "strict upstream expired",
+	})
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+
+	resp := mustGet(t, http.DefaultClient, srv.URL+"/sub/blocked-token")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("blocked profile returned %d", resp.StatusCode)
+	}
+}

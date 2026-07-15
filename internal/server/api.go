@@ -8,9 +8,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"submux/internal/lifecycle"
 	"submux/internal/store"
 )
 
@@ -35,19 +37,24 @@ func idParam(r *http.Request) (int64, error) {
 }
 
 type sourceDTO struct {
-	ID            int64    `json:"id"`
-	Kind          string   `json:"kind"`
-	Name          string   `json:"name"`
-	Description   string   `json:"description,omitempty"`
-	Tags          []string `json:"tags,omitempty"`
-	URL           string   `json:"url,omitempty"`
-	UserAgent     string   `json:"user_agent,omitempty"`
-	Enabled       bool     `json:"enabled"`
-	SortOrder     int      `json:"sort_order"`
-	NodeCount     int      `json:"node_count"`
-	LastSuccessAt string   `json:"last_success_at,omitempty"`
-	LastError     string   `json:"last_error,omitempty"`
-	Userinfo      string   `json:"userinfo,omitempty"`
+	ID               int64             `json:"id"`
+	Kind             string            `json:"kind"`
+	Name             string            `json:"name"`
+	Description      string            `json:"description,omitempty"`
+	Tags             []string          `json:"tags,omitempty"`
+	URL              string            `json:"url,omitempty"`
+	UserAgent        string            `json:"user_agent,omitempty"`
+	Enabled          bool              `json:"enabled"`
+	SortOrder        int               `json:"sort_order"`
+	LifecyclePolicy  string            `json:"lifecycle_policy,omitempty"`
+	WarnBeforeDays   int               `json:"warn_before_days,omitempty"`
+	TrustNodeNotices bool              `json:"trust_node_notices,omitempty"`
+	NodeCount        int               `json:"node_count"`
+	NoticeCount      int               `json:"notice_count,omitempty"`
+	LastSuccessAt    string            `json:"last_success_at,omitempty"`
+	LastError        string            `json:"last_error,omitempty"`
+	Userinfo         string            `json:"userinfo,omitempty"`
+	Lifecycle        *lifecycle.Status `json:"lifecycle,omitempty"`
 }
 
 func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
@@ -58,39 +65,61 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 	}
 	nodes, _ := s.store.ListNodes()
 	counts := make(map[int64]int)
+	noticeCounts := make(map[int64]int)
 	for _, value := range nodes {
-		counts[value.SourceID]++
+		if value.Role == "notice" {
+			noticeCounts[value.SourceID]++
+		} else {
+			counts[value.SourceID]++
+		}
 	}
 	out := make([]sourceDTO, 0, len(srcs))
 	for _, src := range srcs {
 		d := sourceDTO{
 			ID: src.ID, Kind: src.Kind, Name: src.Name, Description: src.Description,
 			Tags: src.Tags, URL: src.URL, UserAgent: src.UserAgent,
-			Enabled: src.Enabled, SortOrder: src.SortOrder, NodeCount: counts[src.ID],
+			Enabled: src.Enabled, SortOrder: src.SortOrder, NodeCount: counts[src.ID], NoticeCount: noticeCounts[src.ID],
+			LifecyclePolicy: src.LifecyclePolicy, WarnBeforeDays: src.WarnBeforeDays, TrustNodeNotices: src.TrustNodeNotices,
 		}
 		if src.Kind == store.SourceKindSubscription {
 			c, err := s.store.GetCache(src.ID)
 			if err != nil {
+				status := lifecycle.Evaluate(src, store.Cache{}, time.Now())
+				d.Lifecycle = &status
 				out = append(out, d)
 				continue
 			}
 			d.LastSuccessAt = c.LastSuccessAt
 			d.LastError = c.LastError
 			d.Userinfo = c.UserinfoJSON
+			status := lifecycle.Evaluate(src, c, time.Now())
+			d.Lifecycle = &status
 		}
 		out = append(out, d)
 	}
 	writeJSON(w, out)
 }
 
+func (s *Server) handleListLifecycleEvents(w http.ResponseWriter, _ *http.Request) {
+	values, err := s.store.ListLifecycleEvents(100)
+	if err != nil {
+		http.Error(w, "list lifecycle events failed", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, values)
+}
+
 func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Kind        string   `json:"kind"`
-		Name        string   `json:"name"`
-		Description string   `json:"description"`
-		Tags        []string `json:"tags"`
-		URL         string   `json:"url"`
-		UserAgent   string   `json:"user_agent"`
+		Kind             string   `json:"kind"`
+		Name             string   `json:"name"`
+		Description      string   `json:"description"`
+		Tags             []string `json:"tags"`
+		URL              string   `json:"url"`
+		UserAgent        string   `json:"user_agent"`
+		LifecyclePolicy  string   `json:"lifecycle_policy"`
+		WarnBeforeDays   int      `json:"warn_before_days"`
+		TrustNodeNotices bool     `json:"trust_node_notices"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -106,9 +135,26 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name and a valid source kind/url are required", http.StatusBadRequest)
 		return
 	}
+	if body.Kind == store.SourceKindSubscription {
+		if body.LifecyclePolicy == "" {
+			body.LifecyclePolicy = store.LifecycleContinuity
+		}
+		if body.WarnBeforeDays == 0 {
+			body.WarnBeforeDays = 7
+		}
+		if body.LifecyclePolicy != store.LifecycleContinuity && body.LifecyclePolicy != store.LifecycleStrict {
+			http.Error(w, "lifecycle_policy must be continuity or strict", http.StatusBadRequest)
+			return
+		}
+		if body.WarnBeforeDays < 1 || body.WarnBeforeDays > 365 {
+			http.Error(w, "warn_before_days must be between 1 and 365", http.StatusBadRequest)
+			return
+		}
+	}
 	id, err := s.store.CreateSource(store.Source{
 		Kind: body.Kind, Name: body.Name, Description: strings.TrimSpace(body.Description),
 		Tags: store.NormalizeStringSet(body.Tags), URL: body.URL, UserAgent: strings.TrimSpace(body.UserAgent),
+		LifecyclePolicy: body.LifecyclePolicy, WarnBeforeDays: body.WarnBeforeDays, TrustNodeNotices: body.TrustNodeNotices,
 	})
 	if err != nil {
 		http.Error(w, "create failed", http.StatusInternalServerError)
@@ -124,14 +170,17 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Kind        string   `json:"kind"`
-		Name        string   `json:"name"`
-		Description string   `json:"description"`
-		Tags        []string `json:"tags"`
-		URL         string   `json:"url"`
-		UserAgent   string   `json:"user_agent"`
-		SortOrder   int      `json:"sort_order"`
-		Enabled     bool     `json:"enabled"`
+		Kind             string   `json:"kind"`
+		Name             string   `json:"name"`
+		Description      string   `json:"description"`
+		Tags             []string `json:"tags"`
+		URL              string   `json:"url"`
+		UserAgent        string   `json:"user_agent"`
+		SortOrder        int      `json:"sort_order"`
+		Enabled          bool     `json:"enabled"`
+		LifecyclePolicy  string   `json:"lifecycle_policy"`
+		WarnBeforeDays   int      `json:"warn_before_days"`
+		TrustNodeNotices *bool    `json:"trust_node_notices"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -159,11 +208,32 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 		ID: id, Kind: body.Kind, Name: body.Name, Description: strings.TrimSpace(body.Description),
 		Tags: store.NormalizeStringSet(body.Tags), URL: body.URL, UserAgent: strings.TrimSpace(body.UserAgent),
 		SortOrder: body.SortOrder, Enabled: body.Enabled,
+		LifecyclePolicy: body.LifecyclePolicy, WarnBeforeDays: body.WarnBeforeDays,
+	}
+	if body.TrustNodeNotices != nil {
+		src.TrustNodeNotices = *body.TrustNodeNotices
+	} else {
+		src.TrustNodeNotices = old.TrustNodeNotices
+	}
+	if src.LifecyclePolicy == "" {
+		src.LifecyclePolicy = old.LifecyclePolicy
+	}
+	if src.WarnBeforeDays == 0 {
+		src.WarnBeforeDays = old.WarnBeforeDays
+	}
+	if src.Kind == store.SourceKindSubscription && src.LifecyclePolicy != store.LifecycleContinuity && src.LifecyclePolicy != store.LifecycleStrict {
+		http.Error(w, "lifecycle_policy must be continuity or strict", http.StatusBadRequest)
+		return
+	}
+	if src.Kind == store.SourceKindSubscription && (src.WarnBeforeDays < 1 || src.WarnBeforeDays > 365) {
+		http.Error(w, "warn_before_days must be between 1 and 365", http.StatusBadRequest)
+		return
 	}
 	if err := s.store.UpdateSource(src); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	_ = s.compiler.RebuildAll()
 	writeJSON(w, map[string]any{"ok": true})
 }
 

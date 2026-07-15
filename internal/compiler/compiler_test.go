@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"submux/internal/node"
 	"submux/internal/store"
@@ -156,5 +157,77 @@ rules: ["MATCH,AUTO"]
 	after, _ := st.GetProfileArtifact(profileID)
 	if !bytes.Equal(before.Body, after.Body) || after.LastError == "" || after.Revision != before.Revision {
 		t.Fatalf("last-good artifact was not preserved: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestStrictExpiredSourceBlocksWithoutReplacingLastGood(t *testing.T) {
+	st := compilerTestStore(t)
+	sourceID, err := st.CreateSource(store.Source{Name: "airport", URL: "https://example.com/sub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := node.Import(sourceID, store.SourceKindSubscription, "trojan://password@example.com:443#TR")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceSourceNodes(sourceID, records); err != nil {
+		t.Fatal(err)
+	}
+	nodeSetID, _ := st.SaveNodeSet(store.NodeSet{Name: "all", SourceIDs: []int64{sourceID}, Enabled: true})
+	version := addTemplate(t, st, EngineMihomo, `proxy-groups:
+  - {name: AUTO, type: select, proxies: []}
+rules: ["MATCH,AUTO"]
+`, []store.TemplateSlot{{Key: "primary", Target: "AUTO", Mode: "replace", Required: true}})
+	profileID, _ := st.SaveProfile(store.Profile{
+		Name: "p", Engine: EngineMihomo, TemplateVersionID: version.ID,
+		Bindings: []store.ProfileBinding{{Slot: "primary", NodeSetID: nodeSetID}}, Token: "token", Enabled: true,
+	})
+	service := New(st)
+	if _, err := service.CompileAndStore(profileID); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := st.GetProfileArtifact(profileID)
+	source, _ := st.GetSource(sourceID)
+	source.LifecyclePolicy = store.LifecycleStrict
+	if err := st.UpdateSource(source); err != nil {
+		t.Fatal(err)
+	}
+	metadata := store.SubscriptionMetadata{
+		ExpiresAt:  time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		Provenance: map[string]string{"expires_at": "header"},
+	}
+	if err := st.CommitSourceRefreshV3(sourceID, records, "", metadata, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompileAndStore(profileID); err == nil {
+		t.Fatal("strict expired source did not block")
+	}
+	after, _ := st.GetProfileArtifact(profileID)
+	if after.BlockedReason == "" || !bytes.Equal(before.Body, after.Body) || after.Revision != before.Revision {
+		t.Fatalf("strict block did not preserve auditable last-good: before=%+v after=%+v", before, after)
+	}
+	backupSourceID, _ := addManualNodes(t, st, "backup", "trojan://password@backup.example.com:443#Backup")
+	nodeSet, _ := st.GetNodeSet(nodeSetID)
+	nodeSet.SourceIDs = []int64{sourceID, backupSourceID}
+	if _, err := st.SaveNodeSet(nodeSet); err != nil {
+		t.Fatal(err)
+	}
+	failover, err := service.CompileAndStore(profileID)
+	if err != nil || !bytes.Contains(failover.Body, []byte("backup.example.com")) {
+		t.Fatalf("strict failover did not publish backup-only artifact: err=%v body=%s", err, failover.Body)
+	}
+	if bytes.Contains(failover.Body, []byte("server: example.com\n")) {
+		t.Fatalf("expired source remained in strict failover artifact: %s", failover.Body)
+	}
+	metadata.ExpiresAt = time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339)
+	if err := st.CommitSourceRefreshV3(sourceID, records, "", metadata, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.CompileAndStore(profileID); err != nil {
+		t.Fatalf("renewed source did not recover: %v", err)
+	}
+	recovered, _ := st.GetProfileArtifact(profileID)
+	if recovered.BlockedReason != "" || recovered.LastError != "" {
+		t.Fatalf("recovered artifact still blocked: %+v", recovered)
 	}
 }

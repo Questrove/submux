@@ -31,7 +31,7 @@ func ParseUserinfo(header string) (Userinfo, bool) {
 		if err != nil {
 			continue
 		}
-		switch strings.TrimSpace(kv[0]) {
+		switch strings.ToLower(strings.TrimSpace(kv[0])) {
 		case "upload":
 			u.Upload, found = n, true
 		case "download":

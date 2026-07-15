@@ -21,7 +21,7 @@ func newTestStore(t *testing.T) *Store {
 func TestOpenCreatesBuckets(t *testing.T) {
 	s := newTestStore(t)
 	err := s.db.View(func(tx *bolt.Tx) error {
-		for _, name := range []string{"settings", "sources", "source_cache", "meta"} {
+		for _, name := range bucketNames {
 			if tx.Bucket([]byte(name)) == nil {
 				t.Fatalf("bucket %q missing", name)
 			}
