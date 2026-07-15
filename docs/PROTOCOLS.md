@@ -28,6 +28,8 @@
 
 TUIC 等未列出的分享链接会被拒绝。Mihomo YAML 中的其他节点类型仍可进入节点库并用于 Mihomo Profile，但进入 sing-box Profile 会严格失败。
 
+订阅中的高置信度流量/到期信息条目会标为 notice，不作为代理节点送入任一编译器。识别格式、可信度与执法语义见 [LIFECYCLE.md](LIFECYCLE.md)。
+
 ## Mihomo 编译器
 
 节点配置按原对象复制，只改成 Profile 内确定性唯一名称。编译器负责：

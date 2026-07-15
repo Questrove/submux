@@ -72,6 +72,17 @@ func TestFetchOneHTTPErrorIsStored(t *testing.T) {
 	}
 }
 
+func TestFetchOneNetworkErrorDoesNotPersistSecretURL(t *testing.T) {
+	st := newTestStore(t)
+	id, _ := st.CreateSource(store.Source{Name: "A", URL: "http://127.0.0.1:1/sub?token=super-secret"})
+	src, _ := st.GetSource(id)
+	err := NewFetcher(st).FetchOne(context.Background(), src)
+	cache, _ := st.GetCache(id)
+	if err == nil || strings.Contains(err.Error(), "super-secret") || strings.Contains(cache.LastError, "super-secret") {
+		t.Fatalf("network error leaked source URL: err=%q cache=%q", err, cache.LastError)
+	}
+}
+
 func TestFetchOneInvalidPayloadKeepsLastGoodCache(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("not a subscription"))
@@ -103,5 +114,37 @@ func TestFetchOneRejectsOversizedBody(t *testing.T) {
 	src, _ := st.GetSource(id)
 	if err := NewFetcher(st).FetchOne(context.Background(), src); err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("want size error, got %v", err)
+	}
+}
+
+func TestFetchOneClassifiesInformationNodes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`proxies:
+  - {name: "剩余流量：12 GB", type: vless, server: info.example.com, port: 443, uuid: info}
+  - {name: HK, type: vless, server: hk.example.com, port: 443, uuid: real}
+`))
+	}))
+	defer srv.Close()
+
+	st := newTestStore(t)
+	id, _ := st.CreateSource(store.Source{Name: "A", URL: srv.URL})
+	src, _ := st.GetSource(id)
+	if err := NewFetcher(st).FetchOne(context.Background(), src); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ := st.ListNodes()
+	if len(nodes) != 2 {
+		t.Fatalf("want auditable proxy and notice records, got %+v", nodes)
+	}
+	roles := map[string]int{}
+	for _, value := range nodes {
+		roles[value.Role]++
+	}
+	if roles["proxy"] != 1 || roles["notice"] != 1 {
+		t.Fatalf("wrong role classification: %+v", roles)
+	}
+	cache, _ := st.GetCache(id)
+	if cache.Metadata.Remaining != 12*1024*1024*1024 || cache.Metadata.Provenance["remaining"] != "node_name" {
+		t.Fatalf("notice metadata not committed: %+v", cache.Metadata)
 	}
 }

@@ -59,14 +59,26 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Alias   *string   `json:"alias"`
-		Tags    *[]string `json:"tags"`
-		Enabled *bool     `json:"enabled"`
-		Content string    `json:"content"`
+		Alias        *string   `json:"alias"`
+		Tags         *[]string `json:"tags"`
+		Enabled      *bool     `json:"enabled"`
+		RoleOverride *string   `json:"role_override"`
+		Content      string    `json:"content"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
+	}
+	if body.RoleOverride != nil {
+		role := strings.TrimSpace(*body.RoleOverride)
+		if role != "" && role != "proxy" && role != "notice" {
+			http.Error(w, "role_override must be proxy, notice or empty", http.StatusBadRequest)
+			return
+		}
+		if current.Origin != store.SourceKindSubscription {
+			http.Error(w, "manual nodes are always proxy nodes", http.StatusBadRequest)
+			return
+		}
 	}
 	if strings.TrimSpace(body.Content) != "" {
 		records, parseErr := node.Import(current.SourceID, store.SourceKindManual, body.Content)
@@ -94,6 +106,12 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	if err := s.store.UpdateNodeMetadata(id, alias, tags, enabled); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
+	}
+	if body.RoleOverride != nil {
+		if err := s.store.SetNodeRoleOverride(id, strings.TrimSpace(*body.RoleOverride)); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	_ = s.compiler.RebuildAll()
 	writeJSON(w, map[string]any{"ok": true})
@@ -161,8 +179,13 @@ func (s *Server) handleSaveNodeSet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	for _, nodeID := range append(append([]int64(nil), value.NodeIDs...), value.ExcludeNodeIDs...) {
-		if _, err := s.store.GetNode(nodeID); err != nil {
+		node, err := s.store.GetNode(nodeID)
+		if err != nil {
 			http.Error(w, fmt.Sprintf("unknown node %d", nodeID), http.StatusBadRequest)
+			return
+		}
+		if node.Role == "notice" && containsInt64(value.NodeIDs, nodeID) {
+			http.Error(w, fmt.Sprintf("node %d is an informational notice", nodeID), http.StatusBadRequest)
 			return
 		}
 	}
@@ -176,6 +199,15 @@ func (s *Server) handleSaveNodeSet(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.compiler.RebuildAll()
 	writeJSON(w, map[string]any{"id": id})
+}
+
+func containsInt64(values []int64, target int64) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleDeleteNodeSet(w http.ResponseWriter, r *http.Request) {
@@ -333,11 +365,13 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, _ *http.Request) {
 		return
 	}
 	type artifactStatus struct {
-		ContentType string `json:"content_type,omitempty"`
-		Revision    string `json:"revision,omitempty"`
-		LastSuccess string `json:"last_success,omitempty"`
-		LastError   string `json:"last_error,omitempty"`
-		UpdatedAt   string `json:"updated_at,omitempty"`
+		ContentType   string   `json:"content_type,omitempty"`
+		Revision      string   `json:"revision,omitempty"`
+		LastSuccess   string   `json:"last_success,omitempty"`
+		LastError     string   `json:"last_error,omitempty"`
+		UpdatedAt     string   `json:"updated_at,omitempty"`
+		Warnings      []string `json:"warnings,omitempty"`
+		BlockedReason string   `json:"blocked_reason,omitempty"`
 	}
 	type item struct {
 		store.Profile
@@ -352,6 +386,7 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, _ *http.Request) {
 			entry.Artifact = &artifactStatus{
 				ContentType: artifact.ContentType, Revision: artifact.Revision,
 				LastSuccess: artifact.LastSuccess, LastError: artifact.LastError, UpdatedAt: artifact.UpdatedAt,
+				Warnings: artifact.Warnings, BlockedReason: artifact.BlockedReason,
 			}
 		}
 		if base != "" {
@@ -445,7 +480,7 @@ func (s *Server) handlePreviewProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"content": string(result.Body), "content_type": result.ContentType, "revision": result.Revision, "node_count": result.NodeCount, "slot_counts": result.SlotCounts})
+	writeJSON(w, map[string]any{"content": string(result.Body), "content_type": result.ContentType, "revision": result.Revision, "node_count": result.NodeCount, "slot_counts": result.SlotCounts, "warnings": result.Warnings})
 }
 
 func (s *Server) handlePublishProfile(w http.ResponseWriter, r *http.Request) {
@@ -459,7 +494,7 @@ func (s *Server) handlePublishProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "revision": result.Revision, "node_count": result.NodeCount})
+	writeJSON(w, map[string]any{"ok": true, "revision": result.Revision, "node_count": result.NodeCount, "warnings": result.Warnings})
 }
 
 func (s *Server) handleResetProfileToken(w http.ResponseWriter, r *http.Request) {

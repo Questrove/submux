@@ -35,13 +35,13 @@ func main() {
 
 	// 后台定时拉取上游订阅
 	f := source.NewFetcher(st)
-	go f.Loop(ctx, time.Duration(interval)*time.Second)
-
-	// HTTP 服务(/sub/{token} 输出已发布的固定引擎 Profile 产物)
 	app, err := server.NewChecked(st, f)
 	if err != nil {
 		log.Fatalf("initialize server: %v", err)
 	}
+	go f.Loop(ctx, time.Duration(interval)*time.Second)
+
+	// HTTP 服务(/sub/{token} 输出已发布的固定引擎 Profile 产物)
 	httpSrv := &http.Server{Addr: listenAddr, Handler: app.Handler()}
 	go func() {
 		log.Printf("submux listening on %s", listenAddr)

@@ -2,14 +2,17 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"submux/internal/source"
+	"submux/internal/store"
 )
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
@@ -61,6 +64,83 @@ func TestSourcesAPICRUD(t *testing.T) {
 	r5.Body.Close()
 	if len(list2) != 0 {
 		t.Fatalf("expected empty after delete, got %v", list2)
+	}
+}
+
+func TestSourceLifecycleAPI(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
+	defer srv.Close()
+	c := initAndClient(t, srv)
+
+	created := mustPost(t, c, srv.URL+"/api/sources", `{"name":"Air","url":"http://x"}`)
+	var result struct{ ID int64 }
+	_ = json.NewDecoder(created.Body).Decode(&result)
+	created.Body.Close()
+	metadata := store.SubscriptionMetadata{
+		ExpiresAt:  time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339),
+		Remaining:  5 * 1024 * 1024 * 1024,
+		Provenance: map[string]string{"expires_at": "header", "remaining": "header"},
+	}
+	if err := st.CommitSourceRefreshV3(result.ID, nil, "", metadata, false); err != nil {
+		t.Fatal(err)
+	}
+
+	update, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/sources/"+itoa(result.ID), strings.NewReader(`{"name":"Air","url":"http://x","enabled":true,"lifecycle_policy":"strict","warn_before_days":3,"trust_node_notices":true}`))
+	update.Header.Set("Content-Type", "application/json")
+	updated := mustDo(t, c, update)
+	updated.Body.Close()
+	if updated.StatusCode != http.StatusOK {
+		t.Fatalf("lifecycle update status %d", updated.StatusCode)
+	}
+
+	response := mustGet(t, c, srv.URL+"/api/sources")
+	var sources []struct {
+		LifecyclePolicy  string `json:"lifecycle_policy"`
+		WarnBeforeDays   int    `json:"warn_before_days"`
+		TrustNodeNotices bool   `json:"trust_node_notices"`
+		Lifecycle        struct {
+			Entitlement    string `json:"entitlement"`
+			RemainingBytes int64  `json:"remaining_bytes"`
+		} `json:"lifecycle"`
+	}
+	_ = json.NewDecoder(response.Body).Decode(&sources)
+	response.Body.Close()
+	if len(sources) != 1 || sources[0].LifecyclePolicy != "strict" || sources[0].WarnBeforeDays != 3 || !sources[0].TrustNodeNotices || sources[0].Lifecycle.Entitlement != "expiring" {
+		t.Fatalf("wrong lifecycle DTO: %+v", sources)
+	}
+
+	events := mustGet(t, c, srv.URL+"/api/lifecycle-events")
+	if events.StatusCode != http.StatusOK {
+		events.Body.Close()
+		t.Fatalf("events status %d", events.StatusCode)
+	}
+	eventBody, _ := io.ReadAll(events.Body)
+	events.Body.Close()
+	if strings.TrimSpace(string(eventBody)) != "[]" {
+		t.Fatalf("empty lifecycle events must be a JSON array, got %s", eventBody)
+	}
+}
+
+func TestNodeSetAPIRejectsInformationalNode(t *testing.T) {
+	st := newTestStore(t)
+	sourceID, _ := st.CreateSource(store.Source{Name: "Air", URL: "http://x"})
+	if err := st.ReplaceSourceNodes(sourceID, []store.NodeRecord{{
+		SourceID: sourceID, Origin: store.SourceKindSubscription, Name: "剩余流量：1 GB",
+		Protocol: "vless", Config: json.RawMessage(`{"name":"剩余流量：1 GB","type":"vless"}`),
+		Fingerprint: "notice:traffic_remaining:test", Role: "notice",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	nodes, _ := st.ListNodes()
+	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	response := mustPost(t, client, srv.URL+"/api/node-sets", fmt.Sprintf(`{"name":"bad","node_ids":[%d]}`, nodes[0].ID))
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("informational node accepted into NodeSet: status %d", response.StatusCode)
 	}
 }
 

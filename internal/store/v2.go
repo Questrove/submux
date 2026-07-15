@@ -13,18 +13,21 @@ import (
 )
 
 type NodeRecord struct {
-	ID          int64           `json:"id"`
-	SourceID    int64           `json:"source_id"`
-	Origin      string          `json:"origin"`
-	Name        string          `json:"name"`
-	Alias       string          `json:"alias,omitempty"`
-	Protocol    string          `json:"protocol"`
-	Config      json.RawMessage `json:"config"`
-	Fingerprint string          `json:"fingerprint"`
-	Tags        []string        `json:"tags,omitempty"`
-	Enabled     bool            `json:"enabled"`
-	CreatedAt   string          `json:"created_at"`
-	UpdatedAt   string          `json:"updated_at"`
+	ID           int64           `json:"id"`
+	SourceID     int64           `json:"source_id"`
+	Origin       string          `json:"origin"`
+	Name         string          `json:"name"`
+	Alias        string          `json:"alias,omitempty"`
+	Protocol     string          `json:"protocol"`
+	Config       json.RawMessage `json:"config"`
+	Fingerprint  string          `json:"fingerprint"`
+	Tags         []string        `json:"tags,omitempty"`
+	Enabled      bool            `json:"enabled"`
+	Role         string          `json:"role,omitempty"`
+	RoleOverride string          `json:"role_override,omitempty"`
+	Notice       *NodeNotice     `json:"notice,omitempty"`
+	CreatedAt    string          `json:"created_at"`
+	UpdatedAt    string          `json:"updated_at"`
 }
 
 type NodeSet struct {
@@ -91,13 +94,15 @@ type Profile struct {
 }
 
 type ProfileArtifact struct {
-	ProfileID   int64  `json:"profile_id"`
-	Body        []byte `json:"body,omitempty"`
-	ContentType string `json:"content_type,omitempty"`
-	Revision    string `json:"revision,omitempty"`
-	LastSuccess string `json:"last_success,omitempty"`
-	LastError   string `json:"last_error,omitempty"`
-	UpdatedAt   string `json:"updated_at"`
+	ProfileID     int64    `json:"profile_id"`
+	Body          []byte   `json:"body,omitempty"`
+	ContentType   string   `json:"content_type,omitempty"`
+	Revision      string   `json:"revision,omitempty"`
+	LastSuccess   string   `json:"last_success,omitempty"`
+	LastError     string   `json:"last_error,omitempty"`
+	Warnings      []string `json:"warnings,omitempty"`
+	BlockedReason string   `json:"blocked_reason,omitempty"`
+	UpdatedAt     string   `json:"updated_at"`
 }
 
 func (s *Store) ReplaceSourceNodes(sourceID int64, incoming []NodeRecord) error {
@@ -157,6 +162,7 @@ func replaceSourceNodesTx(tx *bolt.Tx, sourceID int64, incoming []NodeRecord) er
 			node.Tags = old.Tags
 			node.Enabled = old.Enabled
 			node.CreatedAt = old.CreatedAt
+			node.RoleOverride = old.RoleOverride
 		} else {
 			seq, err := b.NextSequence()
 			if err != nil {
@@ -167,6 +173,12 @@ func replaceSourceNodesTx(tx *bolt.Tx, sourceID int64, incoming []NodeRecord) er
 			node.CreatedAt = now
 		}
 		node.SourceID = sourceID
+		if node.Role == "" {
+			node.Role = "proxy"
+		}
+		if node.RoleOverride != "" {
+			node.Role = node.RoleOverride
+		}
 		node.UpdatedAt = now
 		if err := putJSON(b, itob(node.ID), node); err != nil {
 			return err
@@ -272,6 +284,80 @@ func (s *Store) UpdateNodeMetadata(id int64, alias string, tags []string, enable
 	})
 }
 
+// CommitSourceRefreshV3 atomically stores normalized nodes and structured
+// lifecycle metadata. When preserveProxySnapshot is true only the notice
+// portion is replaced; this keeps a last-known proxy snapshot when an expired
+// provider returns informational pseudo-nodes only.
+func (s *Store) CommitSourceRefreshV3(sourceID int64, incoming []NodeRecord, userinfoJSON string, metadata SubscriptionMetadata, preserveProxySnapshot bool) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := replaceSourceNodesV3Tx(tx, sourceID, incoming, preserveProxySnapshot); err != nil {
+			return err
+		}
+		now := nowRFC3339()
+		cache := Cache{
+			SourceID: sourceID, UserinfoJSON: userinfoJSON, Metadata: metadata,
+			LastSuccessAt: now, UpdatedAt: now,
+		}
+		return putJSON(tx.Bucket([]byte("source_cache")), itob(sourceID), cache)
+	})
+}
+
+func replaceSourceNodesV3Tx(tx *bolt.Tx, sourceID int64, incoming []NodeRecord, preserveProxySnapshot bool) error {
+	if !preserveProxySnapshot {
+		return replaceSourceNodesTx(tx, sourceID, incoming)
+	}
+	b := tx.Bucket([]byte("nodes"))
+	var kept, incomingNotices []NodeRecord
+	if err := b.ForEach(func(_, raw []byte) error {
+		var value NodeRecord
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if value.SourceID == sourceID && value.Role != "notice" {
+			kept = append(kept, value)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, value := range incoming {
+		if value.Role == "notice" {
+			incomingNotices = append(incomingNotices, value)
+		}
+	}
+	return replaceSourceNodesTx(tx, sourceID, append(incomingNotices, kept...))
+}
+
+func (s *Store) SetNodeRoleOverride(id int64, role string) error {
+	if role != "" && role != "proxy" && role != "notice" {
+		return fmt.Errorf("node role override must be proxy, notice or empty")
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		v := b.Get(itob(id))
+		if v == nil {
+			return fmt.Errorf("no node with id %d", id)
+		}
+		var node NodeRecord
+		if err := json.Unmarshal(v, &node); err != nil {
+			return err
+		}
+		if node.Origin != SourceKindSubscription {
+			return fmt.Errorf("manual nodes are always proxy nodes")
+		}
+		node.RoleOverride = role
+		if role != "" {
+			node.Role = role
+		} else if node.Notice != nil && node.Notice.Confidence == "high" {
+			node.Role = "notice"
+		} else {
+			node.Role = "proxy"
+		}
+		node.UpdatedAt = nowRFC3339()
+		return putJSON(b, itob(id), node)
+	})
+}
+
 func (s *Store) DeleteNode(id int64) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("nodes"))
@@ -336,7 +422,7 @@ func (s *Store) GetNode(id int64) (NodeRecord, error) {
 }
 
 func (s *Store) ListNodes() ([]NodeRecord, error) {
-	var out []NodeRecord
+	out := make([]NodeRecord, 0)
 	err := listJSON(s.db, "nodes", func(v []byte) error {
 		var node NodeRecord
 		if err := json.Unmarshal(v, &node); err != nil {
@@ -369,7 +455,7 @@ func (s *Store) GetNodeSet(id int64) (NodeSet, error) {
 }
 
 func (s *Store) ListNodeSets() ([]NodeSet, error) {
-	var out []NodeSet
+	out := make([]NodeSet, 0)
 	err := listJSON(s.db, "node_sets", func(v []byte) error {
 		var value NodeSet
 		if err := json.Unmarshal(v, &value); err != nil {
@@ -404,7 +490,7 @@ func (s *Store) GetTemplate(id int64) (Template, error) {
 }
 
 func (s *Store) ListTemplates() ([]Template, error) {
-	var out []Template
+	out := make([]Template, 0)
 	err := listJSON(s.db, "templates", func(v []byte) error {
 		var value Template
 		if err := json.Unmarshal(v, &value); err != nil {
@@ -494,7 +580,7 @@ func (s *Store) GetTemplateVersion(id int64) (TemplateVersion, error) {
 }
 
 func (s *Store) ListTemplateVersions(templateID int64) ([]TemplateVersion, error) {
-	var out []TemplateVersion
+	out := make([]TemplateVersion, 0)
 	err := listJSON(s.db, "template_versions", func(v []byte) error {
 		var value TemplateVersion
 		if err := json.Unmarshal(v, &value); err != nil {
@@ -582,7 +668,7 @@ func (s *Store) GetProfileByToken(token string) (Profile, error) {
 }
 
 func (s *Store) ListProfiles() ([]Profile, error) {
-	var out []Profile
+	out := make([]Profile, 0)
 	err := listJSON(s.db, "profiles", func(v []byte) error {
 		var value Profile
 		if err := json.Unmarshal(v, &value); err != nil {

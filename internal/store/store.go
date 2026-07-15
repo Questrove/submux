@@ -3,6 +3,8 @@ package store
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -10,31 +12,62 @@ import (
 
 // Source 是一个上游订阅源。
 type Source struct {
-	ID          int64    `json:"id"`
-	Kind        string   `json:"kind"`
-	Name        string   `json:"name"`
-	Description string   `json:"description,omitempty"`
-	URL         string   `json:"url,omitempty"`
-	UserAgent   string   `json:"user_agent,omitempty"`
-	Tags        []string `json:"tags,omitempty"`
-	Enabled     bool     `json:"enabled"`
-	SortOrder   int      `json:"sort_order"`
-	CreatedAt   string   `json:"created_at"` // RFC3339 UTC
-	UpdatedAt   string   `json:"updated_at"`
+	ID               int64    `json:"id"`
+	Kind             string   `json:"kind"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description,omitempty"`
+	URL              string   `json:"url,omitempty"`
+	UserAgent        string   `json:"user_agent,omitempty"`
+	Tags             []string `json:"tags,omitempty"`
+	Enabled          bool     `json:"enabled"`
+	SortOrder        int      `json:"sort_order"`
+	LifecyclePolicy  string   `json:"lifecycle_policy,omitempty"`
+	WarnBeforeDays   int      `json:"warn_before_days,omitempty"`
+	TrustNodeNotices bool     `json:"trust_node_notices,omitempty"`
+	CreatedAt        string   `json:"created_at"` // RFC3339 UTC
+	UpdatedAt        string   `json:"updated_at"`
 }
 
 const (
 	SourceKindSubscription = "subscription"
 	SourceKindManual       = "manual"
+	LifecycleContinuity    = "continuity"
+	LifecycleStrict        = "strict"
 )
+
+// SubscriptionMetadata is the last successfully observed entitlement data.
+// Provenance contains one entry per known field (header, node_name or manual).
+type SubscriptionMetadata struct {
+	Upload     int64             `json:"upload,omitempty"`
+	Download   int64             `json:"download,omitempty"`
+	Total      int64             `json:"total,omitempty"`
+	Remaining  int64             `json:"remaining,omitempty"`
+	ExpiresAt  string            `json:"expires_at,omitempty"`
+	ResetAt    string            `json:"reset_at,omitempty"`
+	ObservedAt string            `json:"observed_at,omitempty"`
+	Provenance map[string]string `json:"provenance,omitempty"`
+	Conflicts  []string          `json:"conflicts,omitempty"`
+	Stale      bool              `json:"stale,omitempty"`
+}
+
+type NodeNotice struct {
+	Type       string `json:"type"`
+	RawText    string `json:"raw_text"`
+	Value      int64  `json:"value,omitempty"`
+	TotalValue int64  `json:"total_value,omitempty"`
+	TextValue  string `json:"text_value,omitempty"`
+	Unit       string `json:"unit,omitempty"`
+	Confidence string `json:"confidence"`
+}
 
 // Cache 是单个源的拉取缓存。
 type Cache struct {
-	SourceID      int64  `json:"source_id"`
-	UserinfoJSON  string `json:"userinfo_json,omitempty"`
-	LastSuccessAt string `json:"last_success_at,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-	UpdatedAt     string `json:"updated_at"`
+	SourceID      int64                `json:"source_id"`
+	UserinfoJSON  string               `json:"userinfo_json,omitempty"`
+	Metadata      SubscriptionMetadata `json:"metadata,omitempty"`
+	LastSuccessAt string               `json:"last_success_at,omitempty"`
+	LastError     string               `json:"last_error,omitempty"`
+	UpdatedAt     string               `json:"updated_at"`
 }
 
 type Store struct {
@@ -43,7 +76,7 @@ type Store struct {
 
 var bucketNames = []string{
 	"settings", "sources", "source_cache", "meta",
-	"nodes", "node_sets", "templates", "template_versions", "profiles", "profile_artifacts", "token_index",
+	"nodes", "node_sets", "templates", "template_versions", "profiles", "profile_artifacts", "token_index", "lifecycle_events",
 }
 
 func Open(path string) (*Store, error) {
@@ -58,11 +91,24 @@ func Open(path string) (*Store, error) {
 			}
 		}
 		meta := tx.Bucket([]byte("meta"))
-		if string(meta.Get([]byte("schema_version"))) != "2" {
+		version := string(meta.Get([]byte("schema_version")))
+		if version == "" || version == "1" {
 			if e := migrateV2(tx); e != nil {
 				return e
 			}
-			if e := meta.Put([]byte("schema_version"), []byte("2")); e != nil {
+			version = "2"
+		}
+		if version == "2" {
+			if e := migrateV3(tx); e != nil {
+				return e
+			}
+			version = "3"
+		}
+		if version != "3" {
+			return fmt.Errorf("unsupported database schema version %q", version)
+		}
+		if string(meta.Get([]byte("schema_version"))) != version {
+			if e := meta.Put([]byte("schema_version"), []byte(version)); e != nil {
 				return e
 			}
 		}
@@ -73,6 +119,102 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func migrateV3(tx *bolt.Tx) error {
+	b := tx.Bucket([]byte("sources"))
+	type update struct {
+		key   []byte
+		value Source
+	}
+	var updates []update
+	if err := b.ForEach(func(k, raw []byte) error {
+		var source Source
+		if err := json.Unmarshal(raw, &source); err != nil {
+			return err
+		}
+		before := source
+		normalizeSourceLifecycle(&source)
+		if source.LifecyclePolicy != before.LifecyclePolicy || source.WarnBeforeDays != before.WarnBeforeDays {
+			updates = append(updates, update{append([]byte(nil), k...), source})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, item := range updates {
+		if err := putJSON(b, item.key, item.value); err != nil {
+			return err
+		}
+	}
+	caches := tx.Bucket([]byte("source_cache"))
+	type cacheUpdate struct {
+		key   []byte
+		value Cache
+	}
+	var cacheUpdates []cacheUpdate
+	if err := caches.ForEach(func(k, raw []byte) error {
+		var cache Cache
+		if err := json.Unmarshal(raw, &cache); err != nil {
+			return err
+		}
+		if len(cache.Metadata.Provenance) > 0 || cache.UserinfoJSON == "" {
+			return nil
+		}
+		var legacyFields map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(cache.UserinfoJSON), &legacyFields); err != nil {
+			return nil
+		}
+		values := make(map[string]int64)
+		for key, rawValue := range legacyFields {
+			normalized := strings.ToLower(key)
+			if normalized != "upload" && normalized != "download" && normalized != "total" && normalized != "expire" {
+				continue
+			}
+			var value int64
+			if err := json.Unmarshal(rawValue, &value); err == nil && value >= 0 {
+				values[normalized] = value
+			}
+		}
+		if len(values) == 0 {
+			return nil
+		}
+		cache.Metadata = SubscriptionMetadata{ObservedAt: cache.LastSuccessAt, Provenance: map[string]string{}}
+		if value, ok := values["upload"]; ok {
+			cache.Metadata.Upload = value
+			cache.Metadata.Provenance["upload"] = "header"
+		}
+		if value, ok := values["download"]; ok {
+			cache.Metadata.Download = value
+			cache.Metadata.Provenance["download"] = "header"
+		}
+		if value, ok := values["total"]; ok {
+			cache.Metadata.Total = value
+			cache.Metadata.Provenance["total"] = "header"
+		}
+		if _, uploadOK := values["upload"]; uploadOK {
+			if _, downloadOK := values["download"]; downloadOK {
+				if total, totalOK := values["total"]; totalOK {
+					cache.Metadata.Remaining = total - values["upload"] - values["download"]
+					cache.Metadata.Provenance["remaining"] = "header"
+				}
+			}
+		}
+		if expire := values["expire"]; expire > 0 {
+			cache.Metadata.ExpiresAt = time.Unix(expire, 0).UTC().Format(time.RFC3339)
+			cache.Metadata.Provenance["expires_at"] = "header"
+		}
+		cacheUpdates = append(cacheUpdates, cacheUpdate{append([]byte(nil), k...), cache})
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, item := range cacheUpdates {
+		if err := putJSON(caches, item.key, item.value); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func migrateV2(tx *bolt.Tx) error {

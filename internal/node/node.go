@@ -28,7 +28,7 @@ func FromParsed(sourceID int64, origin string, parsed parse.Node) (store.NodeRec
 	}
 	return store.NodeRecord{
 		SourceID: sourceID, Origin: origin, Name: name, Protocol: kind,
-		Config: config, Fingerprint: fingerprint, Enabled: true,
+		Config: config, Fingerprint: fingerprint, Enabled: true, Role: "proxy",
 	}, nil
 }
 
