@@ -23,20 +23,20 @@ func newTestStore(t *testing.T) *store.Store {
 	return st
 }
 
-func savePublishedProfile(t *testing.T, st *store.Store, profile store.Profile, artifact *store.ProfileArtifact) store.Profile {
+func savePublishedSubscription(t *testing.T, st *store.Store, subscription store.OutputSubscription, artifact *store.SubscriptionArtifact) store.OutputSubscription {
 	t.Helper()
-	id, err := st.SaveProfile(profile)
+	id, err := st.SaveOutputSubscription(subscription)
 	if err != nil {
-		t.Fatalf("save profile: %v", err)
+		t.Fatalf("save output subscription: %v", err)
 	}
-	profile.ID = id
+	subscription.ID = id
 	if artifact != nil {
-		artifact.ProfileID = id
-		if err := st.PutProfileArtifact(*artifact); err != nil {
+		artifact.SubscriptionID = id
+		if err := st.PutSubscriptionArtifact(*artifact); err != nil {
 			t.Fatalf("save artifact: %v", err)
 		}
 	}
-	return profile
+	return subscription
 }
 
 func TestServerInitializationFailureIsSurfaced(t *testing.T) {
@@ -61,9 +61,9 @@ func TestServerInitializationFailureIsSurfaced(t *testing.T) {
 func TestHandleSubServesFixedMihomoArtifactRegardlessOfUA(t *testing.T) {
 	st := newTestStore(t)
 	body := []byte("proxies:\n  - {name: fixed}\n")
-	savePublishedProfile(t, st, store.Profile{
+	savePublishedSubscription(t, st, store.OutputSubscription{
 		Name: "desktop", Engine: compiler.EngineMihomo, Token: "mihomo-token", Enabled: true,
-	}, &store.ProfileArtifact{Body: body, ContentType: "text/yaml; charset=utf-8", Revision: "rev-1"})
+	}, &store.SubscriptionArtifact{Body: body, ContentType: "text/yaml; charset=utf-8", Revision: "rev-1"})
 
 	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
@@ -84,9 +84,9 @@ func TestHandleSubServesFixedMihomoArtifactRegardlessOfUA(t *testing.T) {
 
 func TestHandleSubServesFixedSingBoxArtifact(t *testing.T) {
 	st := newTestStore(t)
-	savePublishedProfile(t, st, store.Profile{
+	savePublishedSubscription(t, st, store.OutputSubscription{
 		Name: "server", Engine: compiler.EngineSingBox, Token: "sing-token", Enabled: true,
-	}, &store.ProfileArtifact{Body: []byte(`{"outbounds":[]}`), ContentType: "application/json; charset=utf-8", Revision: "rev-json"})
+	}, &store.SubscriptionArtifact{Body: []byte(`{"outbounds":[]}`), ContentType: "application/json; charset=utf-8", Revision: "rev-json"})
 	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
 
@@ -99,9 +99,9 @@ func TestHandleSubServesFixedSingBoxArtifact(t *testing.T) {
 
 func TestHandleSubAuthorizationExpiryAndPublication(t *testing.T) {
 	st := newTestStore(t)
-	savePublishedProfile(t, st, store.Profile{Name: "empty", Token: "empty-token", Enabled: true}, nil)
-	savePublishedProfile(t, st, store.Profile{Name: "disabled", Token: "disabled-token", Enabled: false}, nil)
-	savePublishedProfile(t, st, store.Profile{
+	savePublishedSubscription(t, st, store.OutputSubscription{Name: "empty", Token: "empty-token", Enabled: true}, nil)
+	savePublishedSubscription(t, st, store.OutputSubscription{Name: "disabled", Token: "disabled-token", Enabled: false}, nil)
+	savePublishedSubscription(t, st, store.OutputSubscription{
 		Name: "expired", Token: "expired-token", Enabled: true,
 		ExpiresAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
 	}, nil)
@@ -128,9 +128,9 @@ func TestHandleSubAuthorizationExpiryAndPublication(t *testing.T) {
 
 func TestHandleSubMarksLastGoodAsDegraded(t *testing.T) {
 	st := newTestStore(t)
-	savePublishedProfile(t, st, store.Profile{
+	savePublishedSubscription(t, st, store.OutputSubscription{
 		Name: "degraded", Engine: compiler.EngineMihomo, Token: "degraded-token", Enabled: true,
-	}, &store.ProfileArtifact{
+	}, &store.SubscriptionArtifact{
 		Body: []byte("# last good\n"), ContentType: "text/yaml; charset=utf-8",
 		Revision: "old", LastError: "required slot empty\nretry failed",
 	})
@@ -146,9 +146,9 @@ func TestHandleSubMarksLastGoodAsDegraded(t *testing.T) {
 
 func TestHandleSubBlocksStrictLifecycleArtifact(t *testing.T) {
 	st := newTestStore(t)
-	savePublishedProfile(t, st, store.Profile{
+	savePublishedSubscription(t, st, store.OutputSubscription{
 		Name: "blocked", Engine: compiler.EngineMihomo, Token: "blocked-token", Enabled: true,
-	}, &store.ProfileArtifact{
+	}, &store.SubscriptionArtifact{
 		Body: []byte("# stale\n"), ContentType: "text/yaml; charset=utf-8",
 		Revision: "old", BlockedReason: "strict upstream expired",
 	})
@@ -158,6 +158,6 @@ func TestHandleSubBlocksStrictLifecycleArtifact(t *testing.T) {
 	resp := mustGet(t, http.DefaultClient, srv.URL+"/sub/blocked-token")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("blocked profile returned %d", resp.StatusCode)
+		t.Fatalf("blocked output subscription returned %d", resp.StatusCode)
 	}
 }

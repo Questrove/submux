@@ -41,7 +41,7 @@ func main() {
 	}
 	go f.Loop(ctx, time.Duration(interval)*time.Second)
 
-	// HTTP 服务(/sub/{token} 输出已发布的固定引擎 Profile 产物)
+	// HTTP 服务(/sub/{token} 输出已发布的固定引擎订阅产物)
 	httpSrv := &http.Server{Addr: listenAddr, Handler: app.Handler()}
 	go func() {
 		log.Printf("submux listening on %s", listenAddr)

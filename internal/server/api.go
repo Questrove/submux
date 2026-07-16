@@ -39,6 +39,7 @@ func idParam(r *http.Request) (int64, error) {
 type sourceDTO struct {
 	ID               int64             `json:"id"`
 	Kind             string            `json:"kind"`
+	Builtin          bool              `json:"builtin,omitempty"`
 	Name             string            `json:"name"`
 	Description      string            `json:"description,omitempty"`
 	Tags             []string          `json:"tags,omitempty"`
@@ -76,7 +77,7 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 	out := make([]sourceDTO, 0, len(srcs))
 	for _, src := range srcs {
 		d := sourceDTO{
-			ID: src.ID, Kind: src.Kind, Name: src.Name, Description: src.Description,
+			ID: src.ID, Kind: src.Kind, Builtin: src.Builtin, Name: src.Name, Description: src.Description,
 			Tags: src.Tags, URL: src.URL, UserAgent: src.UserAgent,
 			Enabled: src.Enabled, SortOrder: src.SortOrder, NodeCount: counts[src.ID], NoticeCount: noticeCounts[src.ID],
 			LifecyclePolicy: src.LifecyclePolicy, WarnBeforeDays: src.WarnBeforeDays, TrustNodeNotices: src.TrustNodeNotices,
@@ -160,7 +161,22 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "create failed", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"id": id})
+	response := map[string]any{"id": id}
+	if body.Kind == store.SourceKindSubscription {
+		response["refresh_ok"] = false
+		if s.fetcher == nil {
+			response["refresh_error"] = "fetcher unavailable"
+		} else if src, getErr := s.store.GetSource(id); getErr != nil {
+			response["refresh_error"] = "created source could not be loaded"
+		} else if refreshErr := s.fetcher.FetchOne(r.Context(), src); refreshErr != nil {
+			// Keep the source so the administrator can inspect the recorded error,
+			// correct the upstream settings, and retry without re-entering it.
+			response["refresh_error"] = refreshErr.Error()
+		} else {
+			response["refresh_ok"] = true
+		}
+	}
+	writeJSON(w, response)
 }
 
 func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
@@ -191,6 +207,10 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 	old, err := s.store.GetSource(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if old.Builtin {
+		http.Error(w, "built-in node group cannot be modified", http.StatusConflict)
 		return
 	}
 	if body.Kind == "" {
@@ -243,23 +263,28 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	nodeSets, _ := s.store.ListNodeSets()
+	sourceValue, err := s.store.GetSource(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if sourceValue.Builtin {
+		http.Error(w, "built-in node group cannot be deleted", http.StatusConflict)
+		return
+	}
+	subscriptions, _ := s.store.ListOutputSubscriptions()
 	nodes, _ := s.store.ListNodes()
 	nodeSource := make(map[int64]int64, len(nodes))
 	for _, node := range nodes {
 		nodeSource[node.ID] = node.SourceID
 	}
-	for _, nodeSet := range nodeSets {
-		for _, sourceID := range nodeSet.SourceIDs {
-			if sourceID == id {
-				http.Error(w, "source is used by node set "+strconv.FormatInt(nodeSet.ID, 10), http.StatusConflict)
-				return
-			}
-		}
-		for _, nodeID := range append(append([]int64(nil), nodeSet.NodeIDs...), nodeSet.ExcludeNodeIDs...) {
-			if nodeSource[nodeID] == id {
-				http.Error(w, "source node is used by node set "+strconv.FormatInt(nodeSet.ID, 10), http.StatusConflict)
-				return
+	for _, subscription := range subscriptions {
+		for _, binding := range subscription.Bindings {
+			for _, nodeID := range binding.NodeIDs {
+				if nodeSource[nodeID] == id {
+					http.Error(w, "source node is used by output subscription "+strconv.FormatInt(subscription.ID, 10), http.StatusConflict)
+					return
+				}
 			}
 		}
 	}

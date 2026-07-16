@@ -78,8 +78,5 @@ func Fingerprint(parsed parse.Node) (string, error) {
 }
 
 func DisplayName(record store.NodeRecord) string {
-	if name := strings.TrimSpace(record.Alias); name != "" {
-		return name
-	}
 	return record.Name
 }

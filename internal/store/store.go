@@ -14,6 +14,7 @@ import (
 type Source struct {
 	ID               int64    `json:"id"`
 	Kind             string   `json:"kind"`
+	Builtin          bool     `json:"builtin,omitempty"`
 	Name             string   `json:"name"`
 	Description      string   `json:"description,omitempty"`
 	URL              string   `json:"url,omitempty"`
@@ -76,7 +77,7 @@ type Store struct {
 
 var bucketNames = []string{
 	"settings", "sources", "source_cache", "meta",
-	"nodes", "node_sets", "templates", "template_versions", "profiles", "profile_artifacts", "token_index", "lifecycle_events",
+	"nodes", "templates", "template_versions", "subscriptions", "subscription_artifacts", "token_index", "lifecycle_events",
 }
 
 func Open(path string) (*Store, error) {
@@ -104,7 +105,13 @@ func Open(path string) (*Store, error) {
 			}
 			version = "3"
 		}
-		if version != "3" {
+		if version == "3" {
+			if e := migrateV4(tx); e != nil {
+				return e
+			}
+			version = "4"
+		}
+		if version != "4" {
 			return fmt.Errorf("unsupported database schema version %q", version)
 		}
 		if string(meta.Get([]byte("schema_version"))) != version {
@@ -119,6 +126,34 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// v4 replaces the internal NodeSet/Profile split with output subscriptions
+// that directly own ordered node selections. The product is still pre-release,
+// so legacy output-only state is intentionally discarded while sources, nodes,
+// templates, settings and lifecycle history are preserved.
+func migrateV4(tx *bolt.Tx) error {
+	index := tx.Bucket([]byte("token_index"))
+	var tokenKeys [][]byte
+	if err := index.ForEach(func(key, _ []byte) error {
+		tokenKeys = append(tokenKeys, append([]byte(nil), key...))
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, key := range tokenKeys {
+		if err := index.Delete(key); err != nil {
+			return err
+		}
+	}
+	for _, name := range []string{"node_sets", "profiles", "profile_artifacts"} {
+		if tx.Bucket([]byte(name)) != nil {
+			if err := tx.DeleteBucket([]byte(name)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func migrateV3(tx *bolt.Tx) error {
@@ -194,7 +229,7 @@ func migrateV3(tx *bolt.Tx) error {
 		}
 		if _, uploadOK := values["upload"]; uploadOK {
 			if _, downloadOK := values["download"]; downloadOK {
-				if total, totalOK := values["total"]; totalOK {
+				if total, totalOK := values["total"]; totalOK && total > 0 {
 					cache.Metadata.Remaining = total - values["upload"] - values["download"]
 					cache.Metadata.Provenance["remaining"] = "header"
 				}

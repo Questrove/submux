@@ -121,6 +121,7 @@ func TestFetchOneClassifiesInformationNodes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`proxies:
   - {name: "剩余流量：12 GB", type: vless, server: info.example.com, port: 443, uuid: info}
+  - {name: "套餐到期：长期有效", type: vless, server: expiry.example.com, port: 443, uuid: expiry}
   - {name: HK, type: vless, server: hk.example.com, port: 443, uuid: real}
 `))
 	}))
@@ -133,18 +134,21 @@ func TestFetchOneClassifiesInformationNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodes, _ := st.ListNodes()
-	if len(nodes) != 2 {
+	if len(nodes) != 3 {
 		t.Fatalf("want auditable proxy and notice records, got %+v", nodes)
 	}
 	roles := map[string]int{}
 	for _, value := range nodes {
 		roles[value.Role]++
 	}
-	if roles["proxy"] != 1 || roles["notice"] != 1 {
+	if roles["proxy"] != 1 || roles["notice"] != 2 {
 		t.Fatalf("wrong role classification: %+v", roles)
 	}
 	cache, _ := st.GetCache(id)
 	if cache.Metadata.Remaining != 12*1024*1024*1024 || cache.Metadata.Provenance["remaining"] != "node_name" {
 		t.Fatalf("notice metadata not committed: %+v", cache.Metadata)
+	}
+	if cache.Metadata.ExpiresAt != "" || cache.Metadata.Provenance["expires_at"] != "node_name" {
+		t.Fatalf("never-expiring metadata not committed: %+v", cache.Metadata)
 	}
 }

@@ -79,10 +79,13 @@ func TestLiveSubscriptions(t *testing.T) {
 			versions[template.Engine] = template.CurrentVersionID
 		}
 	}
-	allSetID, _ := st.SaveNodeSet(store.NodeSet{Name: "all live nodes", Enabled: true})
-	mihomo, err := service.Preview(store.Profile{
+	allNodeIDs := make([]int64, 0, len(proxyNodes))
+	for _, value := range proxyNodes {
+		allNodeIDs = append(allNodeIDs, value.ID)
+	}
+	mihomo, err := service.Preview(store.OutputSubscription{
 		Engine: compiler.EngineMihomo, TemplateVersionID: versions[compiler.EngineMihomo],
-		Bindings: []store.ProfileBinding{{Slot: "primary", NodeSetID: allSetID}},
+		Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: allNodeIDs}},
 	})
 	if err != nil {
 		t.Fatalf("mihomo live compile failed: %v", err)
@@ -91,10 +94,9 @@ func TestLiveSubscriptions(t *testing.T) {
 	singBoxCompatible := 0
 	rejected := map[string]int{}
 	for _, value := range proxyNodes {
-		nodeSetID, _ := st.SaveNodeSet(store.NodeSet{Name: "node", NodeIDs: []int64{value.ID}, Enabled: true})
-		if _, err := service.Preview(store.Profile{
+		if _, err := service.Preview(store.OutputSubscription{
 			Engine: compiler.EngineSingBox, TemplateVersionID: versions[compiler.EngineSingBox],
-			Bindings: []store.ProfileBinding{{Slot: "primary", NodeSetID: nodeSetID}},
+			Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: []int64{value.ID}}},
 		}); err == nil {
 			singBoxCompatible++
 		} else {

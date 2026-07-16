@@ -5,7 +5,7 @@
 1. 连接语义以协议项目和目标内核官方文档为准，不根据某个机场返回样本反推字段。
 2. Mihomo 与 sing-box 是两个独立目标，不假设同名字段语义相同。
 3. Mihomo 模板直接接收规范化的 Mihomo 节点对象；sing-box 必须经过显式字段转换。
-4. sing-box 转换遇到未知协议、未知字段、未知传输或语义不等价字段时，整个 Profile 编译失败并保留 last-good。
+4. sing-box 转换遇到未知协议、未知字段、未知传输或语义不等价字段时，整个输出订阅编译失败并保留 last-good。
 5. 协议支持表示“当前列出的连接字段可以保持语义”，不表示任意客户端私有扩展都受支持。
 
 ## 输入
@@ -26,13 +26,13 @@
 | Shadowsocks | SIP002 `ss://` | AEAD/AEAD-2022、`obfs-local`、`v2ray-plugin` 明确选项 |
 | Hysteria2 | `hysteria2://` / `hy2://` | auth、多端口、obfs、SNI、insecure、证书 pin |
 
-TUIC 等未列出的分享链接会被拒绝。Mihomo YAML 中的其他节点类型仍可进入节点库并用于 Mihomo Profile，但进入 sing-box Profile 会严格失败。
+TUIC 等未列出的分享链接会被拒绝。Mihomo YAML 中的其他节点类型仍可进入节点库并用于 Mihomo 输出订阅，但进入 sing-box 输出订阅会严格失败。
 
 订阅中的高置信度流量/到期信息条目会标为 notice，不作为代理节点送入任一编译器。识别格式、可信度与执法语义见 [LIFECYCLE.md](LIFECYCLE.md)。
 
 ## Mihomo 编译器
 
-节点配置按原对象复制，只改成 Profile 内确定性唯一名称。编译器负责：
+节点配置按原对象复制，只改成输出订阅内确定性唯一名称。编译器负责：
 
 - 校验 `proxy-groups` 存在、组名唯一、插槽目标存在；
 - 把节点添加到顶层 `proxies`；
@@ -66,13 +66,13 @@ TUIC 等未列出的分享链接会被拒绝。Mihomo YAML 中的其他节点类
 - VLESS `encryption` 非空且非 `none`。
 - 未列出的协议或任何节点未知字段。
 - `udp` 非布尔值；缺失或 `false` 会显式转换为 sing-box `network: tcp`，避免其默认同时开启 TCP/UDP。
-- 非默认 `ip-version`，因为它需要 Profile 级 DNS resolver 策略，不能安全地局部猜测。
+- 非默认 `ip-version`，因为它需要订阅模板级 DNS resolver 策略，不能安全地局部猜测。
 - Mihomo `dialer-proxy` 和未显式转换的 smux 扩展。
 - REALITY 缺少 public key，或包含 sing-box 当前客户端 schema 无等价字段的扩展。
 - Hysteria2 URI `pinSHA256`。
 
-最后一项是刻意的语义边界：Hysteria2 官方 URI 把 `pinSHA256` 定义为服务器**证书**的 SHA-256 指纹，而 sing-box TLS 的 `certificate_public_key_sha256` 是**公钥**摘要，不能直接复制。来源：[Hysteria2 URI Scheme](https://v2.hysteria.network/docs/developers/URI-Scheme/)、[sing-box TLS](https://sing-box.sagernet.org/configuration/shared/tls/#certificate_public_key_sha256)。带该字段的节点仍可用于 Mihomo Profile。
+最后一项是刻意的语义边界：Hysteria2 官方 URI 把 `pinSHA256` 定义为服务器**证书**的 SHA-256 指纹，而 sing-box TLS 的 `certificate_public_key_sha256` 是**公钥**摘要，不能直接复制。来源：[Hysteria2 URI Scheme](https://v2.hysteria.network/docs/developers/URI-Scheme/)、[sing-box TLS](https://sing-box.sagernet.org/configuration/shared/tls/#certificate_public_key_sha256)。带该字段的节点仍可用于 Mihomo 输出订阅。
 
 ## sing-box 版本边界
 
-平台模板使用新 DNS server 对象格式、route action 和合并后的 TUN `address` 字段，避免继续生成已经迁移的旧配置。版本变化依据：[sing-box Migration](https://sing-box.sagernet.org/migration/)。自定义模板应在 `engine_version` 中记录实际目标版本；升级内核时发布新模板版本，再显式迁移 Profile。
+平台模板使用新 DNS server 对象格式、route action 和合并后的 TUN `address` 字段，避免继续生成已经迁移的旧配置。版本变化依据：[sing-box Migration](https://sing-box.sagernet.org/migration/)。自定义模板应在 `engine_version` 中记录实际目标版本；升级内核时发布新模板版本，再显式编辑输出订阅采用新版本。

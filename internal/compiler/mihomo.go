@@ -38,7 +38,7 @@ func validateMihomoTemplate(content string, slots []store.TemplateSlot) error {
 	return nil
 }
 
-func compileMihomo(value resolvedProfile) ([]byte, error) {
+func compileMihomo(value resolvedSubscription) ([]byte, error) {
 	root, err := parseYAMLMap(value.Template.Content)
 	if err != nil {
 		return nil, err
