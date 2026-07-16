@@ -152,6 +152,14 @@
   </section>
 </main>
 
+<dialog id="lifecycle-dialog" style="max-width:520px" aria-labelledby="lifecycle-dialog-title"><div class="dialog-body">
+  <div class="section-head"><div><h2 id="lifecycle-dialog-title">来源生命周期策略</h2><p id="lifecycle-source-name"></p></div><button type="button" onclick="closeLifecycleDialog()">关闭</button></div>
+  <div class="field"><label for="lifecycle-policy-edit">到期策略</label><select id="lifecycle-policy-edit"><option value="continuity">continuity：连续性优先</option><option value="strict">strict：排除可信的过期或耗尽来源</option></select></div>
+  <div class="field"><label for="lifecycle-warn-days-edit">提前预警天数（1–365）</label><input id="lifecycle-warn-days-edit" type="number" min="1" max="365"></div>
+  <label class="row" style="margin-bottom:14px"><input id="lifecycle-trust-notices-edit" type="checkbox"> 信任高置信度信息节点，允许其触发 strict</label>
+  <p class="muted">Header 元数据始终可以触发 strict；节点名称中的流量或到期信息只有开启信任后才参与严格过滤。</p>
+  <div class="actions" style="justify-content:flex-end"><button type="button" onclick="closeLifecycleDialog()">取消</button><button type="button" class="primary" onclick="saveSourceLifecycle()">保存策略</button></div>
+</div></dialog>
 <dialog id="preview-dialog"><div class="dialog-body"><div class="section-head"><div><h2>编译预览</h2><p id="preview-meta"></p></div><button onclick="document.querySelector('#preview-dialog').close()">关闭</button></div><pre id="preview-content"></pre></div></dialog>
 <div id="notice" class="notice hidden"></div>
 
@@ -186,7 +194,9 @@ function renderSources(){const body=$('#source-rows');body.innerHTML=SOURCES.map
 function renderLifecycleEvents(){$('#lifecycle-event-rows').innerHTML=EVENTS.map(e=>`<tr><td>${esc(e.created_at)}</td><td>${esc(sourceById(e.source_id)?.name||e.source_id)}</td><td><span class="badge">${esc(e.from_state||'—')}</span> → <span class="badge blue">${esc(e.to_state)}</span></td></tr>`).join('')||'<tr><td colspan="3" class="empty">尚无状态转换事件</td></tr>';}
 function sourcePayload(s,extra={}){return {kind:s.kind,name:s.name,description:s.description||'',tags:s.tags||[],url:s.url||'',user_agent:s.user_agent||'',sort_order:s.sort_order||0,enabled:s.enabled,lifecycle_policy:s.lifecycle_policy||'continuity',warn_before_days:s.warn_before_days||7,trust_node_notices:!!s.trust_node_notices,...extra};}
 async function toggleSource(id,enabled){const s=sourceById(id);await action(async()=>{await api('PUT','/api/sources/'+id,sourcePayload(s,{enabled}));await reloadSourcesAndNodes();});}
-async function editSourceLifecycle(id){const s=sourceById(id);const policy=prompt('到期策略：continuity 或 strict',s.lifecycle_policy||'continuity');if(policy===null)return;const days=prompt('提前预警天数（1–365）',s.warn_before_days||7);if(days===null)return;const trust=confirm('是否信任高置信度信息节点，并允许其触发 strict？\n确定=信任，取消=不信任');await action(async()=>{await api('PUT','/api/sources/'+id,sourcePayload(s,{lifecycle_policy:policy.trim(),warn_before_days:Number(days),trust_node_notices:trust}));await reloadSourcesAndNodes();await reloadBuildState();},'生命周期策略已保存');}
+function editSourceLifecycle(id){const s=sourceById(id);if(!s)return;const dialog=$('#lifecycle-dialog');dialog.dataset.sourceId=String(id);$('#lifecycle-source-name').textContent=s.name;$('#lifecycle-policy-edit').value=s.lifecycle_policy||'continuity';$('#lifecycle-warn-days-edit').value=s.warn_before_days||7;$('#lifecycle-trust-notices-edit').checked=!!s.trust_node_notices;dialog.showModal();}
+function closeLifecycleDialog(){$('#lifecycle-dialog').close();}
+async function saveSourceLifecycle(){const dialog=$('#lifecycle-dialog'),id=Number(dialog.dataset.sourceId),s=sourceById(id),policy=$('#lifecycle-policy-edit').value,days=Number($('#lifecycle-warn-days-edit').value),trust=$('#lifecycle-trust-notices-edit').checked;if(!s)return notify('来源不存在',true);if(!Number.isInteger(days)||days<1||days>365)return notify('提前预警天数必须在 1–365 之间',true);await action(async()=>{await api('PUT','/api/sources/'+id,sourcePayload(s,{lifecycle_policy:policy,warn_before_days:days,trust_node_notices:trust}));dialog.close();await reloadSourcesAndNodes();await reloadBuildState();},'生命周期策略已保存');}
 async function refreshSource(id){await action(async()=>{const result=await api('POST','/api/sources/'+id+'/refresh');if(!result.ok)throw new Error(result.error||'刷新失败');await reloadSourcesAndNodes();await reloadBuildState();},'机场节点已刷新并重编译 Profile');}
 async function deleteSource(id){if(!confirm('删除来源及其节点？被 NodeSet 使用时会拒绝。'))return;await action(async()=>{await api('DELETE','/api/sources/'+id);await reloadSourcesAndNodes();},'来源已删除');}
 
