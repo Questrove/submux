@@ -23,27 +23,33 @@ const (
 	FreshnessFresh = "fresh"
 	FreshnessStale = "stale"
 	FreshnessError = "refresh_error"
+
+	trafficConflictMinTolerance = 100 << 20
+	trafficConflictMaxTolerance = 1 << 30
 )
 
 type Status struct {
-	Entitlement    string   `json:"entitlement"`
-	Freshness      string   `json:"freshness"`
-	ExpiresAt      string   `json:"expires_at,omitempty"`
-	DaysRemaining  *int     `json:"days_remaining,omitempty"`
-	RemainingBytes *int64   `json:"remaining_bytes,omitempty"`
-	TotalBytes     *int64   `json:"total_bytes,omitempty"`
-	Policy         string   `json:"policy"`
-	MetadataStale  bool     `json:"metadata_stale"`
-	Enforceable    bool     `json:"enforceable"`
-	Conflicts      []string `json:"conflicts,omitempty"`
-	Warnings       []string `json:"warnings,omitempty"`
+	Entitlement      string   `json:"entitlement"`
+	Freshness        string   `json:"freshness"`
+	ExpiresAt        string   `json:"expires_at,omitempty"`
+	NeverExpires     bool     `json:"never_expires,omitempty"`
+	DaysRemaining    *int     `json:"days_remaining,omitempty"`
+	RemainingBytes   *int64   `json:"remaining_bytes,omitempty"`
+	TotalBytes       *int64   `json:"total_bytes,omitempty"`
+	UnlimitedTraffic bool     `json:"unlimited_traffic,omitempty"`
+	Policy           string   `json:"policy"`
+	MetadataStale    bool     `json:"metadata_stale"`
+	Enforceable      bool     `json:"enforceable"`
+	Conflicts        []string `json:"conflicts,omitempty"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
 var (
-	remainingPattern = regexp.MustCompile(`(?i)^(?:剩余流量|流量剩余|traffic\s*remaining|remaining\s*traffic)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*$`)
-	combinedPattern  = regexp.MustCompile(`(?i)^(?:剩余流量|流量剩余)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*[|/]\s*(?:总流量)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*$`)
-	bandwidthPattern = regexp.MustCompile(`(?i)^bandwidth\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*/\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*$`)
-	expiryPattern    = regexp.MustCompile(`(?i)^(?:到期时间|过期时间|套餐到期|expire(?:s|d)?(?:\s+at)?|expiration)\s*[:：]?\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*$`)
+	remainingPattern   = regexp.MustCompile(`(?i)^(?:剩余流量|流量剩余|traffic\s*remaining|remaining\s*traffic)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*$`)
+	combinedPattern    = regexp.MustCompile(`(?i)^(?:剩余流量|流量剩余)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*[|/]\s*(?:总流量)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*$`)
+	bandwidthPattern   = regexp.MustCompile(`(?i)^bandwidth\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*/\s*([0-9]+(?:\.[0-9]+)?)\s*(b|kb|mb|gb|tb|kib|mib|gib|tib)\s*$`)
+	expiryPattern      = regexp.MustCompile(`(?i)^(?:到期时间|过期时间|套餐到期|expire(?:s|d)?(?:\s+at)?|expiration)\s*[:：]?\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*$`)
+	neverExpiryPattern = regexp.MustCompile(`(?i)^(?:到期时间|过期时间|套餐到期|有效期|expire(?:s|d)?(?:\s+at)?|expiration)\s*[:：]?\s*(?:长期有效|永久有效|永不过期|无限期|不过期|never\s+expires?|lifetime)\s*$`)
 )
 
 func NormalizeLabel(value string) string {
@@ -91,6 +97,9 @@ func ClassifyLabel(raw string) *store.NodeNotice {
 		if ok1 && ok2 && total >= used {
 			return &store.NodeNotice{Type: "traffic_remaining", RawText: raw, Value: total - used, TotalValue: total, Unit: "bytes", Confidence: "high"}
 		}
+	}
+	if neverExpiryPattern.MatchString(label) {
+		return &store.NodeNotice{Type: "expires_never", RawText: raw, TextValue: "long_term", Confidence: "high"}
 	}
 	if match := expiryPattern.FindStringSubmatch(label); match != nil {
 		if value, ok := parseExpiry(match); ok {
@@ -178,7 +187,10 @@ func ParseSubscriptionUserinfo(header string, now time.Time) (store.Subscription
 	_, upload := metadata.Provenance["upload"]
 	_, download := metadata.Provenance["download"]
 	_, total := metadata.Provenance["total"]
-	if upload && download && total {
+	// The ecosystem does not define total=0 consistently. Providers commonly
+	// use it for an unlimited or unspecified quota, so it cannot prove that the
+	// subscription is exhausted.
+	if upload && download && total && metadata.Total > 0 {
 		metadata.Remaining = metadata.Total - metadata.Upload - metadata.Download
 		metadata.Provenance["remaining"] = "header"
 	}
@@ -196,6 +208,7 @@ func MergeMetadata(previous, header store.SubscriptionMetadata, headerOK bool, n
 	result.Conflicts = nil
 	observed := false
 	updated := map[string]bool{}
+	headerUnlimited := headerOK && header.Provenance["total"] == "header" && header.Total == 0
 	if headerOK {
 		observed = true
 		for _, field := range []string{"upload", "download", "total", "remaining", "expires_at"} {
@@ -203,6 +216,13 @@ func MergeMetadata(previous, header store.SubscriptionMetadata, headerOK bool, n
 				copyMetadataField(&result, header, field, "header")
 				updated[field] = true
 			}
+		}
+		if headerUnlimited {
+			// An explicit zero total supersedes an older finite quota. Do not let
+			// a stale remaining value or a node-name notice turn it into exhaustion.
+			result.Remaining = 0
+			delete(result.Provenance, "remaining")
+			updated["remaining"] = true
 		}
 	}
 	for _, notice := range notices {
@@ -212,6 +232,9 @@ func MergeMetadata(previous, header store.SubscriptionMetadata, headerOK bool, n
 		observed = true
 		switch notice.Type {
 		case "traffic_remaining":
+			if headerUnlimited {
+				continue
+			}
 			mergeNoticeInt(&result, "remaining", notice.Value)
 			updated["remaining"] = true
 			if notice.TotalValue > 0 {
@@ -220,6 +243,9 @@ func MergeMetadata(previous, header store.SubscriptionMetadata, headerOK bool, n
 			}
 		case "expires_at":
 			mergeNoticeString(&result, "expires_at", notice.TextValue)
+			updated["expires_at"] = true
+		case "expires_never":
+			mergeNeverExpires(&result)
 			updated["expires_at"] = true
 		}
 	}
@@ -262,7 +288,7 @@ func mergeNoticeInt(metadata *store.SubscriptionMetadata, field string, value in
 		} else {
 			current = metadata.Total
 		}
-		if current != value {
+		if trafficValuesConflict(current, value) {
 			metadata.Conflicts = append(metadata.Conflicts, fmt.Sprintf("%s differs between header and node name", field))
 		}
 		return
@@ -275,9 +301,22 @@ func mergeNoticeInt(metadata *store.SubscriptionMetadata, field string, value in
 	metadata.Provenance[field] = "node_name"
 }
 
+func trafficValuesConflict(headerValue, nodeValue int64) bool {
+	difference := math.Abs(float64(headerValue) - float64(nodeValue))
+	baseline := math.Max(math.Abs(float64(headerValue)), math.Abs(float64(nodeValue)))
+	tolerance := baseline * 0.01
+	if tolerance < trafficConflictMinTolerance {
+		tolerance = trafficConflictMinTolerance
+	}
+	if tolerance > trafficConflictMaxTolerance {
+		tolerance = trafficConflictMaxTolerance
+	}
+	return difference > tolerance
+}
+
 func mergeNoticeString(metadata *store.SubscriptionMetadata, field, value string) {
 	if metadata.Provenance[field] == "header" {
-		if metadata.ExpiresAt != value {
+		if expiryValuesConflict(metadata.ExpiresAt, value) {
 			metadata.Conflicts = append(metadata.Conflicts, fmt.Sprintf("%s differs between header and node name", field))
 		}
 		return
@@ -286,12 +325,40 @@ func mergeNoticeString(metadata *store.SubscriptionMetadata, field, value string
 	metadata.Provenance[field] = "node_name"
 }
 
+func expiryValuesConflict(headerValue, nodeValue string) bool {
+	if headerValue == nodeValue {
+		return false
+	}
+	headerTime, headerErr := time.Parse(time.RFC3339, headerValue)
+	nodeTime, nodeErr := time.Parse(time.RFC3339, nodeValue)
+	if headerErr != nil || nodeErr != nil {
+		return true
+	}
+	headerYear, headerMonth, headerDay := headerTime.UTC().Date()
+	nodeYear, nodeMonth, nodeDay := nodeTime.UTC().Date()
+	return headerYear != nodeYear || headerMonth != nodeMonth || headerDay != nodeDay
+}
+
+func mergeNeverExpires(metadata *store.SubscriptionMetadata) {
+	if metadata.Provenance["expires_at"] == "header" {
+		if metadata.ExpiresAt != "" {
+			metadata.Conflicts = append(metadata.Conflicts, "expires_at differs between header and node name")
+		}
+		return
+	}
+	metadata.ExpiresAt = ""
+	metadata.Provenance["expires_at"] = "node_name"
+}
+
 func Evaluate(source store.Source, cache store.Cache, now time.Time) Status {
 	metadata := cache.Metadata
+	unlimitedTraffic := metadata.Provenance["total"] == "header" && metadata.Total == 0
 	status := Status{
 		Entitlement: EntitlementUnknown, Policy: source.LifecyclePolicy,
 		ExpiresAt: metadata.ExpiresAt, MetadataStale: metadata.Stale,
-		Conflicts: append([]string(nil), metadata.Conflicts...),
+		NeverExpires:     metadata.Provenance["expires_at"] == "node_name" && metadata.ExpiresAt == "",
+		UnlimitedTraffic: unlimitedTraffic,
+		Conflicts:        append([]string(nil), metadata.Conflicts...),
 	}
 	if cache.LastSuccessAt == "" {
 		status.Freshness = FreshnessNever
@@ -302,11 +369,11 @@ func Evaluate(source store.Source, cache store.Cache, now time.Time) Status {
 	} else {
 		status.Freshness = FreshnessFresh
 	}
-	if metadata.Provenance["remaining"] != "" {
+	if !unlimitedTraffic && metadata.Provenance["remaining"] != "" {
 		remaining := metadata.Remaining
 		status.RemainingBytes = &remaining
 	}
-	if metadata.Provenance["total"] != "" {
+	if !unlimitedTraffic && metadata.Provenance["total"] != "" {
 		total := metadata.Total
 		status.TotalBytes = &total
 	}

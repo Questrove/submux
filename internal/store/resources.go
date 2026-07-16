@@ -13,36 +13,23 @@ import (
 )
 
 type NodeRecord struct {
-	ID           int64           `json:"id"`
-	SourceID     int64           `json:"source_id"`
-	Origin       string          `json:"origin"`
-	Name         string          `json:"name"`
-	Alias        string          `json:"alias,omitempty"`
-	Protocol     string          `json:"protocol"`
-	Config       json.RawMessage `json:"config"`
-	Fingerprint  string          `json:"fingerprint"`
-	Tags         []string        `json:"tags,omitempty"`
-	Enabled      bool            `json:"enabled"`
-	Role         string          `json:"role,omitempty"`
-	RoleOverride string          `json:"role_override,omitempty"`
-	Notice       *NodeNotice     `json:"notice,omitempty"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
-}
-
-type NodeSet struct {
-	ID             int64    `json:"id"`
-	Name           string   `json:"name"`
-	Description    string   `json:"description,omitempty"`
-	SourceIDs      []int64  `json:"source_ids,omitempty"`
-	NodeIDs        []int64  `json:"node_ids,omitempty"`
-	ExcludeNodeIDs []int64  `json:"exclude_node_ids,omitempty"`
-	Protocols      []string `json:"protocols,omitempty"`
-	NameContains   string   `json:"name_contains,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
-	Enabled        bool     `json:"enabled"`
-	CreatedAt      string   `json:"created_at"`
-	UpdatedAt      string   `json:"updated_at"`
+	ID             int64           `json:"id"`
+	SourceID       int64           `json:"source_id"`
+	Origin         string          `json:"origin"`
+	Name           string          `json:"name"`
+	Protocol       string          `json:"protocol"`
+	Config         json.RawMessage `json:"config"`
+	Fingerprint    string          `json:"fingerprint"`
+	Tags           []string        `json:"tags,omitempty"`
+	Enabled        bool            `json:"enabled"`
+	Role           string          `json:"role,omitempty"`
+	RoleOverride   string          `json:"role_override,omitempty"`
+	Notice         *NodeNotice     `json:"notice,omitempty"`
+	ConfigRevision int             `json:"config_revision,omitempty"`
+	LastChange     string          `json:"last_change,omitempty"`
+	LastChangedAt  string          `json:"last_changed_at,omitempty"`
+	CreatedAt      string          `json:"created_at"`
+	UpdatedAt      string          `json:"updated_at"`
 }
 
 type TemplateSlot struct {
@@ -75,36 +62,6 @@ type TemplateVersion struct {
 	PublishedAt   string         `json:"published_at"`
 }
 
-type ProfileBinding struct {
-	Slot      string `json:"slot"`
-	NodeSetID int64  `json:"node_set_id"`
-}
-
-type Profile struct {
-	ID                int64            `json:"id"`
-	Name              string           `json:"name"`
-	TemplateVersionID int64            `json:"template_version_id"`
-	Engine            string           `json:"engine"`
-	Bindings          []ProfileBinding `json:"bindings"`
-	Token             string           `json:"token"`
-	Enabled           bool             `json:"enabled"`
-	ExpiresAt         string           `json:"expires_at,omitempty"`
-	CreatedAt         string           `json:"created_at"`
-	UpdatedAt         string           `json:"updated_at"`
-}
-
-type ProfileArtifact struct {
-	ProfileID     int64    `json:"profile_id"`
-	Body          []byte   `json:"body,omitempty"`
-	ContentType   string   `json:"content_type,omitempty"`
-	Revision      string   `json:"revision,omitempty"`
-	LastSuccess   string   `json:"last_success,omitempty"`
-	LastError     string   `json:"last_error,omitempty"`
-	Warnings      []string `json:"warnings,omitempty"`
-	BlockedReason string   `json:"blocked_reason,omitempty"`
-	UpdatedAt     string   `json:"updated_at"`
-}
-
 func (s *Store) ReplaceSourceNodes(sourceID int64, incoming []NodeRecord) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return replaceSourceNodesTx(tx, sourceID, incoming)
@@ -130,6 +87,7 @@ func (s *Store) CommitSourceRefresh(sourceID int64, incoming []NodeRecord, useri
 func replaceSourceNodesTx(tx *bolt.Tx, sourceID int64, incoming []NodeRecord) error {
 	b := tx.Bucket([]byte("nodes"))
 	existing := map[string]NodeRecord{}
+	existingByName := map[string][]NodeRecord{}
 	var oldKeys [][]byte
 	if err := b.ForEach(func(k, v []byte) error {
 		var node NodeRecord
@@ -138,6 +96,10 @@ func replaceSourceNodesTx(tx *bolt.Tx, sourceID int64, incoming []NodeRecord) er
 		}
 		if node.SourceID == sourceID {
 			existing[node.Fingerprint] = node
+			key := logicalNodeName(node.Name)
+			if key != "" {
+				existingByName[key] = append(existingByName[key], node)
+			}
 			oldKeys = append(oldKeys, append([]byte(nil), k...))
 		}
 		return nil
@@ -151,18 +113,48 @@ func replaceSourceNodesTx(tx *bolt.Tx, sourceID int64, incoming []NodeRecord) er
 	}
 	now := nowRFC3339()
 	seen := map[string]bool{}
+	incomingNameCount := map[string]int{}
+	for _, node := range incoming {
+		if key := logicalNodeName(node.Name); key != "" {
+			incomingNameCount[key]++
+		}
+	}
+	matchedOldIDs := map[int64]bool{}
 	for _, node := range incoming {
 		if node.Fingerprint == "" || seen[node.Fingerprint] {
 			continue
 		}
 		seen[node.Fingerprint] = true
-		if old, ok := existing[node.Fingerprint]; ok {
+		old, matched := existing[node.Fingerprint]
+		if matched && matchedOldIDs[old.ID] {
+			matched = false
+		}
+		configurationChanged := false
+		if !matched {
+			key := logicalNodeName(node.Name)
+			candidates := existingByName[key]
+			if key != "" && incomingNameCount[key] == 1 && len(candidates) == 1 && !matchedOldIDs[candidates[0].ID] {
+				old, matched, configurationChanged = candidates[0], true, true
+			}
+		}
+		if matched {
+			matchedOldIDs[old.ID] = true
 			node.ID = old.ID
-			node.Alias = old.Alias
 			node.Tags = old.Tags
 			node.Enabled = old.Enabled
 			node.CreatedAt = old.CreatedAt
 			node.RoleOverride = old.RoleOverride
+			node.ConfigRevision = old.ConfigRevision
+			if node.ConfigRevision < 1 {
+				node.ConfigRevision = 1
+			}
+			node.LastChange, node.LastChangedAt = old.LastChange, old.LastChangedAt
+			if configurationChanged {
+				node.ConfigRevision++
+				node.LastChange, node.LastChangedAt = "configuration_changed", now
+			} else if node.Name != old.Name {
+				node.LastChange, node.LastChangedAt = "renamed", now
+			}
 		} else {
 			seq, err := b.NextSequence()
 			if err != nil {
@@ -171,6 +163,8 @@ func replaceSourceNodesTx(tx *bolt.Tx, sourceID int64, incoming []NodeRecord) er
 			node.ID = int64(seq)
 			node.Enabled = true
 			node.CreatedAt = now
+			node.ConfigRevision = 1
+			node.LastChange, node.LastChangedAt = "new", now
 		}
 		node.SourceID = sourceID
 		if node.Role == "" {
@@ -185,6 +179,10 @@ func replaceSourceNodesTx(tx *bolt.Tx, sourceID int64, incoming []NodeRecord) er
 		}
 	}
 	return nil
+}
+
+func logicalNodeName(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }
 
 func (s *Store) CreateManualNode(node NodeRecord) (int64, error) {
@@ -210,6 +208,7 @@ func (s *Store) CreateManualNode(node NodeRecord) (int64, error) {
 		now := nowRFC3339()
 		node.ID, node.Origin, node.Enabled = id, SourceKindManual, true
 		node.CreatedAt, node.UpdatedAt = now, now
+		node.ConfigRevision, node.LastChange, node.LastChangedAt = 1, "new", now
 		return putJSON(b, itob(id), node)
 	})
 	return id, err
@@ -257,6 +256,7 @@ func (s *Store) CreateManualNodes(nodes []NodeRecord) ([]int64, error) {
 			}
 			node.ID, node.Origin, node.Enabled = int64(seq), SourceKindManual, true
 			node.CreatedAt, node.UpdatedAt = now, now
+			node.ConfigRevision, node.LastChange, node.LastChangedAt = 1, "new", now
 			if err := putJSON(b, itob(node.ID), node); err != nil {
 				return err
 			}
@@ -268,7 +268,7 @@ func (s *Store) CreateManualNodes(nodes []NodeRecord) ([]int64, error) {
 	return ids, err
 }
 
-func (s *Store) UpdateNodeMetadata(id int64, alias string, tags []string, enabled bool) error {
+func (s *Store) UpdateNodeMetadata(id int64, tags []string, enabled bool) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("nodes"))
 		v := b.Get(itob(id))
@@ -279,7 +279,7 @@ func (s *Store) UpdateNodeMetadata(id int64, alias string, tags []string, enable
 		if err := json.Unmarshal(v, &node); err != nil {
 			return err
 		}
-		node.Alias, node.Tags, node.Enabled, node.UpdatedAt = alias, tags, enabled, nowRFC3339()
+		node.Tags, node.Enabled, node.UpdatedAt = tags, enabled, nowRFC3339()
 		return putJSON(b, itob(id), node)
 	})
 }
@@ -409,8 +409,13 @@ func (s *Store) ReplaceManualNode(id int64, replacement NodeRecord) error {
 			return err
 		}
 		replacement.ID, replacement.SourceID, replacement.Origin = id, old.SourceID, old.Origin
-		replacement.Alias, replacement.Tags, replacement.Enabled = old.Alias, old.Tags, old.Enabled
+		replacement.Tags, replacement.Enabled = old.Tags, old.Enabled
 		replacement.CreatedAt, replacement.UpdatedAt = old.CreatedAt, nowRFC3339()
+		replacement.ConfigRevision = old.ConfigRevision + 1
+		if replacement.ConfigRevision < 2 {
+			replacement.ConfigRevision = 2
+		}
+		replacement.LastChange, replacement.LastChangedAt = "configuration_changed", replacement.UpdatedAt
 		return putJSON(b, itob(id), replacement)
 	})
 }
@@ -434,41 +439,6 @@ func (s *Store) ListNodes() ([]NodeRecord, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out, err
 }
-
-func (s *Store) SaveNodeSet(value NodeSet) (int64, error) {
-	return saveWithID(s.db, "node_sets", value.ID, func(id int64, createdAt string) any {
-		now := nowRFC3339()
-		value.ID, value.UpdatedAt = id, now
-		if createdAt == "" {
-			value.CreatedAt = now
-		} else {
-			value.CreatedAt = createdAt
-		}
-		return value
-	})
-}
-
-func (s *Store) GetNodeSet(id int64) (NodeSet, error) {
-	var value NodeSet
-	err := getJSONByID(s.db, "node_sets", id, &value)
-	return value, err
-}
-
-func (s *Store) ListNodeSets() ([]NodeSet, error) {
-	out := make([]NodeSet, 0)
-	err := listJSON(s.db, "node_sets", func(v []byte) error {
-		var value NodeSet
-		if err := json.Unmarshal(v, &value); err != nil {
-			return err
-		}
-		out = append(out, value)
-		return nil
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, err
-}
-
-func (s *Store) DeleteNodeSet(id int64) error { return deleteByID(s.db, "node_sets", id) }
 
 func (s *Store) SaveTemplate(value Template) (int64, error) {
 	return saveWithID(s.db, "templates", value.ID, func(id int64, createdAt string) any {
@@ -573,6 +543,43 @@ func (s *Store) PublishTemplateVersion(templateID int64, engineVersion, content 
 	return result, err
 }
 
+// OverwriteTemplateVersionForDevelopment is a pre-release escape hatch used
+// only by built-in catalog migrations. Normal template APIs remain append-only.
+func (s *Store) OverwriteTemplateVersionForDevelopment(id int64, engineVersion, content string, slots []TemplateSlot) (TemplateVersion, error) {
+	var result TemplateVersion
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		versions := tx.Bucket([]byte("template_versions"))
+		raw := versions.Get(itob(id))
+		if raw == nil {
+			return fmt.Errorf("no template version with id %d", id)
+		}
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return err
+		}
+		sum := sha256.Sum256([]byte(content + "\x00" + mustJSON(slots)))
+		result.EngineVersion = engineVersion
+		result.Content = content
+		result.Slots = slots
+		result.Checksum = hex.EncodeToString(sum[:])
+		result.PublishedAt = nowRFC3339()
+		if err := putJSON(versions, itob(id), result); err != nil {
+			return err
+		}
+		templates := tx.Bucket([]byte("templates"))
+		templateRaw := templates.Get(itob(result.TemplateID))
+		if templateRaw == nil {
+			return fmt.Errorf("no template with id %d", result.TemplateID)
+		}
+		var template Template
+		if err := json.Unmarshal(templateRaw, &template); err != nil {
+			return err
+		}
+		template.UpdatedAt = nowRFC3339()
+		return putJSON(templates, itob(template.ID), template)
+	})
+	return result, err
+}
+
 func (s *Store) GetTemplateVersion(id int64) (TemplateVersion, error) {
 	var value TemplateVersion
 	err := getJSONByID(s.db, "template_versions", id, &value)
@@ -593,126 +600,6 @@ func (s *Store) ListTemplateVersions(templateID int64) ([]TemplateVersion, error
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	return out, err
-}
-
-func (s *Store) SaveProfile(value Profile) (int64, error) {
-	var id int64
-	err := s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("profiles"))
-		now, created := nowRFC3339(), ""
-		oldToken := ""
-		if value.ID == 0 {
-			seq, err := b.NextSequence()
-			if err != nil {
-				return err
-			}
-			id = int64(seq)
-		} else {
-			id = value.ID
-			v := b.Get(itob(id))
-			if v == nil {
-				return fmt.Errorf("no profile with id %d", id)
-			}
-			var old Profile
-			if err := json.Unmarshal(v, &old); err != nil {
-				return err
-			}
-			created, oldToken = old.CreatedAt, old.Token
-		}
-		if value.Token == "" {
-			return fmt.Errorf("profile token is required")
-		}
-		index := tx.Bucket([]byte("token_index"))
-		if owner := index.Get([]byte(value.Token)); owner != nil && !bytes.Equal(owner, itob(id)) {
-			return fmt.Errorf("profile token already exists")
-		}
-		if oldToken != "" && oldToken != value.Token {
-			if err := index.Delete([]byte(oldToken)); err != nil {
-				return err
-			}
-		}
-		value.ID, value.UpdatedAt = id, now
-		if created == "" {
-			value.CreatedAt = now
-		} else {
-			value.CreatedAt = created
-		}
-		if err := putJSON(b, itob(id), value); err != nil {
-			return err
-		}
-		return index.Put([]byte(value.Token), itob(id))
-	})
-	return id, err
-}
-
-func (s *Store) GetProfile(id int64) (Profile, error) {
-	var value Profile
-	err := getJSONByID(s.db, "profiles", id, &value)
-	return value, err
-}
-
-func (s *Store) GetProfileByToken(token string) (Profile, error) {
-	var value Profile
-	err := s.db.View(func(tx *bolt.Tx) error {
-		id := tx.Bucket([]byte("token_index")).Get([]byte(token))
-		if id == nil {
-			return fmt.Errorf("profile token not found")
-		}
-		v := tx.Bucket([]byte("profiles")).Get(id)
-		if v == nil {
-			return fmt.Errorf("profile token index is stale")
-		}
-		return json.Unmarshal(v, &value)
-	})
-	return value, err
-}
-
-func (s *Store) ListProfiles() ([]Profile, error) {
-	out := make([]Profile, 0)
-	err := listJSON(s.db, "profiles", func(v []byte) error {
-		var value Profile
-		if err := json.Unmarshal(v, &value); err != nil {
-			return err
-		}
-		out = append(out, value)
-		return nil
-	})
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out, err
-}
-
-func (s *Store) DeleteProfile(id int64) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("profiles"))
-		v := b.Get(itob(id))
-		if v == nil {
-			return fmt.Errorf("no profile with id %d", id)
-		}
-		var profile Profile
-		if err := json.Unmarshal(v, &profile); err != nil {
-			return err
-		}
-		if err := tx.Bucket([]byte("token_index")).Delete([]byte(profile.Token)); err != nil {
-			return err
-		}
-		if err := tx.Bucket([]byte("profile_artifacts")).Delete(itob(id)); err != nil {
-			return err
-		}
-		return b.Delete(itob(id))
-	})
-}
-
-func (s *Store) PutProfileArtifact(value ProfileArtifact) error {
-	value.UpdatedAt = nowRFC3339()
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return putJSON(tx.Bucket([]byte("profile_artifacts")), itob(value.ProfileID), value)
-	})
-}
-
-func (s *Store) GetProfileArtifact(profileID int64) (ProfileArtifact, error) {
-	var value ProfileArtifact
-	err := getJSONByID(s.db, "profile_artifacts", profileID, &value)
-	return value, err
 }
 
 func saveWithID(db *bolt.DB, bucket string, id int64, build func(int64, string) any) (int64, error) {
@@ -768,16 +655,6 @@ func listJSON(db *bolt.DB, bucket string, fn func([]byte) error) error {
 	})
 }
 
-func deleteByID(db *bolt.DB, bucket string, id int64) error {
-	return db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-		if b.Get(itob(id)) == nil {
-			return fmt.Errorf("no %s record with id %d", bucket, id)
-		}
-		return b.Delete(itob(id))
-	})
-}
-
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 
 func NormalizeStringSet(values []string) []string {
@@ -791,18 +668,5 @@ func NormalizeStringSet(values []string) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
-}
-
-func NormalizeIntSet(values []int64) []int64 {
-	seen := map[int64]bool{}
-	out := make([]int64, 0, len(values))
-	for _, value := range values {
-		if value > 0 && !seen[value] {
-			seen[value] = true
-			out = append(out, value)
-		}
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }

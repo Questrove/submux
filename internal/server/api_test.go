@@ -19,7 +19,7 @@ func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 func TestSourcesAPICRUD(t *testing.T) {
 	st := newTestStore(t)
-	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
+	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
 	c := initAndClient(t, srv)
 
@@ -69,7 +69,7 @@ func TestSourcesAPICRUD(t *testing.T) {
 
 func TestSourceLifecycleAPI(t *testing.T) {
 	st := newTestStore(t)
-	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
+	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
 	c := initAndClient(t, srv)
 
@@ -122,7 +122,163 @@ func TestSourceLifecycleAPI(t *testing.T) {
 	}
 }
 
-func TestNodeSetAPIRejectsInformationalNode(t *testing.T) {
+func TestCreateSubscriptionRefreshesImmediately(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Subscription-Userinfo", "upload=0; download=0; total=1073741824")
+		_, _ = io.WriteString(w, "vless://00000000-0000-0000-0000-000000000001@node.example.com:443?encryption=none&type=tcp#HK")
+	}))
+	defer upstream.Close()
+
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	created := mustPost(t, client, srv.URL+"/api/sources", `{"name":"Air","url":"`+upstream.URL+`"}`)
+	defer created.Body.Close()
+	var result struct {
+		ID        int64 `json:"id"`
+		RefreshOK bool  `json:"refresh_ok"`
+	}
+	_ = json.NewDecoder(created.Body).Decode(&result)
+	if created.StatusCode != http.StatusOK || result.ID == 0 || !result.RefreshOK {
+		t.Fatalf("source was not created and refreshed: status=%d result=%+v", created.StatusCode, result)
+	}
+
+	nodes, err := st.ListNodes()
+	if err != nil || len(nodes) != 1 || nodes[0].SourceID != result.ID || nodes[0].Name != "HK" {
+		t.Fatalf("initial refresh did not persist nodes: err=%v nodes=%+v", err, nodes)
+	}
+	cache, err := st.GetCache(result.ID)
+	if err != nil || cache.LastSuccessAt == "" || cache.LastError != "" {
+		t.Fatalf("initial refresh did not persist success metadata: err=%v cache=%+v", err, cache)
+	}
+}
+
+func TestCreateSubscriptionKeepsSourceWhenInitialRefreshFails(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "denied", http.StatusUnauthorized)
+	}))
+	defer upstream.Close()
+
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	created := mustPost(t, client, srv.URL+"/api/sources", `{"name":"Air","url":"`+upstream.URL+`"}`)
+	defer created.Body.Close()
+	var result struct {
+		ID           int64  `json:"id"`
+		RefreshOK    bool   `json:"refresh_ok"`
+		RefreshError string `json:"refresh_error"`
+	}
+	_ = json.NewDecoder(created.Body).Decode(&result)
+	if created.StatusCode != http.StatusOK || result.ID == 0 || result.RefreshOK || result.RefreshError == "" {
+		t.Fatalf("failed refresh result is incomplete: status=%d result=%+v", created.StatusCode, result)
+	}
+	if _, err := st.GetSource(result.ID); err != nil {
+		t.Fatalf("source was deleted after initial refresh failure: %v", err)
+	}
+	cache, err := st.GetCache(result.ID)
+	if err != nil || cache.LastError == "" || cache.LastSuccessAt != "" {
+		t.Fatalf("initial refresh failure was not recorded: err=%v cache=%+v", err, cache)
+	}
+}
+
+func TestCreateManualSourceDoesNotRefresh(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	created := mustPost(t, client, srv.URL+"/api/sources", `{"kind":"manual","name":"Local"}`)
+	defer created.Body.Close()
+	var result map[string]any
+	_ = json.NewDecoder(created.Body).Decode(&result)
+	if created.StatusCode != http.StatusOK || result["id"] == nil {
+		t.Fatalf("manual source creation failed: status=%d result=%+v", created.StatusCode, result)
+	}
+	if _, exists := result["refresh_ok"]; exists {
+		t.Fatalf("manual source unexpectedly reported a network refresh: %+v", result)
+	}
+}
+
+func TestNodeMetadataAPIHasNoAliasAndPersistsDialogFields(t *testing.T) {
+	st := newTestStore(t)
+	sourceID, err := st.CreateSource(store.Source{Kind: store.SourceKindManual, Name: "Local"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodeID, err := st.CreateManualNode(store.NodeRecord{
+		SourceID: sourceID, Name: "Original name", Protocol: "vless",
+		Config: json.RawMessage(`{"name":"Original name","type":"vless"}`), Fingerprint: "node-fingerprint",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	request, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/nodes/"+itoa(nodeID), strings.NewReader(`{"tags":["private","hk"],"enabled":false}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := mustDo(t, client, request)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("update node metadata: status %d", response.StatusCode)
+	}
+	stored, err := st.GetNode(nodeID)
+	if err != nil || stored.Name != "Original name" || stored.Enabled || fmt.Sprint(stored.Tags) != "[hk private]" {
+		t.Fatalf("node metadata was not persisted cleanly: value=%+v err=%v", stored, err)
+	}
+
+	legacy, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/nodes/"+itoa(nodeID), strings.NewReader(`{"alias":"removed"}`))
+	legacy.Header.Set("Content-Type", "application/json")
+	legacyResponse := mustDo(t, client, legacy)
+	legacyResponse.Body.Close()
+	if legacyResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("removed alias field should be rejected, got %d", legacyResponse.StatusCode)
+	}
+}
+
+func TestManualNodeImportUsesProtectedBuiltinGroupByDefault(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	response := mustPost(t, client, srv.URL+"/api/nodes/import", `{"content":"vless://00000000-0000-0000-0000-000000000001@node.example.com:443?encryption=none&type=tcp#Self"}`)
+	var result struct {
+		SourceID int64 `json:"source_id"`
+		Count    int   `json:"count"`
+	}
+	_ = json.NewDecoder(response.Body).Decode(&result)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || result.SourceID == 0 || result.Count != 1 {
+		t.Fatalf("default manual import failed: status=%d result=%+v", response.StatusCode, result)
+	}
+	sourceValue, err := st.GetSource(result.SourceID)
+	if err != nil || !sourceValue.Builtin || sourceValue.Name != store.DefaultManualSourceName || sourceValue.Kind != store.SourceKindManual {
+		t.Fatalf("built-in group is wrong: value=%+v err=%v", sourceValue, err)
+	}
+
+	update, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/sources/"+itoa(result.SourceID), strings.NewReader(`{"kind":"manual","name":"Changed","enabled":false}`))
+	update.Header.Set("Content-Type", "application/json")
+	updateResponse := mustDo(t, client, update)
+	updateResponse.Body.Close()
+	if updateResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("built-in group update should be rejected, got %d", updateResponse.StatusCode)
+	}
+	remove, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/sources/"+itoa(result.SourceID), nil)
+	removeResponse := mustDo(t, client, remove)
+	removeResponse.Body.Close()
+	if removeResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("built-in group delete should be rejected, got %d", removeResponse.StatusCode)
+	}
+}
+
+func TestOutputSubscriptionAPIRejectsInformationalNode(t *testing.T) {
 	st := newTestStore(t)
 	sourceID, _ := st.CreateSource(store.Source{Name: "Air", URL: "http://x"})
 	if err := st.ReplaceSourceNodes(sourceID, []store.NodeRecord{{
@@ -136,21 +292,23 @@ func TestNodeSetAPIRejectsInformationalNode(t *testing.T) {
 	srv := httptest.NewServer(New(st, source.NewFetcher(st)).Handler())
 	defer srv.Close()
 	client := initAndClient(t, srv)
+	templates, _ := st.ListTemplates()
 
-	response := mustPost(t, client, srv.URL+"/api/node-sets", fmt.Sprintf(`{"name":"bad","node_ids":[%d]}`, nodes[0].ID))
+	response := mustPost(t, client, srv.URL+"/api/subscriptions", fmt.Sprintf(`{"name":"bad","template_version_id":%d,"bindings":[{"slot":"primary","node_ids":[%d]}]}`, templates[0].CurrentVersionID, nodes[0].ID))
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusBadRequest {
-		t.Fatalf("informational node accepted into NodeSet: status %d", response.StatusCode)
+		t.Fatalf("informational node accepted into output subscription: status %d", response.StatusCode)
 	}
 }
 
-func TestV2SettingsAndLegacyRoutesRemoved(t *testing.T) {
+func TestV4SettingsAndLegacyRoutesRemoved(t *testing.T) {
 	st := newTestStore(t)
-	srv := httptest.NewServer(New(st, nil).Handler())
+	app := New(st, nil)
+	srv := httptest.NewServer(app.Handler())
 	defer srv.Close()
 	c := initAndClient(t, srv)
 
-	for _, path := range []string{"/api/override", "/api/settings/reset-token"} {
+	for _, path := range []string{"/api/override", "/api/settings/reset-token", "/api/node-sets", "/api/profiles"} {
 		r := mustGet(t, c, srv.URL+path)
 		r.Body.Close()
 		if r.StatusCode != http.StatusNotFound {
@@ -171,7 +329,7 @@ func TestV2SettingsAndLegacyRoutesRemoved(t *testing.T) {
 		t.Fatalf("settings wrong: %#v", s2)
 	}
 	if _, exists := s2["output_token"]; exists {
-		t.Fatalf("global output token must not exist in v2: %#v", s2)
+		t.Fatalf("global output token must not exist in v4: %#v", s2)
 	}
 	if token, _ := st.GetSetting("output_token"); token != "" {
 		t.Fatalf("initialization created legacy output token %q", token)
@@ -198,7 +356,6 @@ func TestAPIRejectsInvalidConfiguration(t *testing.T) {
 	if badSettings.StatusCode != http.StatusBadRequest {
 		t.Fatalf("invalid settings: want 400, got %d", badSettings.StatusCode)
 	}
-
 	badManual := mustPost(t, c, srv.URL+"/api/sources", `{"kind":"manual","name":"manual","url":"https://should-not-exist"}`)
 	badManual.Body.Close()
 	if badManual.StatusCode != http.StatusBadRequest {
@@ -206,7 +363,7 @@ func TestAPIRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-func TestV2WorkflowBuildsMihomoAndSingBoxProfiles(t *testing.T) {
+func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 	st := newTestStore(t)
 	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
@@ -233,14 +390,9 @@ func TestV2WorkflowBuildsMihomoAndSingBoxProfiles(t *testing.T) {
 		t.Fatalf("import node failed: %d %#v", imported.StatusCode, importResult)
 	}
 
-	nodeSet := mustPost(t, c, srv.URL+"/api/node-sets", `{"name":"Private VLESS","source_ids":[`+itoa(sourceResult.ID)+`],"protocols":["vless"]}`)
-	var nodeSetResult struct {
-		ID int64 `json:"id"`
-	}
-	_ = json.NewDecoder(nodeSet.Body).Decode(&nodeSetResult)
-	nodeSet.Body.Close()
-	if nodeSet.StatusCode != http.StatusOK || nodeSetResult.ID == 0 {
-		t.Fatalf("create node set failed: %d %#v", nodeSet.StatusCode, nodeSetResult)
+	nodes, _ := st.ListNodes()
+	if len(nodes) != 1 {
+		t.Fatalf("imported node missing: %#v", nodes)
 	}
 
 	templatesResponse := mustGet(t, c, srv.URL+"/api/templates")
@@ -251,8 +403,8 @@ func TestV2WorkflowBuildsMihomoAndSingBoxProfiles(t *testing.T) {
 	}
 	_ = json.NewDecoder(templatesResponse.Body).Decode(&templates)
 	templatesResponse.Body.Close()
-	if len(templates) != 4 {
-		t.Fatalf("want four platform templates, got %#v", templates)
+	if len(templates) != 5 {
+		t.Fatalf("want five platform templates, got %#v", templates)
 	}
 
 	for _, engine := range []string{"mihomo", "sing-box"} {
@@ -263,25 +415,25 @@ func TestV2WorkflowBuildsMihomoAndSingBoxProfiles(t *testing.T) {
 				break
 			}
 		}
-		payload := `{"name":"` + engine + ` profile","template_version_id":` + itoa(versionID) + `,"bindings":[{"slot":"primary","node_set_id":` + itoa(nodeSetResult.ID) + `}]}`
-		created := mustPost(t, c, srv.URL+"/api/profiles", payload)
-		var profileResult struct {
+		payload := `{"name":"` + engine + ` subscription","template_version_id":` + itoa(versionID) + `,"bindings":[{"slot":"primary","node_ids":[` + itoa(nodes[0].ID) + `]}]}`
+		created := mustPost(t, c, srv.URL+"/api/subscriptions", payload)
+		var subscriptionResult struct {
 			ID    int64  `json:"id"`
 			Token string `json:"token"`
 		}
 		data, _ := io.ReadAll(created.Body)
 		created.Body.Close()
-		if created.StatusCode != http.StatusOK || json.Unmarshal(data, &profileResult) != nil || profileResult.Token == "" {
-			t.Fatalf("create %s profile failed: %d %s", engine, created.StatusCode, data)
+		if created.StatusCode != http.StatusOK || json.Unmarshal(data, &subscriptionResult) != nil || subscriptionResult.Token == "" {
+			t.Fatalf("create %s output subscription failed: %d %s", engine, created.StatusCode, data)
 		}
-		sub := mustGet(t, http.DefaultClient, srv.URL+"/sub/"+profileResult.Token)
+		sub := mustGet(t, http.DefaultClient, srv.URL+"/sub/"+subscriptionResult.Token)
 		content, _ := io.ReadAll(sub.Body)
 		sub.Body.Close()
 		if sub.StatusCode != http.StatusOK || !strings.Contains(string(content), "node.example.com") {
 			t.Fatalf("compiled %s subscription wrong: %d %s", engine, sub.StatusCode, content)
 		}
 		if engine == "sing-box" && !strings.Contains(sub.Header.Get("Content-Type"), "json") {
-			t.Fatalf("sing-box profile has wrong content type: %q", sub.Header.Get("Content-Type"))
+			t.Fatalf("sing-box subscription has wrong content type: %q", sub.Header.Get("Content-Type"))
 		}
 	}
 }

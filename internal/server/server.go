@@ -72,23 +72,20 @@ func (s *Server) Handler() http.Handler {
 		pr.Post("/api/nodes/import", s.handleImportNodes)
 		pr.Put("/api/nodes/{id}", s.handleUpdateNode)
 		pr.Delete("/api/nodes/{id}", s.handleDeleteNode)
-		pr.Get("/api/node-sets", s.handleListNodeSets)
-		pr.Post("/api/node-sets", s.handleSaveNodeSet)
-		pr.Put("/api/node-sets/{id}", s.handleSaveNodeSet)
-		pr.Delete("/api/node-sets/{id}", s.handleDeleteNodeSet)
 		pr.Get("/api/templates", s.handleListTemplates)
 		pr.Post("/api/templates", s.handleSaveTemplate)
 		pr.Put("/api/templates/{id}", s.handleSaveTemplate)
 		pr.Delete("/api/templates/{id}", s.handleDeleteTemplate)
 		pr.Get("/api/templates/{id}/versions", s.handleListTemplateVersions)
 		pr.Post("/api/templates/{id}/versions", s.handlePublishTemplateVersion)
-		pr.Get("/api/profiles", s.handleListProfiles)
-		pr.Post("/api/profiles", s.handleSaveProfile)
-		pr.Put("/api/profiles/{id}", s.handleSaveProfile)
-		pr.Delete("/api/profiles/{id}", s.handleDeleteProfile)
-		pr.Post("/api/profiles/{id}/preview", s.handlePreviewProfile)
-		pr.Post("/api/profiles/{id}/publish", s.handlePublishProfile)
-		pr.Post("/api/profiles/{id}/reset-token", s.handleResetProfileToken)
+		pr.Get("/api/subscriptions", s.handleListOutputSubscriptions)
+		pr.Post("/api/subscriptions", s.handleSaveOutputSubscription)
+		pr.Put("/api/subscriptions/{id}", s.handleSaveOutputSubscription)
+		pr.Delete("/api/subscriptions/{id}", s.handleDeleteOutputSubscription)
+		pr.Post("/api/subscriptions/{id}/preview", s.handlePreviewOutputSubscription)
+		pr.Post("/api/subscriptions/{id}/publish", s.handlePublishOutputSubscription)
+		pr.Post("/api/subscriptions/{id}/reset-token", s.handleResetOutputSubscriptionToken)
+		pr.Put("/api/subscriptions/{id}/enabled", s.handleSetOutputSubscriptionEnabled)
 	})
 
 	// 静态控制台(兜底)
@@ -96,32 +93,32 @@ func (s *Server) Handler() http.Handler {
 	return r
 }
 
-// handleSub 只提供已成功编译的固定引擎 Profile 产物，不再根据 UA 猜测格式。
+// handleSub 只提供已成功编译的固定引擎订阅产物，不根据 UA 猜测格式。
 func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	token := chi.URLParam(r, "token")
-	profile, err := s.store.GetProfileByToken(token)
-	if err != nil || !profile.Enabled {
+	subscription, err := s.store.GetOutputSubscriptionByToken(token)
+	if err != nil || !subscription.Enabled {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if profile.ExpiresAt != "" {
-		if expiry, parseErr := time.Parse(time.RFC3339, profile.ExpiresAt); parseErr != nil || !time.Now().Before(expiry) {
+	if subscription.ExpiresAt != "" {
+		if expiry, parseErr := time.Parse(time.RFC3339, subscription.ExpiresAt); parseErr != nil || !time.Now().Before(expiry) {
 			http.Error(w, "subscription expired", http.StatusGone)
 			return
 		}
 	}
-	artifact, err := s.store.GetProfileArtifact(profile.ID)
+	artifact, err := s.store.GetSubscriptionArtifact(subscription.ID)
 	if err == nil && artifact.BlockedReason != "" {
-		http.Error(w, "profile unavailable due to upstream lifecycle policy", http.StatusServiceUnavailable)
+		http.Error(w, "subscription unavailable due to upstream lifecycle policy", http.StatusServiceUnavailable)
 		return
 	}
 	if err != nil || len(artifact.Body) == 0 {
-		http.Error(w, "profile has no published artifact", http.StatusServiceUnavailable)
+		http.Error(w, "subscription has no published artifact", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", artifact.ContentType)
 	ext := ".yaml"
-	if profile.Engine == compiler.EngineSingBox {
+	if subscription.Engine == compiler.EngineSingBox {
 		ext = ".json"
 	}
 	w.Header().Set("Content-Disposition", "attachment; filename=submux"+ext)

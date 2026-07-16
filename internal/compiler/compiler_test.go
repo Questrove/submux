@@ -54,11 +54,7 @@ func addTemplate(t *testing.T, st *store.Store, engine, content string, slots []
 
 func TestMihomoCompilerInjectsOnlyBoundSlotsAndHashesArtifact(t *testing.T) {
 	st := compilerTestStore(t)
-	sourceID, _ := addManualNodes(t, st, "Home", "vless://id@example.com:443?encryption=none&type=tcp#Node")
-	nodeSetID, err := st.SaveNodeSet(store.NodeSet{Name: "all", SourceIDs: []int64{sourceID}, Enabled: true})
-	if err != nil {
-		t.Fatal(err)
-	}
+	_, nodeIDs := addManualNodes(t, st, "Home", "vless://id@example.com:443?encryption=none&type=tcp#Node")
 	version := addTemplate(t, st, EngineMihomo, `proxy-groups:
   - {name: A, type: select, proxies: [DIRECT]}
   - {name: B, type: select, proxies: [DIRECT]}
@@ -69,11 +65,11 @@ rules:
 		{Key: "b", Target: "B", Mode: "append"},
 	})
 	service := New(st)
-	a, err := service.Preview(store.Profile{Engine: EngineMihomo, TemplateVersionID: version.ID, Bindings: []store.ProfileBinding{{Slot: "a", NodeSetID: nodeSetID}}})
+	a, err := service.Preview(store.OutputSubscription{Engine: EngineMihomo, TemplateVersionID: version.ID, Bindings: []store.SubscriptionBinding{{Slot: "a", NodeIDs: nodeIDs}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := service.Preview(store.Profile{Engine: EngineMihomo, TemplateVersionID: version.ID, Bindings: []store.ProfileBinding{{Slot: "b", NodeSetID: nodeSetID}}})
+	b, err := service.Preview(store.OutputSubscription{Engine: EngineMihomo, TemplateVersionID: version.ID, Bindings: []store.SubscriptionBinding{{Slot: "b", NodeIDs: nodeIDs}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,10 +81,29 @@ rules:
 	}
 }
 
+func TestCompilerPreservesSelectedNodeOrder(t *testing.T) {
+	st := compilerTestStore(t)
+	_, nodeIDs := addManualNodes(t, st, "Home", "trojan://password@a.example.com:443#A\ntrojan://password@b.example.com:443#B")
+	version := addTemplate(t, st, EngineMihomo, `proxy-groups:
+  - {name: AUTO, type: select, proxies: []}
+rules: ["MATCH,AUTO"]
+`, []store.TemplateSlot{{Key: "primary", Target: "AUTO", Mode: "replace", Required: true}})
+	result, err := New(st).Preview(store.OutputSubscription{
+		Engine: EngineMihomo, TemplateVersionID: version.ID,
+		Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: []int64{nodeIDs[1], nodeIDs[0]}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(result.Body)
+	if b, a := strings.Index(text, "[Home] B"), strings.Index(text, "[Home] A"); b < 0 || a < 0 || b >= a {
+		t.Fatalf("selected node order was not preserved:\n%s", text)
+	}
+}
+
 func TestSingBoxCompilerMapsDocumentedVLESSFields(t *testing.T) {
 	st := compilerTestStore(t)
-	sourceID, _ := addManualNodes(t, st, "Airport", "vless://id@example.com:443?encryption=none&security=reality&type=grpc&serviceName=svc&sni=front.example.com&pbk=public&sid=01&fp=chrome#Reality")
-	nodeSetID, _ := st.SaveNodeSet(store.NodeSet{Name: "all", SourceIDs: []int64{sourceID}, Enabled: true})
+	_, nodeIDs := addManualNodes(t, st, "Airport", "vless://id@example.com:443?encryption=none&security=reality&type=grpc&serviceName=svc&sni=front.example.com&pbk=public&sid=01&fp=chrome#Reality")
 	version := addTemplate(t, st, EngineSingBox, `{
   "outbounds": [
     {"type":"selector","tag":"PROXY","outbounds":["AUTO"]},
@@ -96,7 +111,7 @@ func TestSingBoxCompilerMapsDocumentedVLESSFields(t *testing.T) {
   ],
   "route":{"final":"PROXY"}
 }`, []store.TemplateSlot{{Key: "primary", Target: "AUTO", Mode: "replace", Required: true}})
-	result, err := New(st).Preview(store.Profile{Engine: EngineSingBox, TemplateVersionID: version.ID, Bindings: []store.ProfileBinding{{Slot: "primary", NodeSetID: nodeSetID}}})
+	result, err := New(st).Preview(store.OutputSubscription{Engine: EngineSingBox, TemplateVersionID: version.ID, Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: nodeIDs}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,13 +129,12 @@ func TestSingBoxCompilerMapsDocumentedVLESSFields(t *testing.T) {
 
 func TestSingBoxCompilerRejectsCertificateFingerprintSemanticMismatch(t *testing.T) {
 	st := compilerTestStore(t)
-	sourceID, _ := addManualNodes(t, st, "Airport", "hysteria2://password@example.com:443?pinSHA256=certificate-hash#HY2")
-	nodeSetID, _ := st.SaveNodeSet(store.NodeSet{Name: "hy2", SourceIDs: []int64{sourceID}, Enabled: true})
+	_, nodeIDs := addManualNodes(t, st, "Airport", "hysteria2://password@example.com:443?pinSHA256=certificate-hash#HY2")
 	version := addTemplate(t, st, EngineSingBox, `{
   "outbounds": [{"type":"urltest","tag":"AUTO","outbounds":[]}],
   "route":{"final":"AUTO"}
 }`, []store.TemplateSlot{{Key: "primary", Target: "AUTO", Required: true}})
-	_, err := New(st).Preview(store.Profile{Engine: EngineSingBox, TemplateVersionID: version.ID, Bindings: []store.ProfileBinding{{Slot: "primary", NodeSetID: nodeSetID}}})
+	_, err := New(st).Preview(store.OutputSubscription{Engine: EngineSingBox, TemplateVersionID: version.ID, Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: nodeIDs}}})
 	if err == nil || !strings.Contains(err.Error(), "fingerprint") {
 		t.Fatalf("expected strict fingerprint rejection, got %v", err)
 	}
@@ -128,33 +142,31 @@ func TestSingBoxCompilerRejectsCertificateFingerprintSemanticMismatch(t *testing
 
 func TestCompileFailurePreservesLastGoodArtifact(t *testing.T) {
 	st := compilerTestStore(t)
-	sourceID, _ := addManualNodes(t, st, "Home", "trojan://password@example.com:443#TR")
-	nodeSet := store.NodeSet{Name: "all", SourceIDs: []int64{sourceID}, Enabled: true}
-	nodeSetID, _ := st.SaveNodeSet(nodeSet)
+	_, nodeIDs := addManualNodes(t, st, "Home", "trojan://password@example.com:443#TR")
 	version := addTemplate(t, st, EngineMihomo, `proxy-groups:
   - {name: AUTO, type: select, proxies: []}
 rules: ["MATCH,AUTO"]
 `, []store.TemplateSlot{{Key: "primary", Target: "AUTO", Mode: "replace", Required: true}})
-	profileID, err := st.SaveProfile(store.Profile{
+	subscriptionID, err := st.SaveOutputSubscription(store.OutputSubscription{
 		Name: "p", Engine: EngineMihomo, TemplateVersionID: version.ID,
-		Bindings: []store.ProfileBinding{{Slot: "primary", NodeSetID: nodeSetID}}, Token: "token", Enabled: true,
+		Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: nodeIDs}}, Token: "token", Enabled: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	service := New(st)
-	if _, err := service.CompileAndStore(profileID); err != nil {
+	if _, err := service.CompileAndStore(subscriptionID); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := st.GetProfileArtifact(profileID)
-	nodeSet.ID, nodeSet.Enabled = nodeSetID, false
-	if _, err := st.SaveNodeSet(nodeSet); err != nil {
+	before, _ := st.GetSubscriptionArtifact(subscriptionID)
+	nodeValue, _ := st.GetNode(nodeIDs[0])
+	if err := st.UpdateNodeMetadata(nodeValue.ID, nodeValue.Tags, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompileAndStore(profileID); err == nil {
-		t.Fatal("expected disabled node set compile failure")
+	if _, err := service.CompileAndStore(subscriptionID); err == nil {
+		t.Fatal("expected unavailable selected node compile failure")
 	}
-	after, _ := st.GetProfileArtifact(profileID)
+	after, _ := st.GetSubscriptionArtifact(subscriptionID)
 	if !bytes.Equal(before.Body, after.Body) || after.LastError == "" || after.Revision != before.Revision {
 		t.Fatalf("last-good artifact was not preserved: before=%+v after=%+v", before, after)
 	}
@@ -173,20 +185,21 @@ func TestStrictExpiredSourceBlocksWithoutReplacingLastGood(t *testing.T) {
 	if err := st.ReplaceSourceNodes(sourceID, records); err != nil {
 		t.Fatal(err)
 	}
-	nodeSetID, _ := st.SaveNodeSet(store.NodeSet{Name: "all", SourceIDs: []int64{sourceID}, Enabled: true})
+	nodes, _ := st.ListNodes()
+	primaryNodeID := nodes[0].ID
 	version := addTemplate(t, st, EngineMihomo, `proxy-groups:
   - {name: AUTO, type: select, proxies: []}
 rules: ["MATCH,AUTO"]
 `, []store.TemplateSlot{{Key: "primary", Target: "AUTO", Mode: "replace", Required: true}})
-	profileID, _ := st.SaveProfile(store.Profile{
+	subscriptionID, _ := st.SaveOutputSubscription(store.OutputSubscription{
 		Name: "p", Engine: EngineMihomo, TemplateVersionID: version.ID,
-		Bindings: []store.ProfileBinding{{Slot: "primary", NodeSetID: nodeSetID}}, Token: "token", Enabled: true,
+		Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: []int64{primaryNodeID}}}, Token: "token", Enabled: true,
 	})
 	service := New(st)
-	if _, err := service.CompileAndStore(profileID); err != nil {
+	if _, err := service.CompileAndStore(subscriptionID); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := st.GetProfileArtifact(profileID)
+	before, _ := st.GetSubscriptionArtifact(subscriptionID)
 	source, _ := st.GetSource(sourceID)
 	source.LifecyclePolicy = store.LifecycleStrict
 	if err := st.UpdateSource(source); err != nil {
@@ -199,20 +212,20 @@ rules: ["MATCH,AUTO"]
 	if err := st.CommitSourceRefreshV3(sourceID, records, "", metadata, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompileAndStore(profileID); err == nil {
+	if _, err := service.CompileAndStore(subscriptionID); err == nil {
 		t.Fatal("strict expired source did not block")
 	}
-	after, _ := st.GetProfileArtifact(profileID)
+	after, _ := st.GetSubscriptionArtifact(subscriptionID)
 	if after.BlockedReason == "" || !bytes.Equal(before.Body, after.Body) || after.Revision != before.Revision {
 		t.Fatalf("strict block did not preserve auditable last-good: before=%+v after=%+v", before, after)
 	}
-	backupSourceID, _ := addManualNodes(t, st, "backup", "trojan://password@backup.example.com:443#Backup")
-	nodeSet, _ := st.GetNodeSet(nodeSetID)
-	nodeSet.SourceIDs = []int64{sourceID, backupSourceID}
-	if _, err := st.SaveNodeSet(nodeSet); err != nil {
+	_, backupNodeIDs := addManualNodes(t, st, "backup", "trojan://password@backup.example.com:443#Backup")
+	subscription, _ := st.GetOutputSubscription(subscriptionID)
+	subscription.Bindings[0].NodeIDs = append(subscription.Bindings[0].NodeIDs, backupNodeIDs...)
+	if _, err := st.SaveOutputSubscription(subscription); err != nil {
 		t.Fatal(err)
 	}
-	failover, err := service.CompileAndStore(profileID)
+	failover, err := service.CompileAndStore(subscriptionID)
 	if err != nil || !bytes.Contains(failover.Body, []byte("backup.example.com")) {
 		t.Fatalf("strict failover did not publish backup-only artifact: err=%v body=%s", err, failover.Body)
 	}
@@ -223,10 +236,10 @@ rules: ["MATCH,AUTO"]
 	if err := st.CommitSourceRefreshV3(sourceID, records, "", metadata, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompileAndStore(profileID); err != nil {
+	if _, err := service.CompileAndStore(subscriptionID); err != nil {
 		t.Fatalf("renewed source did not recover: %v", err)
 	}
-	recovered, _ := st.GetProfileArtifact(profileID)
+	recovered, _ := st.GetSubscriptionArtifact(subscriptionID)
 	if recovered.BlockedReason != "" || recovered.LastError != "" {
 		t.Fatalf("recovered artifact still blocked: %+v", recovered)
 	}

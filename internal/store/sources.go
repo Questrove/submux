@@ -8,6 +8,8 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+const DefaultManualSourceName = "自建节点"
+
 func (s *Store) CreateSource(src Source) (int64, error) {
 	var id int64
 	now := nowRFC3339()
@@ -35,6 +37,62 @@ func (s *Store) CreateSource(src Source) (int64, error) {
 			return e
 		}
 		return b.Put(itob(id), buf)
+	})
+	return id, err
+}
+
+// EnsureDefaultManualSource returns the built-in destination used when the
+// user imports nodes without choosing or creating a source. An existing manual
+// source with the default name is adopted so pre-release databases do not gain
+// a duplicate group.
+func (s *Store) EnsureDefaultManualSource() (int64, error) {
+	var id int64
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("sources"))
+		var builtin, named *Source
+		if err := b.ForEach(func(_, raw []byte) error {
+			var source Source
+			if err := json.Unmarshal(raw, &source); err != nil {
+				return err
+			}
+			if source.Kind != SourceKindManual {
+				return nil
+			}
+			if source.Builtin && builtin == nil {
+				copy := source
+				builtin = &copy
+			}
+			if source.Name == DefaultManualSourceName && named == nil {
+				copy := source
+				named = &copy
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if builtin != nil {
+			id = builtin.ID
+			if builtin.Enabled && builtin.Name == DefaultManualSourceName {
+				return nil
+			}
+			builtin.Name, builtin.Enabled, builtin.UpdatedAt = DefaultManualSourceName, true, nowRFC3339()
+			return putJSON(b, itob(id), *builtin)
+		}
+		if named != nil {
+			id = named.ID
+			named.Builtin, named.Enabled, named.UpdatedAt = true, true, nowRFC3339()
+			return putJSON(b, itob(id), *named)
+		}
+		seq, err := b.NextSequence()
+		if err != nil {
+			return err
+		}
+		id = int64(seq)
+		now := nowRFC3339()
+		return putJSON(b, itob(id), Source{
+			ID: id, Kind: SourceKindManual, Builtin: true, Name: DefaultManualSourceName,
+			Enabled: true, CreatedAt: now, UpdatedAt: now,
+		})
 	})
 	return id, err
 }
@@ -103,6 +161,7 @@ func (s *Store) UpdateSource(src Source) error {
 			return err
 		}
 		src.CreatedAt = old.CreatedAt
+		src.Builtin = old.Builtin
 		src.Kind = defStr(src.Kind, old.Kind)
 		src.Kind = defStr(src.Kind, SourceKindSubscription)
 		normalizeSourceLifecycle(&src)

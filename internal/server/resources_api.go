@@ -29,9 +29,17 @@ func (s *Server) handleImportNodes(w http.ResponseWriter, r *http.Request) {
 		SourceID int64  `json:"source_id"`
 		Content  string `json:"content"`
 	}
-	if err := decodeJSON(r, &body); err != nil || body.SourceID == 0 || strings.TrimSpace(body.Content) == "" {
-		http.Error(w, "source_id and content are required", http.StatusBadRequest)
+	if err := decodeJSON(r, &body); err != nil || strings.TrimSpace(body.Content) == "" {
+		http.Error(w, "content is required", http.StatusBadRequest)
 		return
+	}
+	if body.SourceID == 0 {
+		var err error
+		body.SourceID, err = s.store.EnsureDefaultManualSource()
+		if err != nil {
+			http.Error(w, "prepare built-in node group failed", http.StatusInternalServerError)
+			return
+		}
 	}
 	records, err := node.Import(body.SourceID, store.SourceKindManual, body.Content)
 	if err != nil {
@@ -44,7 +52,7 @@ func (s *Server) handleImportNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.compiler.RebuildAll()
-	writeJSON(w, map[string]any{"ids": ids, "count": len(ids)})
+	writeJSON(w, map[string]any{"ids": ids, "count": len(ids), "source_id": body.SourceID})
 }
 
 func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +67,6 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Alias        *string   `json:"alias"`
 		Tags         *[]string `json:"tags"`
 		Enabled      *bool     `json:"enabled"`
 		RoleOverride *string   `json:"role_override"`
@@ -96,14 +103,25 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
-	alias, tags := current.Alias, current.Tags
-	if body.Alias != nil {
-		alias = strings.TrimSpace(*body.Alias)
-	}
+	tags := current.Tags
 	if body.Tags != nil {
 		tags = store.NormalizeStringSet(*body.Tags)
 	}
-	if err := s.store.UpdateNodeMetadata(id, alias, tags, enabled); err != nil {
+	resultingRole := current.Role
+	if body.RoleOverride != nil {
+		role := strings.TrimSpace(*body.RoleOverride)
+		if role != "" {
+			resultingRole = role
+		} else if current.Notice != nil && current.Notice.Confidence == "high" {
+			resultingRole = "notice"
+		} else {
+			resultingRole = "proxy"
+		}
+	}
+	if resultingRole == "notice" {
+		enabled = false
+	}
+	if err := s.store.UpdateNodeMetadata(id, tags, enabled); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -123,11 +141,11 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	nodeSets, _ := s.store.ListNodeSets()
-	for _, nodeSet := range nodeSets {
-		for _, nodeID := range append(append([]int64(nil), nodeSet.NodeIDs...), nodeSet.ExcludeNodeIDs...) {
-			if nodeID == id {
-				http.Error(w, fmt.Sprintf("node is used by node set %d", nodeSet.ID), http.StatusConflict)
+	subscriptions, _ := s.store.ListOutputSubscriptions()
+	for _, subscription := range subscriptions {
+		for _, binding := range subscription.Bindings {
+			if containsInt64(binding.NodeIDs, id) {
+				http.Error(w, fmt.Sprintf("node is used by output subscription %d", subscription.ID), http.StatusConflict)
 				return
 			}
 		}
@@ -140,67 +158,6 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func (s *Server) handleListNodeSets(w http.ResponseWriter, _ *http.Request) {
-	values, err := s.store.ListNodeSets()
-	if err != nil {
-		http.Error(w, "list node sets failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, values)
-}
-
-func (s *Server) handleSaveNodeSet(w http.ResponseWriter, r *http.Request) {
-	var value store.NodeSet
-	if err := decodeJSON(r, &value); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if routeID := chi.URLParam(r, "id"); routeID != "" {
-		id, err := strconv.ParseInt(routeID, 10, 64)
-		if err != nil {
-			http.Error(w, "bad id", http.StatusBadRequest)
-			return
-		}
-		value.ID = id
-	}
-	value.Name = strings.TrimSpace(value.Name)
-	if value.Name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
-		return
-	}
-	value.SourceIDs = store.NormalizeIntSet(value.SourceIDs)
-	value.NodeIDs = store.NormalizeIntSet(value.NodeIDs)
-	value.ExcludeNodeIDs = store.NormalizeIntSet(value.ExcludeNodeIDs)
-	value.Protocols, value.Tags = store.NormalizeStringSet(value.Protocols), store.NormalizeStringSet(value.Tags)
-	for _, sourceID := range value.SourceIDs {
-		if _, err := s.store.GetSource(sourceID); err != nil {
-			http.Error(w, fmt.Sprintf("unknown source %d", sourceID), http.StatusBadRequest)
-			return
-		}
-	}
-	for _, nodeID := range append(append([]int64(nil), value.NodeIDs...), value.ExcludeNodeIDs...) {
-		node, err := s.store.GetNode(nodeID)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("unknown node %d", nodeID), http.StatusBadRequest)
-			return
-		}
-		if node.Role == "notice" && containsInt64(value.NodeIDs, nodeID) {
-			http.Error(w, fmt.Sprintf("node %d is an informational notice", nodeID), http.StatusBadRequest)
-			return
-		}
-	}
-	if value.ID == 0 {
-		value.Enabled = true
-	}
-	id, err := s.store.SaveNodeSet(value)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	_ = s.compiler.RebuildAll()
-	writeJSON(w, map[string]any{"id": id})
-}
-
 func containsInt64(values []int64, target int64) bool {
 	for _, value := range values {
 		if value == target {
@@ -208,28 +165,6 @@ func containsInt64(values []int64, target int64) bool {
 		}
 	}
 	return false
-}
-
-func (s *Server) handleDeleteNodeSet(w http.ResponseWriter, r *http.Request) {
-	id, err := idParam(r)
-	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
-		return
-	}
-	profiles, _ := s.store.ListProfiles()
-	for _, profile := range profiles {
-		for _, binding := range profile.Bindings {
-			if binding.NodeSetID == id {
-				http.Error(w, fmt.Sprintf("node set is used by profile %d", profile.ID), http.StatusConflict)
-				return
-			}
-		}
-	}
-	if err := s.store.DeleteNodeSet(id); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true})
 }
 
 func (s *Server) handleListTemplates(w http.ResponseWriter, _ *http.Request) {
@@ -288,15 +223,15 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	profiles, _ := s.store.ListProfiles()
+	subscriptions, _ := s.store.ListOutputSubscriptions()
 	versions, _ := s.store.ListTemplateVersions(id)
 	versionIDs := map[int64]bool{}
 	for _, version := range versions {
 		versionIDs[version.ID] = true
 	}
-	for _, profile := range profiles {
-		if versionIDs[profile.TemplateVersionID] {
-			http.Error(w, fmt.Sprintf("template is used by profile %d", profile.ID), http.StatusConflict)
+	for _, subscription := range subscriptions {
+		if versionIDs[subscription.TemplateVersionID] {
+			http.Error(w, fmt.Sprintf("template is used by output subscription %d", subscription.ID), http.StatusConflict)
 			return
 		}
 	}
@@ -358,10 +293,10 @@ func (s *Server) handlePublishTemplateVersion(w http.ResponseWriter, r *http.Req
 	writeJSON(w, version)
 }
 
-func (s *Server) handleListProfiles(w http.ResponseWriter, _ *http.Request) {
-	values, err := s.store.ListProfiles()
+func (s *Server) handleListOutputSubscriptions(w http.ResponseWriter, _ *http.Request) {
+	values, err := s.store.ListOutputSubscriptions()
 	if err != nil {
-		http.Error(w, "list profiles failed", http.StatusInternalServerError)
+		http.Error(w, "list output subscriptions failed", http.StatusInternalServerError)
 		return
 	}
 	type artifactStatus struct {
@@ -374,15 +309,15 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, _ *http.Request) {
 		BlockedReason string   `json:"blocked_reason,omitempty"`
 	}
 	type item struct {
-		store.Profile
+		store.OutputSubscription
 		Artifact *artifactStatus `json:"artifact,omitempty"`
 		URL      string          `json:"url"`
 	}
 	base, _ := s.store.GetSetting("base_url")
 	out := make([]item, 0, len(values))
 	for _, value := range values {
-		entry := item{Profile: value, URL: "/sub/" + value.Token}
-		if artifact, err := s.store.GetProfileArtifact(value.ID); err == nil {
+		entry := item{OutputSubscription: value, URL: "/sub/" + value.Token}
+		if artifact, err := s.store.GetSubscriptionArtifact(value.ID); err == nil {
 			entry.Artifact = &artifactStatus{
 				ContentType: artifact.ContentType, Revision: artifact.Revision,
 				LastSuccess: artifact.LastSuccess, LastError: artifact.LastError, UpdatedAt: artifact.UpdatedAt,
@@ -397,8 +332,8 @@ func (s *Server) handleListProfiles(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, out)
 }
 
-func (s *Server) handleSaveProfile(w http.ResponseWriter, r *http.Request) {
-	var value store.Profile
+func (s *Server) handleSaveOutputSubscription(w http.ResponseWriter, r *http.Request) {
+	var value store.OutputSubscription
 	if err := decodeJSON(r, &value); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -427,8 +362,31 @@ func (s *Server) handleSaveProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	value.Engine = template.Engine
+	seenSlots := map[string]bool{}
 	for index := range value.Bindings {
 		value.Bindings[index].Slot = strings.TrimSpace(value.Bindings[index].Slot)
+		if value.Bindings[index].Slot == "" || seenSlots[value.Bindings[index].Slot] {
+			http.Error(w, "each template slot may be selected once", http.StatusBadRequest)
+			return
+		}
+		seenSlots[value.Bindings[index].Slot] = true
+		seenNodes := map[int64]bool{}
+		for _, nodeID := range value.Bindings[index].NodeIDs {
+			if nodeID <= 0 || seenNodes[nodeID] {
+				http.Error(w, fmt.Sprintf("slot %q contains an invalid or duplicate node", value.Bindings[index].Slot), http.StatusBadRequest)
+				return
+			}
+			seenNodes[nodeID] = true
+			nodeValue, nodeErr := s.store.GetNode(nodeID)
+			if nodeErr != nil {
+				http.Error(w, fmt.Sprintf("unknown node %d", nodeID), http.StatusBadRequest)
+				return
+			}
+			if nodeValue.Role == "notice" {
+				http.Error(w, fmt.Sprintf("node %d is an informational notice", nodeID), http.StatusBadRequest)
+				return
+			}
+		}
 	}
 	if value.ExpiresAt != "" {
 		expires, parseErr := time.Parse(time.RFC3339, value.ExpiresAt)
@@ -441,7 +399,7 @@ func (s *Server) handleSaveProfile(w http.ResponseWriter, r *http.Request) {
 	if value.ID == 0 {
 		value.Token, value.Enabled = randomHex(24), true
 	} else {
-		old, err := s.store.GetProfile(value.ID)
+		old, err := s.store.GetOutputSubscription(value.ID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -449,28 +407,28 @@ func (s *Server) handleSaveProfile(w http.ResponseWriter, r *http.Request) {
 		value.Token = old.Token
 	}
 	if _, err := s.compiler.Preview(value); err != nil {
-		http.Error(w, "profile does not compile: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "output subscription does not compile: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	id, err := s.store.SaveProfile(value)
+	id, err := s.store.SaveOutputSubscription(value)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if _, err := s.compiler.CompileAndStore(id); err != nil {
-		http.Error(w, "profile saved but compile failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "output subscription saved but compile failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"id": id, "token": value.Token})
 }
 
-func (s *Server) handlePreviewProfile(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handlePreviewOutputSubscription(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
 	if err != nil {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	value, err := s.store.GetProfile(id)
+	value, err := s.store.GetOutputSubscription(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -483,7 +441,7 @@ func (s *Server) handlePreviewProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"content": string(result.Body), "content_type": result.ContentType, "revision": result.Revision, "node_count": result.NodeCount, "slot_counts": result.SlotCounts, "warnings": result.Warnings})
 }
 
-func (s *Server) handlePublishProfile(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handlePublishOutputSubscription(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
 	if err != nil {
 		http.Error(w, "bad id", http.StatusBadRequest)
@@ -497,32 +455,72 @@ func (s *Server) handlePublishProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "revision": result.Revision, "node_count": result.NodeCount, "warnings": result.Warnings})
 }
 
-func (s *Server) handleResetProfileToken(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleResetOutputSubscriptionToken(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
 	if err != nil {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	value, err := s.store.GetProfile(id)
+	value, err := s.store.GetOutputSubscription(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 	value.Token = randomHex(24)
-	if _, err := s.store.SaveProfile(value); err != nil {
+	if _, err := s.store.SaveOutputSubscription(value); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"token": value.Token})
 }
 
-func (s *Server) handleDeleteProfile(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleSetOutputSubscriptionEnabled(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
 	if err != nil {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	if err := s.store.DeleteProfile(id); err != nil {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	value, err := s.store.GetOutputSubscription(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if body.Enabled {
+		value.Enabled = true
+		if _, err := s.compiler.Preview(value); err != nil {
+			http.Error(w, "output subscription cannot be enabled: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else {
+		value.Enabled = false
+	}
+	if _, err := s.store.SaveOutputSubscription(value); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if body.Enabled {
+		if _, err := s.compiler.CompileAndStore(id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleDeleteOutputSubscription(w http.ResponseWriter, r *http.Request) {
+	id, err := idParam(r)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	if err := s.store.DeleteOutputSubscription(id); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

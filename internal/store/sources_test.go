@@ -73,3 +73,31 @@ func TestSourcesCRUD(t *testing.T) {
 		t.Fatalf("expected error getting deleted source")
 	}
 }
+
+func TestEnsureDefaultManualSourceAdoptsExistingGroupAndIsIdempotent(t *testing.T) {
+	s := newTestStore(t)
+	existingID, err := s.CreateSource(Source{Kind: SourceKindManual, Name: DefaultManualSourceName})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstID, err := s.EnsureDefaultManualSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := s.EnsureDefaultManualSource()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstID != existingID || secondID != existingID {
+		t.Fatalf("default manual source was duplicated: existing=%d first=%d second=%d", existingID, firstID, secondID)
+	}
+	source, err := s.GetSource(existingID)
+	if err != nil || !source.Builtin || !source.Enabled || source.Kind != SourceKindManual {
+		t.Fatalf("existing group was not adopted as built-in: value=%+v err=%v", source, err)
+	}
+	values, _ := s.ListSources()
+	if len(values) != 1 {
+		t.Fatalf("expected one source, got %+v", values)
+	}
+}

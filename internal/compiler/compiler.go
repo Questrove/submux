@@ -31,14 +31,14 @@ type Result struct {
 	Warnings    []string
 }
 
-type resolvedProfile struct {
-	Profile  store.Profile
-	Template store.TemplateVersion
-	Records  []store.NodeRecord
-	Names    map[string]string
-	Slots    map[string][]string
-	Counts   map[string]int
-	Warnings []string
+type resolvedSubscription struct {
+	Subscription store.OutputSubscription
+	Template     store.TemplateVersion
+	Records      []store.NodeRecord
+	Names        map[string]string
+	Slots        map[string][]string
+	Counts       map[string]int
+	Warnings     []string
 }
 
 type BlockedError struct {
@@ -66,87 +66,87 @@ func ValidateTemplate(engine, content string, slots []store.TemplateSlot) error 
 	return validateSingBoxTemplate(content, slots)
 }
 
-func (s *Service) Preview(profile store.Profile) (Result, error) {
-	resolved, err := s.resolve(profile)
+func (s *Service) Preview(subscription store.OutputSubscription) (Result, error) {
+	resolved, err := s.resolve(subscription)
 	if err != nil {
 		return Result{}, err
 	}
 	return compileResolved(resolved)
 }
 
-func (s *Service) CompileAndStore(profileID int64) (Result, error) {
-	profile, err := s.store.GetProfile(profileID)
+func (s *Service) CompileAndStore(subscriptionID int64) (Result, error) {
+	subscription, err := s.store.GetOutputSubscription(subscriptionID)
 	if err != nil {
 		return Result{}, err
 	}
-	result, compileErr := s.Preview(profile)
+	result, compileErr := s.Preview(subscription)
 	if compileErr != nil {
-		artifact, _ := s.store.GetProfileArtifact(profileID)
-		artifact.ProfileID = profileID
+		artifact, _ := s.store.GetSubscriptionArtifact(subscriptionID)
+		artifact.SubscriptionID = subscriptionID
 		artifact.LastError = compileErr.Error()
 		var blocked *BlockedError
 		if errors.As(compileErr, &blocked) {
 			artifact.BlockedReason = blocked.Reason
 			artifact.Warnings = append([]string(nil), blocked.Warnings...)
 		}
-		_ = s.store.PutProfileArtifact(artifact)
+		_ = s.store.PutSubscriptionArtifact(artifact)
 		return Result{}, compileErr
 	}
-	artifact := store.ProfileArtifact{
-		ProfileID: profileID, Body: result.Body, ContentType: result.ContentType,
+	artifact := store.SubscriptionArtifact{
+		SubscriptionID: subscriptionID, Body: result.Body, ContentType: result.ContentType,
 		Revision: result.Revision, LastSuccess: time.Now().UTC().Format(time.RFC3339),
 		Warnings: append([]string(nil), result.Warnings...),
 	}
-	if err := s.store.PutProfileArtifact(artifact); err != nil {
+	if err := s.store.PutSubscriptionArtifact(artifact); err != nil {
 		return Result{}, err
 	}
 	return result, nil
 }
 
 func (s *Service) RebuildAll() error {
-	profiles, err := s.store.ListProfiles()
+	subscriptions, err := s.store.ListOutputSubscriptions()
 	if err != nil {
 		return err
 	}
 	var failures []string
-	for _, profile := range profiles {
-		if !profile.Enabled {
+	for _, subscription := range subscriptions {
+		if !subscription.Enabled {
 			continue
 		}
-		if _, err := s.CompileAndStore(profile.ID); err != nil {
-			failures = append(failures, fmt.Sprintf("%d:%v", profile.ID, err))
+		if _, err := s.CompileAndStore(subscription.ID); err != nil {
+			failures = append(failures, fmt.Sprintf("%d:%v", subscription.ID, err))
 		}
 	}
 	if len(failures) > 0 {
-		return fmt.Errorf("profile rebuild failed: %s", strings.Join(failures, "; "))
+		return fmt.Errorf("output subscription rebuild failed: %s", strings.Join(failures, "; "))
 	}
 	return nil
 }
 
-func (s *Service) resolve(profile store.Profile) (resolvedProfile, error) {
-	version, err := s.store.GetTemplateVersion(profile.TemplateVersionID)
+func (s *Service) resolve(subscription store.OutputSubscription) (resolvedSubscription, error) {
+	version, err := s.store.GetTemplateVersion(subscription.TemplateVersionID)
 	if err != nil {
-		return resolvedProfile{}, err
+		return resolvedSubscription{}, err
 	}
 	template, err := s.store.GetTemplate(version.TemplateID)
 	if err != nil {
-		return resolvedProfile{}, err
+		return resolvedSubscription{}, err
 	}
-	if profile.Engine == "" {
-		profile.Engine = template.Engine
+	if subscription.Engine == "" {
+		subscription.Engine = template.Engine
 	}
-	if profile.Engine != template.Engine {
-		return resolvedProfile{}, fmt.Errorf("profile engine %q does not match template engine %q", profile.Engine, template.Engine)
+	if subscription.Engine != template.Engine {
+		return resolvedSubscription{}, fmt.Errorf("output subscription engine %q does not match template engine %q", subscription.Engine, template.Engine)
 	}
-	if err := ValidateTemplate(profile.Engine, version.Content, version.Slots); err != nil {
-		return resolvedProfile{}, err
+	if err := ValidateTemplate(subscription.Engine, version.Content, version.Slots); err != nil {
+		return resolvedSubscription{}, err
 	}
-	bindingBySlot := map[string]int64{}
-	for _, binding := range profile.Bindings {
+	bindingBySlot := map[string][]int64{}
+	for _, binding := range subscription.Bindings {
 		if _, exists := bindingBySlot[binding.Slot]; exists {
-			return resolvedProfile{}, fmt.Errorf("slot %q is bound more than once", binding.Slot)
+			return resolvedSubscription{}, fmt.Errorf("slot %q is bound more than once", binding.Slot)
 		}
-		bindingBySlot[binding.Slot] = binding.NodeSetID
+		bindingBySlot[binding.Slot] = append([]int64(nil), binding.NodeIDs...)
 	}
 	slotDefs := map[string]store.TemplateSlot{}
 	for _, slot := range version.Slots {
@@ -154,7 +154,7 @@ func (s *Service) resolve(profile store.Profile) (resolvedProfile, error) {
 	}
 	for key := range bindingBySlot {
 		if _, ok := slotDefs[key]; !ok {
-			return resolvedProfile{}, fmt.Errorf("profile binds unknown slot %q", key)
+			return resolvedSubscription{}, fmt.Errorf("output subscription binds unknown slot %q", key)
 		}
 	}
 
@@ -162,20 +162,16 @@ func (s *Service) resolve(profile store.Profile) (resolvedProfile, error) {
 	counts := map[string]int{}
 	warningSet := map[string]bool{}
 	for _, slot := range version.Slots {
-		nodeSetID := bindingBySlot[slot.Key]
-		if nodeSetID == 0 {
+		nodeIDs, bound := bindingBySlot[slot.Key]
+		if !bound || len(nodeIDs) == 0 {
 			if slot.Required {
-				return resolvedProfile{}, fmt.Errorf("required slot %q is not bound", slot.Key)
+				return resolvedSubscription{}, fmt.Errorf("required slot %q has no selected nodes", slot.Key)
 			}
 			continue
 		}
-		nodeSet, err := s.store.GetNodeSet(nodeSetID)
+		resolution, err := s.resolveNodeSelection(nodeIDs)
 		if err != nil {
-			return resolvedProfile{}, fmt.Errorf("slot %q: %w", slot.Key, err)
-		}
-		resolution, err := s.resolveNodeSet(nodeSet)
-		if err != nil {
-			return resolvedProfile{}, fmt.Errorf("slot %q: %w", slot.Key, err)
+			return resolvedSubscription{}, fmt.Errorf("slot %q: %w", slot.Key, err)
 		}
 		for _, warning := range resolution.warnings {
 			warningSet[warning] = true
@@ -183,35 +179,27 @@ func (s *Service) resolve(profile store.Profile) (resolvedProfile, error) {
 		if slot.Required && len(resolution.records) == 0 {
 			if resolution.strictExcluded > 0 {
 				warnings := sortedKeys(warningSet)
-				return resolvedProfile{}, &BlockedError{Reason: fmt.Sprintf("required slot %q has no nodes after strict lifecycle filtering", slot.Key), Warnings: warnings}
+				return resolvedSubscription{}, &BlockedError{Reason: fmt.Sprintf("required slot %q has no nodes after strict lifecycle filtering", slot.Key), Warnings: warnings}
 			}
-			return resolvedProfile{}, fmt.Errorf("required slot %q resolved to no nodes", slot.Key)
+			return resolvedSubscription{}, fmt.Errorf("required slot %q has no available selected nodes", slot.Key)
 		}
 		slotRecords[slot.Key], counts[slot.Key] = resolution.records, len(resolution.records)
 	}
 
-	allByFingerprint := map[string]store.NodeRecord{}
+	seenFingerprints := map[string]bool{}
+	records := make([]store.NodeRecord, 0)
 	for _, slot := range version.Slots {
 		for _, record := range slotRecords[slot.Key] {
-			if _, exists := allByFingerprint[record.Fingerprint]; !exists {
-				allByFingerprint[record.Fingerprint] = record
+			if !seenFingerprints[record.Fingerprint] {
+				seenFingerprints[record.Fingerprint] = true
+				records = append(records, record)
 			}
 		}
 	}
-	records := make([]store.NodeRecord, 0, len(allByFingerprint))
-	for _, record := range allByFingerprint {
-		records = append(records, record)
-	}
-	sort.Slice(records, func(i, j int) bool {
-		if records[i].SourceID != records[j].SourceID {
-			return records[i].SourceID < records[j].SourceID
-		}
-		return records[i].ID < records[j].ID
-	})
 
 	sources, err := s.store.ListSources()
 	if err != nil {
-		return resolvedProfile{}, err
+		return resolvedSubscription{}, err
 	}
 	sourceNames := map[int64]string{}
 	for _, source := range sources {
@@ -229,26 +217,23 @@ func (s *Service) resolve(profile store.Profile) (resolvedProfile, error) {
 			}
 		}
 	}
-	return resolvedProfile{Profile: profile, Template: version, Records: records, Names: names, Slots: slots, Counts: counts, Warnings: sortedKeys(warningSet)}, nil
+	return resolvedSubscription{Subscription: subscription, Template: version, Records: records, Names: names, Slots: slots, Counts: counts, Warnings: sortedKeys(warningSet)}, nil
 }
 
-type nodeSetResolution struct {
+type nodeSelectionResolution struct {
 	records        []store.NodeRecord
 	warnings       []string
 	strictExcluded int
 }
 
-func (s *Service) resolveNodeSet(value store.NodeSet) (nodeSetResolution, error) {
-	if !value.Enabled {
-		return nodeSetResolution{}, fmt.Errorf("node set %q is disabled", value.Name)
-	}
+func (s *Service) resolveNodeSelection(nodeIDs []int64) (nodeSelectionResolution, error) {
 	nodes, err := s.store.ListNodes()
 	if err != nil {
-		return nodeSetResolution{}, err
+		return nodeSelectionResolution{}, err
 	}
 	sources, err := s.store.ListSources()
 	if err != nil {
-		return nodeSetResolution{}, err
+		return nodeSelectionResolution{}, err
 	}
 	enabledSources := map[int64]bool{}
 	sourceByID := map[int64]store.Source{}
@@ -261,32 +246,39 @@ func (s *Service) resolveNodeSet(value store.NodeSet) (nodeSetResolution, error)
 			statusBySource[source.ID] = lifecycle.Evaluate(source, cache, time.Now())
 		}
 	}
-	includeSources, includeNodes, excludeNodes := intSet(value.SourceIDs), intSet(value.NodeIDs), intSet(value.ExcludeNodeIDs)
-	protocols, requiredTags := stringSetLower(value.Protocols), stringSetLower(value.Tags)
-	selectAll := len(includeSources) == 0 && len(includeNodes) == 0
-	needle := strings.ToLower(strings.TrimSpace(value.NameContains))
+	nodeByID := make(map[int64]store.NodeRecord, len(nodes))
+	for _, record := range nodes {
+		nodeByID[record.ID] = record
+	}
 	var out []store.NodeRecord
 	warningSet := map[string]bool{}
 	strictExcluded := 0
-	for _, record := range nodes {
-		if record.Role == "notice" || !record.Enabled || !enabledSources[record.SourceID] || excludeNodes[record.ID] {
+	for _, nodeID := range nodeIDs {
+		record, exists := nodeByID[nodeID]
+		if !exists {
+			warningSet[fmt.Sprintf("selected node %d no longer exists", nodeID)] = true
 			continue
 		}
-		if !selectAll && !includeSources[record.SourceID] && !includeNodes[record.ID] {
+		if record.Role == "notice" {
+			warningSet[fmt.Sprintf("selected node %d is an informational notice", nodeID)] = true
 			continue
 		}
-		if len(protocols) > 0 && !protocols[strings.ToLower(record.Protocol)] {
+		if !record.Enabled {
+			warningSet[fmt.Sprintf("selected node %q is disabled", node.DisplayName(record))] = true
 			continue
 		}
-		if needle != "" && !strings.Contains(strings.ToLower(node.DisplayName(record)), needle) {
+		source, sourceExists := sourceByID[record.SourceID]
+		if !sourceExists {
+			warningSet[fmt.Sprintf("selected node %d has no source", nodeID)] = true
 			continue
 		}
-		if !containsAllTags(record.Tags, requiredTags) {
+		if !enabledSources[record.SourceID] {
+			warningSet[fmt.Sprintf("source %q is disabled", source.Name)] = true
 			continue
 		}
 		if status, exists := statusBySource[record.SourceID]; exists {
 			for _, warning := range status.Warnings {
-				warningSet[fmt.Sprintf("source %q: %s", sourceByID[record.SourceID].Name, warning)] = true
+				warningSet[fmt.Sprintf("source %q: %s", source.Name, warning)] = true
 			}
 			if lifecycle.ShouldExclude(sourceByID[record.SourceID], status) {
 				strictExcluded++
@@ -295,33 +287,27 @@ func (s *Service) resolveNodeSet(value store.NodeSet) (nodeSetResolution, error)
 		}
 		out = append(out, record)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].SourceID != out[j].SourceID {
-			return out[i].SourceID < out[j].SourceID
-		}
-		return out[i].ID < out[j].ID
-	})
-	return nodeSetResolution{records: out, warnings: sortedKeys(warningSet), strictExcluded: strictExcluded}, nil
+	return nodeSelectionResolution{records: out, warnings: sortedKeys(warningSet), strictExcluded: strictExcluded}, nil
 }
 
-func compileResolved(value resolvedProfile) (Result, error) {
+func compileResolved(value resolvedSubscription) (Result, error) {
 	var body []byte
 	var contentType string
 	var err error
-	if value.Profile.Engine == EngineMihomo {
+	if value.Subscription.Engine == EngineMihomo {
 		body, err = compileMihomo(value)
 		contentType = "text/yaml; charset=utf-8"
-	} else if value.Profile.Engine == EngineSingBox {
+	} else if value.Subscription.Engine == EngineSingBox {
 		body, err = compileSingBox(value)
 		contentType = "application/json; charset=utf-8"
 	} else {
-		err = fmt.Errorf("unsupported profile engine %q", value.Profile.Engine)
+		err = fmt.Errorf("unsupported output subscription engine %q", value.Subscription.Engine)
 	}
 	if err != nil {
 		return Result{}, err
 	}
 	// The revision identifies the actual compiled artifact, including slot
-	// placement and deterministic generated names, not just the node set.
+	// placement, selected order and deterministic generated names.
 	sum := sha256.Sum256(body)
 	return Result{Body: body, ContentType: contentType, Revision: hex.EncodeToString(sum[:]), NodeCount: len(value.Records), SlotCounts: value.Counts, Warnings: append([]string(nil), value.Warnings...)}, nil
 }
@@ -360,10 +346,8 @@ func uniqueNames(records []store.NodeRecord, sourceNames map[int64]string) map[s
 	out, used := map[string]string{}, map[string]bool{}
 	for _, record := range records {
 		base := strings.TrimSpace(node.DisplayName(record))
-		if record.Alias == "" {
-			if source := strings.TrimSpace(sourceNames[record.SourceID]); source != "" {
-				base = "[" + source + "] " + base
-			}
+		if source := strings.TrimSpace(sourceNames[record.SourceID]); source != "" {
+			base = "[" + source + "] " + base
 		}
 		if base == "" {
 			base = record.Protocol
@@ -378,36 +362,6 @@ func uniqueNames(records []store.NodeRecord, sourceNames map[int64]string) map[s
 		used[name], out[record.Fingerprint] = true, name
 	}
 	return out
-}
-
-func intSet(values []int64) map[int64]bool {
-	out := map[int64]bool{}
-	for _, value := range values {
-		out[value] = true
-	}
-	return out
-}
-func stringSetLower(values []string) map[string]bool {
-	out := map[string]bool{}
-	for _, value := range values {
-		value = strings.ToLower(strings.TrimSpace(value))
-		if value != "" {
-			out[value] = true
-		}
-	}
-	return out
-}
-func containsAllTags(values []string, required map[string]bool) bool {
-	if len(required) == 0 {
-		return true
-	}
-	have := stringSetLower(values)
-	for value := range required {
-		if !have[value] {
-			return false
-		}
-	}
-	return true
 }
 
 func revisionJSON(value any) string { b, _ := json.Marshal(value); return string(b) }

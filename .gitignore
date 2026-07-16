@@ -38,3 +38,6 @@ go.work.sum
 *.db
 *.db-journal
 *.db-wal
+
+# 本地开发构建、缓存、日志和临时备份
+/.tmp/

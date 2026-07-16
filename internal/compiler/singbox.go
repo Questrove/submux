@@ -45,7 +45,7 @@ func validateSingBoxTemplate(content string, slots []store.TemplateSlot) error {
 	return nil
 }
 
-func compileSingBox(value resolvedProfile) ([]byte, error) {
+func compileSingBox(value resolvedSubscription) ([]byte, error) {
 	root, err := parseJSONMap(value.Template.Content)
 	if err != nil {
 		return nil, err
@@ -130,7 +130,7 @@ func toSingBoxOutbound(n parse.Node, tag string) (map[string]any, error) {
 		}
 	}
 	if strategy := stringValue(n["ip-version"]); strategy != "" && strategy != "dual" {
-		return nil, fmt.Errorf("ip-version %q requires profile-level DNS resolver policy", strategy)
+		return nil, fmt.Errorf("ip-version %q requires template-level DNS resolver policy", strategy)
 	}
 	copyStringSnake(out, "bind_interface", n["interface-name"])
 	if mark, exists := n["routing-mark"]; exists {
