@@ -78,6 +78,8 @@ type Store struct {
 var bucketNames = []string{
 	"settings", "sources", "source_cache", "meta",
 	"nodes", "templates", "template_versions", "subscriptions", "subscription_artifacts", "token_index", "lifecycle_events",
+	"runtime_instances", "runtime_bindings", "runtime_desired_states", "runtime_observations",
+	"agent_jobs", "deployments", "integration_states", "audit_events", "agent_enrollments",
 }
 
 func Open(path string) (*Store, error) {
@@ -111,7 +113,10 @@ func Open(path string) (*Store, error) {
 			}
 			version = "4"
 		}
-		if version != "4" {
+		if version == "4" {
+			version = "5"
+		}
+		if version != "5" {
 			return fmt.Errorf("unsupported database schema version %q", version)
 		}
 		if string(meta.Get([]byte("schema_version"))) != version {

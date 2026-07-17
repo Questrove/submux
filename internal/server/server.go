@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
+	"submux/internal/buildinfo"
 	"submux/internal/compiler"
 	"submux/internal/source"
 	"submux/internal/store"
@@ -19,12 +21,16 @@ type Server struct {
 	fetcher  *source.Fetcher
 	compiler *compiler.Service
 	initErr  error
+	nonceMu  sync.Mutex
+	nonces   map[string]time.Time
+	updates  *runtimeUpdateHub
+	streams  *runtimeStreamHub
 }
 
 func New(st *store.Store, f *source.Fetcher) *Server {
 	srv, err := NewChecked(st, f)
 	if err != nil {
-		return &Server{store: st, fetcher: f, compiler: compiler.New(st), initErr: err}
+		return &Server{store: st, fetcher: f, compiler: compiler.New(st), initErr: err, nonces: make(map[string]time.Time), updates: newRuntimeUpdateHub(), streams: newRuntimeStreamHub()}
 	}
 	return srv
 }
@@ -39,7 +45,7 @@ func NewChecked(st *store.Store, f *source.Fetcher) (*Server, error) {
 	if f != nil {
 		f.SetRebuilder(service)
 	}
-	return &Server{store: st, fetcher: f, compiler: service}, nil
+	return &Server{store: st, fetcher: f, compiler: service, nonces: make(map[string]time.Time), updates: newRuntimeUpdateHub(), streams: newRuntimeStreamHub()}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -51,11 +57,26 @@ func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
 
 	// 公开端点
+	r.Get("/healthz", s.handleHealth)
 	r.Get("/sub/{token}", s.handleSub)
 	r.Get("/api/status", s.handleStatus)
 	r.Post("/api/init", s.handleInit)
 	r.Post("/api/login", s.handleLogin)
 	r.Post("/api/logout", s.handleLogout)
+	r.Post("/api/agent/enroll", s.handleAgentEnroll)
+
+	r.Group(func(ar chi.Router) {
+		ar.Use(s.requireDevice)
+		ar.Get("/api/agent/state", s.handleAgentState)
+		ar.Get("/api/agent/updates", s.handleAgentUpdates)
+		ar.Get("/api/agent/runtime-stream/{session}", s.handleAgentRuntimeStream)
+		ar.Post("/api/agent/heartbeat", s.handleAgentHeartbeat)
+		ar.Post("/api/agent/local-audit", s.handleAgentLocalAudit)
+		ar.Post("/api/agent/revoke-self", s.handleAgentRevokeSelf)
+		ar.Post("/api/agent/jobs/{jobID}/status", s.handleAgentJobStatus)
+		ar.Head("/api/agent/bindings/{id}/artifact", s.handleAgentArtifact)
+		ar.Get("/api/agent/bindings/{id}/artifact", s.handleAgentArtifact)
+	})
 
 	// 受 session 保护的资源接口
 	r.Group(func(pr chi.Router) {
@@ -86,11 +107,26 @@ func (s *Server) Handler() http.Handler {
 		pr.Post("/api/subscriptions/{id}/publish", s.handlePublishOutputSubscription)
 		pr.Post("/api/subscriptions/{id}/reset-token", s.handleResetOutputSubscriptionToken)
 		pr.Put("/api/subscriptions/{id}/enabled", s.handleSetOutputSubscriptionEnabled)
+		pr.Post("/api/runtime/enrollments", s.handleCreateAgentEnrollment)
+		pr.Get("/api/runtime/instances", s.handleListRuntimeInstances)
+		pr.Get("/api/runtime/instances/{id}", s.handleGetRuntimeInstance)
+		pr.Post("/api/runtime/instances/{id}/revoke", s.handleRevokeRuntimeInstance)
+		pr.Put("/api/runtime/instances/{id}/binding", s.handlePutRuntimeBinding)
+		pr.Delete("/api/runtime/instances/{id}/binding", s.handleDeleteRuntimeBinding)
+		pr.Put("/api/runtime/instances/{id}/desired", s.handlePutRuntimeDesiredState)
+		pr.Get("/api/runtime/instances/{id}/jobs", s.handleListRuntimeJobs)
+		pr.Post("/api/runtime/instances/{id}/jobs", s.handleCreateRuntimeJob)
+		pr.Get("/api/runtime/instances/{id}/audit", s.handleListRuntimeAudit)
+		pr.Get("/api/runtime/instances/{id}/stream/{kind}", s.handleBrowserRuntimeStream)
 	})
 
 	// 静态控制台(兜底)
 	r.Handle("/*", http.FileServer(http.FS(web.FS)))
 	return r
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, map[string]any{"status": "ok", "build": buildinfo.Current()})
 }
 
 // handleSub 只提供已成功编译的固定引擎订阅产物，不根据 UA 猜测格式。

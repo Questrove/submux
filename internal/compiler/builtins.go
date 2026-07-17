@@ -8,17 +8,21 @@ import (
 )
 
 type builtinTemplate struct {
-	name, engine, scenario, description, engineVersion, content string
-	slots                                                       []store.TemplateSlot
+	name, engine, scenario, description, engineVersion, runtimeContract, content string
+	slots                                                                        []store.TemplateSlot
 }
 
 // EnsureBuiltinTemplates installs and upgrades the versioned starter catalog.
 // Templates remain ordinary records so administrators can publish newer
 // immutable versions without changing existing output subscriptions.
 func (s *Service) EnsureBuiltinTemplates() error {
+	seededV8, _ := s.store.GetSetting("builtin_templates_v8")
+	if seededV8 == "1" {
+		return nil
+	}
 	seededV7, _ := s.store.GetSetting("builtin_templates_v7")
 	if seededV7 == "1" {
-		return nil
+		return s.upgradeBuiltinTemplatesV8()
 	}
 	seededV6, _ := s.store.GetSetting("builtin_templates_v6")
 	if seededV6 == "1" {
@@ -64,7 +68,7 @@ func (s *Service) EnsureBuiltinTemplates() error {
 		key := item.engine + "\x00" + item.name
 		if template, ok := byKey[key]; ok {
 			if template.CurrentVersionID == 0 {
-				if _, err := s.store.PublishTemplateVersion(template.ID, item.engineVersion, item.content, item.slots); err != nil {
+				if _, err := s.store.PublishTemplateVersionWithContract(template.ID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
 					return err
 				}
 			}
@@ -77,7 +81,7 @@ func (s *Service) EnsureBuiltinTemplates() error {
 		if err != nil {
 			return err
 		}
-		if _, err := s.store.PublishTemplateVersion(id, item.engineVersion, item.content, item.slots); err != nil {
+		if _, err := s.store.PublishTemplateVersionWithContract(id, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
 			return err
 		}
 		byKey[key] = store.Template{ID: id, Name: item.name, Engine: item.engine}
@@ -130,7 +134,7 @@ func (s *Service) upgradeBuiltinTemplatesV5() error {
 		}
 	}
 	if template.CurrentVersionID == 0 {
-		if _, err := s.store.PublishTemplateVersion(template.ID, item.engineVersion, item.content, item.slots); err != nil {
+		if _, err := s.store.PublishTemplateVersionWithContract(template.ID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
 			return err
 		}
 	} else {
@@ -139,7 +143,7 @@ func (s *Service) upgradeBuiltinTemplatesV5() error {
 			return getErr
 		}
 		if current.Content != item.content || current.EngineVersion != item.engineVersion {
-			if _, err := s.store.OverwriteTemplateVersionForDevelopment(current.ID, item.engineVersion, item.content, item.slots); err != nil {
+			if _, err := s.store.OverwriteTemplateVersionForDevelopmentWithContract(current.ID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
 				return err
 			}
 			// Successful subscriptions receive refreshed artifacts. Failures keep
@@ -172,7 +176,55 @@ func (s *Service) upgradeBuiltinTemplatesV7() error {
 	if err := s.upgradeMihomoBuiltinTemplates(); err != nil {
 		return err
 	}
-	return s.store.SetSetting("builtin_templates_v7", "1")
+	if err := s.store.SetSetting("builtin_templates_v7", "1"); err != nil {
+		return err
+	}
+	return s.upgradeBuiltinTemplatesV8()
+}
+
+// upgradeBuiltinTemplatesV8 adds the first Agent-compatible server template.
+// Existing template versions remain without a runtime contract until an owner
+// explicitly publishes one, so enabling the Agent never changes old behavior.
+func (s *Service) upgradeBuiltinTemplatesV8() error {
+	item := mihomoServerSidecarTemplate()
+	if err := ValidateTemplate(item.engine, item.content, item.slots); err != nil {
+		return fmt.Errorf("builtin template %q: %w", item.name, err)
+	}
+	templates, err := s.store.ListTemplates()
+	if err != nil {
+		return err
+	}
+	for _, template := range templates {
+		if template.Engine != item.engine || template.Name != item.name {
+			continue
+		}
+		if template.CurrentVersionID == 0 {
+			_, err = s.store.PublishTemplateVersionWithContract(template.ID, item.engineVersion, item.runtimeContract, item.content, item.slots)
+		} else {
+			current, getErr := s.store.GetTemplateVersion(template.CurrentVersionID)
+			if getErr != nil {
+				return getErr
+			}
+			if current.Content != item.content || current.EngineVersion != item.engineVersion || current.RuntimeContract != item.runtimeContract || !reflect.DeepEqual(current.Slots, item.slots) {
+				_, err = s.store.OverwriteTemplateVersionForDevelopmentWithContract(current.ID, item.engineVersion, item.runtimeContract, item.content, item.slots)
+			}
+		}
+		if err != nil {
+			return err
+		}
+		return s.store.SetSetting("builtin_templates_v8", "1")
+	}
+	templateID, err := s.store.SaveTemplate(store.Template{
+		Name: item.name, Engine: item.engine, Scenario: item.scenario,
+		Description: item.description, Status: "draft",
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := s.store.PublishTemplateVersionWithContract(templateID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
+		return err
+	}
+	return s.store.SetSetting("builtin_templates_v8", "1")
 }
 
 func (s *Service) upgradeMihomoBuiltinTemplates() error {
@@ -205,10 +257,10 @@ func (s *Service) upgradeMihomoBuiltinTemplates() error {
 		if err != nil {
 			return err
 		}
-		if current.Content == item.content && current.EngineVersion == item.engineVersion && reflect.DeepEqual(current.Slots, item.slots) {
+		if current.Content == item.content && current.EngineVersion == item.engineVersion && current.RuntimeContract == item.runtimeContract && reflect.DeepEqual(current.Slots, item.slots) {
 			continue
 		}
-		if _, err := s.store.OverwriteTemplateVersionForDevelopment(current.ID, item.engineVersion, item.content, item.slots); err != nil {
+		if _, err := s.store.OverwriteTemplateVersionForDevelopmentWithContract(current.ID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
 			return err
 		}
 		changed = true
@@ -299,6 +351,7 @@ rules:
 `,
 			slots: slot,
 		},
+		mihomoServerSidecarTemplate(),
 		{
 			name: "sing-box 桌面", engine: EngineSingBox, scenario: "desktop", engineVersion: "sing-box 1.14",
 			description: "本机 mixed 入口并设置系统代理，使用当前 DNS server 与 route action 格式。",
@@ -364,6 +417,41 @@ rules:
 }`,
 			slots: []store.TemplateSlot{{Key: "primary", Target: "AUTO", Mode: "replace", Required: true}},
 		},
+	}
+}
+
+func mihomoServerSidecarTemplate() builtinTemplate {
+	return builtinTemplate{
+		name: "Mihomo 服务器 Sidecar（推荐）", engine: EngineMihomo, scenario: "server", engineVersion: "mihomo 1.19+",
+		runtimeContract: RuntimeContractMihomoAgentV1,
+		description:     "仅监听回环地址、由 submux-agent 管理控制 API 的服务器 sidecar 配置。",
+		content: `mixed-port: 7890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: warning
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: redir-host
+  default-nameserver:
+    - 223.5.5.5
+    - 1.1.1.1
+  nameserver:
+    - https://dns.alidns.com/dns-query
+    - https://1.1.1.1/dns-query
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: []
+rules:
+  - GEOIP,LAN,DIRECT,no-resolve
+  - MATCH,PROXY
+`,
+		slots: []store.TemplateSlot{{Key: "primary", Target: "PROXY", Mode: "replace", Required: true}},
 	}
 }
 
