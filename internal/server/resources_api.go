@@ -1,8 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -268,9 +270,10 @@ func (s *Server) handlePublishTemplateVersion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var body struct {
-		EngineVersion string               `json:"engine_version"`
-		Content       string               `json:"content"`
-		Slots         []store.TemplateSlot `json:"slots"`
+		EngineVersion   string               `json:"engine_version"`
+		RuntimeContract string               `json:"runtime_contract"`
+		Content         string               `json:"content"`
+		Slots           []store.TemplateSlot `json:"slots"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -285,7 +288,12 @@ func (s *Server) handlePublishTemplateVersion(w http.ResponseWriter, r *http.Req
 		http.Error(w, "invalid template: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	version, err := s.store.PublishTemplateVersion(id, strings.TrimSpace(body.EngineVersion), body.Content, body.Slots)
+	body.RuntimeContract = strings.TrimSpace(body.RuntimeContract)
+	if err := compiler.ValidateRuntimeContract(template.Engine, body.RuntimeContract); err != nil {
+		http.Error(w, "invalid runtime contract: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	version, err := s.store.PublishTemplateVersionWithContract(id, strings.TrimSpace(body.EngineVersion), body.RuntimeContract, body.Content, body.Slots)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -528,7 +536,23 @@ func (s *Server) handleDeleteOutputSubscription(w http.ResponseWriter, r *http.R
 }
 
 func decodeJSON(r *http.Request, target any) error {
-	decoder := json.NewDecoder(r.Body)
+	raw, err := io.ReadAll(io.LimitReader(r.Body, (10<<20)+1))
+	if err != nil {
+		return err
+	}
+	if len(raw) > 10<<20 {
+		return fmt.Errorf("JSON request exceeds 10 MiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	return decoder.Decode(target)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }

@@ -31,6 +31,58 @@ func TestNodeMetadataUsesOneDialogWithoutAlias(t *testing.T) {
 	}
 }
 
+func TestRuntimeInstanceConsoleUsesTypedControlPlaneAPIs(t *testing.T) {
+	content, err := FS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(content)
+	for _, required := range []string{
+		`data-page="runtime"`,
+		`id="page-runtime"`,
+		`/api/runtime/enrollments`,
+		`/api/runtime/instances/${id}`,
+		`function saveRuntimeBinding(`,
+		`function saveRuntimeDesired(`,
+		`function createRuntimeJob(`,
+		`function revokeRuntimeInstance(`,
+		`mihomo-agent/v1`,
+		`expected_original_hash:RUNTIME_DOCKER_PREVIEW.original_hash`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("runtime instance console is missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{"runtime exec", "runtime shell", "arbitrary command"} {
+		if strings.Contains(strings.ToLower(html), forbidden) {
+			t.Fatalf("runtime console exposes a generic execution concept: %q", forbidden)
+		}
+	}
+}
+
+func TestRuntimePanelUsesOnDemandStreamsAndExplicitProxyJobs(t *testing.T) {
+	content, err := FS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(content)
+	for _, required := range []string{
+		`function openRuntimeStream(kind)`,
+		`/stream/${kind}`,
+		`createRuntimeJob('test_proxy_delay'`,
+		`createRuntimeJob('select_proxy'`,
+		`createRuntimeJob('close_connection'`,
+		`RUNTIME_LOG_FRAMES.length>200`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("runtime observation panel is missing %q", required)
+		}
+	}
+	if strings.Contains(html, "setInterval(()=>testRuntimeProxy") {
+		t.Fatal("runtime panel performs background proxy delay tests")
+	}
+}
+
 func TestNodeNameOpensDetailsAndSensitiveConfigIsMasked(t *testing.T) {
 	content, err := FS.ReadFile("index.html")
 	if err != nil {

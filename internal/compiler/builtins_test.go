@@ -17,8 +17,8 @@ func TestEnsureBuiltinTemplatesSeedsRecommendedDesktopTUN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(templates) != 5 {
-		t.Fatalf("want five builtin templates, got %#v", templates)
+	if len(templates) != 6 {
+		t.Fatalf("want six builtin templates, got %#v", templates)
 	}
 	var version store.TemplateVersion
 	for _, template := range templates {
@@ -305,8 +305,8 @@ func TestEnsureBuiltinTemplatesUpgradesV2CatalogOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first) != 1 || first[0].Name != "Mihomo 桌面 TUN（推荐）" {
-		t.Fatalf("v2 catalog upgrade should add only the new desktop TUN template: %#v", first)
+	if len(first) != 2 || first[0].Name != "Mihomo 桌面 TUN（推荐）" || first[1].Name != "Mihomo 服务器 Sidecar（推荐）" {
+		t.Fatalf("v2 catalog upgrade should add the later recommended templates: %#v", first)
 	}
 	if err := service.EnsureBuiltinTemplates(); err != nil {
 		t.Fatal(err)
@@ -315,7 +315,43 @@ func TestEnsureBuiltinTemplatesUpgradesV2CatalogOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second) != 1 || second[0].CurrentVersionID != first[0].CurrentVersionID {
+	if len(second) != 2 || second[0].CurrentVersionID != first[0].CurrentVersionID || second[1].CurrentVersionID != first[1].CurrentVersionID {
 		t.Fatalf("builtin catalog upgrade was not idempotent: first=%#v second=%#v", first, second)
 	}
+}
+
+func TestMihomoServerSidecarHasExplicitSafeRuntimeContract(t *testing.T) {
+	st := compilerTestStore(t)
+	service := New(st)
+	if err := service.EnsureBuiltinTemplates(); err != nil {
+		t.Fatal(err)
+	}
+	templates, err := st.ListTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, template := range templates {
+		if template.Name != "Mihomo 服务器 Sidecar（推荐）" {
+			continue
+		}
+		version, err := st.GetTemplateVersion(template.CurrentVersionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if version.RuntimeContract != RuntimeContractMihomoAgentV1 {
+			t.Fatalf("unexpected runtime contract %q", version.RuntimeContract)
+		}
+		analysis, err := AnalyzeMihomoRuntime(version.Content, version.RuntimeContract)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(analysis.Risks) != 0 || analysis.RequiresNetAdmin || len(analysis.SelectableGroups) != 1 || analysis.SelectableGroups[0] != "PROXY" {
+			t.Fatalf("unexpected sidecar analysis: %#v", analysis)
+		}
+		if strings.Contains(version.Content, "external-controller") || strings.Contains(version.Content, "secret:") {
+			t.Fatal("base artifact must not contain Agent-owned controller credentials")
+		}
+		return
+	}
+	t.Fatal("sidecar template was not seeded")
 }

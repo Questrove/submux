@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -10,12 +12,26 @@ import (
 	"syscall"
 	"time"
 
+	"submux/internal/buildinfo"
 	"submux/internal/server"
 	"submux/internal/source"
 	"submux/internal/store"
 )
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "version") {
+		info := buildinfo.Current()
+		fmt.Printf("submux %s (%s, %s)\n", info.Version, info.Commit, info.Date)
+		return
+	}
+	if len(os.Args) == 2 && os.Args[1] == "--version-json" {
+		_ = json.NewEncoder(os.Stdout).Encode(buildinfo.Current())
+		return
+	}
+	if len(os.Args) > 1 {
+		fmt.Fprintln(os.Stderr, "usage: submux [--version|--version-json]")
+		os.Exit(2)
+	}
 	dbPath := getenv("SUBMUX_DB", "submux.db")
 
 	st, err := store.Open(dbPath)

@@ -403,8 +403,8 @@ func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 	}
 	_ = json.NewDecoder(templatesResponse.Body).Decode(&templates)
 	templatesResponse.Body.Close()
-	if len(templates) != 5 {
-		t.Fatalf("want five platform templates, got %#v", templates)
+	if len(templates) != 6 {
+		t.Fatalf("want six platform templates, got %#v", templates)
 	}
 
 	for _, engine := range []string{"mihomo", "sing-box"} {

@@ -37,6 +37,7 @@
       <button data-page="nodes">2. 节点库</button>
       <button data-page="templates">3. 模板</button>
       <button data-page="subscriptions">4. 订阅</button>
+      <button data-page="runtime">5. 运行实例</button>
       <button data-page="settings">设置</button>
     </nav>
 
@@ -99,6 +100,7 @@
           <h3 id="template-editor-title">选择模板以发布新版本</h3>
           <div id="template-editor" class="hidden">
             <div class="field"><label>目标内核版本</label><input id="template-engine-version" placeholder="例如 sing-box 1.14"></div>
+            <div class="field"><label>运行契约（可空）</label><select id="template-runtime-contract"><option value="">不由 Agent 接管</option><option value="mihomo-agent/v1">mihomo-agent/v1</option></select><small class="muted">只有明确发布契约的 Mihomo 模板版本才能绑定运行实例；Agent 只覆盖本机控制 API 字段。</small></div>
             <div class="field"><label>完整配置（Mihomo YAML / sing-box JSON）</label><textarea class="code" id="template-content"></textarea></div>
             <div class="field"><label>节点插槽 JSON（key、target、mode、required）</label><textarea id="template-slots" placeholder='[{"key":"primary","target":"AUTO","mode":"replace","required":true}]'></textarea></div>
             <button class="primary" onclick="publishTemplateVersion()">校验并发布新版本</button>
@@ -122,6 +124,57 @@
         </div>
         <div class="card span-12 table-wrap">
           <table><thead><tr><th>订阅</th><th>模板与节点</th><th>发布状态</th><th>启用</th><th>操作</th></tr></thead><tbody id="subscription-rows"></tbody></table>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-runtime" class="page">
+      <div class="section-head"><div><h2>运行实例</h2><p>管理可选的 submux-agent 主机；不安装 Agent 时不会影响现有订阅功能。</p></div><button class="primary" onclick="createRuntimeEnrollment()">添加实例</button></div>
+      <div id="runtime-enrollment" class="card hidden" style="margin-bottom:14px">
+        <h3>一次性配对码</h3>
+        <p>在目标 Linux 主机安装 Agent 后执行 <code>submux-agent enroll --server https://你的-submux-地址</code>，并输入下面的短时配对码。</p>
+        <div class="row"><code id="runtime-enrollment-code" style="font-size:18px"></code><button onclick="copyRuntimeEnrollment()">复制</button></div>
+        <small class="muted" id="runtime-enrollment-expiry"></small>
+      </div>
+      <div class="grid">
+        <div class="card span-12 table-wrap">
+          <table><thead><tr><th>实例</th><th>状态</th><th>版本</th><th>配置 revision</th><th>操作</th></tr></thead><tbody id="runtime-rows"></tbody></table>
+        </div>
+        <div id="runtime-detail" class="span-12 hidden">
+          <div class="grid">
+            <div class="card span-4">
+              <h3 id="runtime-detail-title">实例配置</h3>
+              <div class="field"><label>绑定 Mihomo 输出订阅</label><select id="runtime-binding-subscription"></select></div>
+              <label class="row"><input id="runtime-binding-auto" type="checkbox"> 自动应用新 revision</label>
+              <div class="field"><label>检查间隔（秒）</label><input id="runtime-binding-interval" type="number" min="30" max="86400" value="300"></div>
+              <div class="actions"><button class="primary" onclick="saveRuntimeBinding()">保存绑定</button><button onclick="removeRuntimeBinding()">解除绑定</button></div>
+            </div>
+            <div class="card span-4">
+              <h3>Mihomo 期望状态</h3>
+              <label class="row"><input id="runtime-core-installed" type="checkbox"> 安装并管理 Mihomo</label>
+              <div class="field"><label>渠道</label><select id="runtime-core-channel"><option value="stable">stable</option><option value="alpha">alpha（显式预发布）</option></select></div>
+              <div class="field"><label>准确版本</label><input id="runtime-core-version" placeholder="v1.19.28"></div>
+              <div class="field"><label>运行状态</label><select id="runtime-run-state"><option value="stopped">stopped</option><option value="running">running</option></select></div>
+              <button class="primary" onclick="saveRuntimeDesired()">更新期望状态</button>
+            </div>
+            <div class="card span-4">
+              <h3>显式操作</h3>
+              <p class="muted" id="runtime-observation"></p>
+              <div class="actions"><button onclick="createRuntimeJob('update_subscription',{})">更新配置</button><button onclick="createRuntimeJob('restart_core',{})">重启内核</button><button onclick="rollbackRuntimeCore()">回滚核心</button><button onclick="createRuntimeJob('collect_diagnostics',{})">诊断</button><button class="danger" onclick="revokeRuntimeInstance()">撤销实例</button></div>
+            </div>
+            <div class="card span-6 table-wrap"><div class="section-head"><div><h3>策略组与节点</h3><p>测速只更新观测值，不自动切换。</p></div><button onclick="openRuntimeStream('proxies')">刷新</button></div><table><thead><tr><th>策略组</th><th>当前</th><th>成员与显式操作</th></tr></thead><tbody id="runtime-proxy-rows"></tbody></table></div>
+            <div class="card span-6 table-wrap"><div class="section-head"><div><h3>实时连接</h3><p>仅在此页面订阅期间中继。</p></div><button onclick="openRuntimeStream('connections')">连接</button></div><table><thead><tr><th>目标</th><th>链路</th><th>流量</th><th>操作</th></tr></thead><tbody id="runtime-connection-rows"></tbody></table></div>
+            <div class="card span-3"><div class="section-head"><div><h3>实时流量</h3><p>不保存历史。</p></div><button onclick="openRuntimeStream('traffic')">开始</button></div><pre id="runtime-traffic" style="white-space:pre-wrap">未订阅</pre></div>
+            <div class="card span-3"><div class="section-head"><div><h3>实时内存</h3><p>不保存历史。</p></div><button onclick="openRuntimeStream('memory')">开始</button></div><pre id="runtime-memory" style="white-space:pre-wrap">未订阅</pre></div>
+            <div class="card span-6"><div class="section-head"><div><h3>实时日志</h3><p>URL 与敏感字段在 Agent 侧脱敏；最多显示最近 200 帧。</p></div><button onclick="openRuntimeStream('logs')">开始</button></div><pre id="runtime-logs" style="max-height:280px;overflow:auto;white-space:pre-wrap">未订阅</pre></div>
+            <div class="card span-6"><div class="section-head"><div><h3>当前运行配置</h3><p>来自 Mihomo /configs；敏感键在 Agent 侧移除。</p></div><button onclick="openRuntimeStream('configs')">刷新</button></div><pre id="runtime-configs" style="max-height:300px;overflow:auto;white-space:pre-wrap">未读取</pre></div>
+            <div class="card span-6"><div class="section-head"><div><h3>当前规则与匹配信息</h3><p>只读展示，不反向写入模板。</p></div><button onclick="openRuntimeStream('rules')">刷新</button></div><pre id="runtime-rules" style="max-height:300px;overflow:auto;white-space:pre-wrap">未读取</pre></div>
+            <div id="runtime-docker-daemon-card" class="card span-12"><div class="section-head"><div><h3>Docker Engine daemon 代理</h3><p>只管理固定 daemon.json 的 proxies 字段；应用前必须查看语义预览，外部修改会进入 conflict。</p></div><div class="actions"><button onclick="openRuntimeStream('docker_preview')">生成预览</button><button id="runtime-docker-confirm" class="primary hidden" onclick="confirmRuntimeDocker()">确认应用并重启 Docker</button><button onclick="disableRuntimeDocker()">停用并恢复原值</button></div></div><p id="runtime-docker-status" class="muted">尚未观测</p><pre id="runtime-docker-preview" class="hidden" style="max-height:360px;overflow:auto;white-space:pre-wrap"></pre></div>
+            <div id="runtime-docker-desktop-card" class="card span-12 hidden"><div class="section-head"><div><h3>Docker Desktop 容器代理</h3><p>独立管理 ProgramData 下的 admin-settings.json；需要 Docker Business、组织强制登录和完整重启，不使用 Linux daemon.json。</p></div><div class="actions"><button onclick="openRuntimeStream('docker_desktop_preview')">生成预览</button><button id="runtime-docker-desktop-confirm" class="primary hidden" onclick="confirmRuntimeDockerDesktop()">确认前提并重启 Desktop</button><button onclick="disableRuntimeDockerDesktop()">停用并恢复原值</button></div></div><p id="runtime-docker-desktop-status" class="muted">尚未观测</p><pre id="runtime-docker-desktop-preview" class="hidden" style="max-height:360px;overflow:auto;white-space:pre-wrap"></pre></div>
+            <div class="card span-6 table-wrap"><h3>最近任务</h3><table><thead><tr><th>时间</th><th>类型</th><th>状态</th><th>结果</th></tr></thead><tbody id="runtime-job-rows"></tbody></table></div>
+            <div class="card span-6 table-wrap"><h3>审计链路</h3><table><thead><tr><th>时间</th><th>入口 / 请求</th><th>动作</th><th>结果</th></tr></thead><tbody id="runtime-audit-rows"></tbody></table></div>
+            <div class="card span-12 table-wrap"><h3>最近部署</h3><table><thead><tr><th>时间</th><th>revision</th><th>hash</th><th>核心</th><th>状态 / 验证</th></tr></thead><tbody id="runtime-deployment-rows"></tbody></table></div>
+          </div>
         </div>
       </div>
     </section>
@@ -171,8 +224,8 @@
 
 <script>
 const $=selector=>document.querySelector(selector);
-let SOURCES=[],NODES=[],TEMPLATES=[],SUBSCRIPTIONS=[],SETTINGS={},EVENTS=[];
-let VERSIONS=new Map(),EDITING_SUBSCRIPTION_ID=0,EDITING_NODE_ID=0,DRAFT_BINDINGS=new Map(),SLOT_FILTERS=new Map(),DRAGGED_NODE=null,NODE_CONFIG_SECRETS_VISIBLE=false;
+let SOURCES=[],NODES=[],TEMPLATES=[],SUBSCRIPTIONS=[],SETTINGS={},EVENTS=[],RUNTIMES=[],ACTIVE_RUNTIME=null,RUNTIME_ENROLLMENT='';
+let VERSIONS=new Map(),EDITING_SUBSCRIPTION_ID=0,EDITING_NODE_ID=0,DRAFT_BINDINGS=new Map(),SLOT_FILTERS=new Map(),DRAGGED_NODE=null,NODE_CONFIG_SECRETS_VISIBLE=false,RUNTIME_STREAMS=new Map(),RUNTIME_LOG_FRAMES=[],RUNTIME_DOCKER_PREVIEW=null,RUNTIME_DOCKER_DESKTOP_PREVIEW=null;
 const splitCSV=value=>value.split(',').map(item=>item.trim()).filter(Boolean);
 const sourceById=id=>SOURCES.find(value=>value.id===id);
 const nodeById=id=>NODES.find(value=>value.id===id);
@@ -189,7 +242,7 @@ async function logout(){await api('POST','/api/logout');showAuth('login');}
 async function enterApp(){$('#auth-init').classList.add('hidden');$('#auth-login').classList.add('hidden');$('#app').classList.remove('hidden');await loadAll();}
 $('#tabs').addEventListener('click',event=>{const button=event.target.closest('[data-page]');if(!button)return;document.querySelectorAll('#tabs button').forEach(value=>value.classList.toggle('active',value===button));document.querySelectorAll('.page').forEach(value=>value.classList.toggle('active',value.id==='page-'+button.dataset.page));});
 
-async function loadAll(){[SETTINGS,SOURCES,NODES,EVENTS,TEMPLATES]=await Promise.all([api('GET','/api/settings'),api('GET','/api/sources'),api('GET','/api/nodes'),api('GET','/api/lifecycle-events'),api('GET','/api/templates')]);await loadVersions();SUBSCRIPTIONS=await api('GET','/api/subscriptions');renderSettings();renderSources();renderLifecycleEvents();renderNodes();renderTemplates();renderSubscriptions();startNewSubscription();}
+async function loadAll(){[SETTINGS,SOURCES,NODES,EVENTS,TEMPLATES,RUNTIMES]=await Promise.all([api('GET','/api/settings'),api('GET','/api/sources'),api('GET','/api/nodes'),api('GET','/api/lifecycle-events'),api('GET','/api/templates'),api('GET','/api/runtime/instances')]);await loadVersions();SUBSCRIPTIONS=await api('GET','/api/subscriptions');renderSettings();renderSources();renderLifecycleEvents();renderNodes();renderTemplates();renderSubscriptions();renderRuntimeInstances();startNewSubscription();}
 
 async function createSource(){await action(async()=>{const result=await api('POST','/api/sources',{kind:'subscription',name:$('#source-name').value,url:$('#source-url').value,user_agent:$('#source-ua').value,tags:splitCSV($('#source-tags').value),lifecycle_policy:$('#source-policy').value,warn_before_days:Number($('#source-warn-days').value),trust_node_notices:$('#source-trust-notices').checked});$('#source-name').value=$('#source-url').value=$('#source-tags').value='';await reloadSourcesAndNodes();if(result.refresh_ok===false)throw new Error(`来源已保存，但首次刷新失败：${result.refresh_error||'未知错误'}`);},'来源已添加并完成首次刷新');}
 async function reloadSourcesAndNodes(){[SOURCES,NODES,EVENTS]=await Promise.all([api('GET','/api/sources'),api('GET','/api/nodes'),api('GET','/api/lifecycle-events')]);renderSources();renderLifecycleEvents();renderNodes();renderSubscriptionSlots();await reloadBuildState();}
@@ -222,10 +275,10 @@ async function saveNodeMetadata(){const node=nodeById(EDITING_NODE_ID);if(!node)
 async function deleteNode(id){if(!confirm('删除这个手工节点？被输出订阅使用时会拒绝。'))return;await action(async()=>{await api('DELETE','/api/nodes/'+id);NODES=await api('GET','/api/nodes');renderNodes();renderSubscriptionSlots();await reloadBuildState();},'节点已删除');}
 
 async function loadVersions(){VERSIONS=new Map();await Promise.all(TEMPLATES.map(async template=>{const list=await api('GET',`/api/templates/${template.id}/versions`);list.forEach(version=>VERSIONS.set(version.id,version));}));}
-function renderTemplates(){$('#template-list').innerHTML=TEMPLATES.map(template=>`<div class="template-item"><div><h4><button class="node-link" type="button" onclick="selectTemplate(${template.id})">${esc(template.name)}</button></h4><span class="badge blue">${esc(template.engine)}</span> <span class="badge">${esc(template.scenario)}</span><p>${esc(template.description||'')} · 当前 v${VERSIONS.get(template.current_version_id)?.version||'—'}</p></div><div class="actions"><button onclick="selectTemplate(${template.id})">新版本</button><button class="danger" onclick="deleteTemplate(${template.id})">删除</button></div></div>`).join('')||'<div class="empty">没有模板</div>';}
-function selectTemplate(id){const template=TEMPLATES.find(value=>value.id===id),version=VERSIONS.get(template.current_version_id);$('#template-editor').classList.remove('hidden');$('#template-editor').dataset.id=id;$('#template-editor-title').textContent=`${template.name} · 发布新版本`;$('#template-engine-version').value=version?.engine_version||'';$('#template-content').value=version?.content||'';$('#template-slots').value=JSON.stringify(version?.slots||[],null,2);}
+function renderTemplates(){$('#template-list').innerHTML=TEMPLATES.map(template=>{const version=VERSIONS.get(template.current_version_id),contract=version?.runtime_contract?` <span class="badge green">${esc(version.runtime_contract)}</span>`:'';return `<div class="template-item"><div><h4><button class="node-link" type="button" onclick="selectTemplate(${template.id})">${esc(template.name)}</button></h4><span class="badge blue">${esc(template.engine)}</span> <span class="badge">${esc(template.scenario)}</span>${contract}<p>${esc(template.description||'')} · 当前 v${version?.version||'—'}</p></div><div class="actions"><button onclick="selectTemplate(${template.id})">新版本</button><button class="danger" onclick="deleteTemplate(${template.id})">删除</button></div></div>`;}).join('')||'<div class="empty">没有模板</div>';}
+function selectTemplate(id){const template=TEMPLATES.find(value=>value.id===id),version=VERSIONS.get(template.current_version_id);$('#template-editor').classList.remove('hidden');$('#template-editor').dataset.id=id;$('#template-editor-title').textContent=`${template.name} · 发布新版本`;$('#template-engine-version').value=version?.engine_version||'';$('#template-runtime-contract').value=version?.runtime_contract||'';$('#template-content').value=version?.content||'';$('#template-slots').value=JSON.stringify(version?.slots||[],null,2);}
 async function createTemplate(){await action(async()=>{const result=await api('POST','/api/templates',{name:$('#new-template-name').value,engine:$('#new-template-engine').value,scenario:$('#new-template-scenario').value,description:'',status:'draft'});TEMPLATES=await api('GET','/api/templates');await loadVersions();renderTemplates();renderSubscriptionTemplateOptions();selectTemplate(result.id);},'模板草稿已创建');}
-async function publishTemplateVersion(){await action(async()=>{const id=Number($('#template-editor').dataset.id),slots=JSON.parse($('#template-slots').value);await api('POST',`/api/templates/${id}/versions`,{engine_version:$('#template-engine-version').value,content:$('#template-content').value,slots});TEMPLATES=await api('GET','/api/templates');await loadVersions();renderTemplates();renderSubscriptionTemplateOptions();selectTemplate(id);},'新模板版本已发布');}
+async function publishTemplateVersion(){await action(async()=>{const id=Number($('#template-editor').dataset.id),slots=JSON.parse($('#template-slots').value);await api('POST',`/api/templates/${id}/versions`,{engine_version:$('#template-engine-version').value,runtime_contract:$('#template-runtime-contract').value,content:$('#template-content').value,slots});TEMPLATES=await api('GET','/api/templates');await loadVersions();renderTemplates();renderSubscriptionTemplateOptions();selectTemplate(id);},'新模板版本已发布');}
 async function deleteTemplate(id){if(!confirm('删除模板及所有版本？被输出订阅使用时会拒绝。'))return;await action(async()=>{await api('DELETE','/api/templates/'+id);TEMPLATES=await api('GET','/api/templates');await loadVersions();renderTemplates();startNewSubscription();},'模板已删除');}
 
 function templateForVersion(versionID){const version=VERSIONS.get(Number(versionID));return TEMPLATES.find(template=>template.id===version?.template_id);}
@@ -269,6 +322,76 @@ async function previewSubscription(id){await action(async()=>{const result=await
 async function publishSubscription(id){await action(async()=>{await api('POST',`/api/subscriptions/${id}/publish`);await reloadBuildState();},'输出订阅已重新编译');}
 async function resetSubscriptionToken(id){if(!confirm('更换 token 后旧链接立即失效，继续？'))return;await action(async()=>{await api('POST',`/api/subscriptions/${id}/reset-token`);await reloadBuildState();},'订阅 token 已更换');}
 async function deleteSubscription(id){if(!confirm('删除输出订阅及其发布产物？'))return;await action(async()=>{await api('DELETE','/api/subscriptions/'+id);await reloadBuildState();if(EDITING_SUBSCRIPTION_ID===id)startNewSubscription();},'输出订阅已删除');}
+
+function runtimeStatusBadge(status){const style=status==='online'?'green':status==='revoked'?'':'blue';return `<span class="badge ${style}">${esc(status||'offline')}</span>`;}
+function renderRuntimeInstances(){$('#runtime-rows').innerHTML=RUNTIMES.map(view=>{const instance=view.instance,observation=view.observation||{},revision=observation.applied_revision||'—',update=observation.update_available?' <span class="badge blue">有更新</span>':'',local=view.local?' <span class="badge green">本机</span>':'';return `<tr><td><strong>${esc(instance.name)}</strong>${local}<br><small class="muted">#${instance.id} · ${esc(instance.os)}/${esc(instance.arch)} · ${esc(instance.last_seen||'尚未上线')}</small></td><td>${runtimeStatusBadge(instance.status)}${observation.recent_error?`<br><small class="err">${esc(observation.recent_error)}</small>`:''}</td><td>Agent ${esc(instance.agent_version||'—')}<br><small class="muted">Mihomo ${esc(observation.core_version||'—')} · ${esc(observation.core_status||'not_installed')}</small></td><td><code>${esc(revision.slice(0,16))}</code>${update}</td><td><button onclick="openRuntimeInstance(${instance.id})">管理</button></td></tr>`;}).join('')||'<tr><td colspan="5" class="empty">尚无 Agent；添加实例只会生成一次性配对码</td></tr>';}
+async function reloadRuntimeInstances(){RUNTIMES=await api('GET','/api/runtime/instances');renderRuntimeInstances();}
+async function createRuntimeEnrollment(){const name=prompt('实例名称（例如：香港服务器）');if(!name)return;await action(async()=>{const result=await api('POST','/api/runtime/enrollments',{name});RUNTIME_ENROLLMENT=result.code;$('#runtime-enrollment-code').textContent=result.code;$('#runtime-enrollment-expiry').textContent=`有效期至 ${result.expires_at}；使用一次后立即失效`;$('#runtime-enrollment').classList.remove('hidden');},'一次性配对码已生成');}
+async function copyRuntimeEnrollment(){if(!RUNTIME_ENROLLMENT)return;await navigator.clipboard.writeText(RUNTIME_ENROLLMENT);notify('配对码已复制');}
+function agentCompatibleSubscriptions(){return SUBSCRIPTIONS.filter(subscription=>subscription.enabled&&subscription.engine==='mihomo'&&VERSIONS.get(subscription.template_version_id)?.runtime_contract==='mihomo-agent/v1');}
+async function openRuntimeInstance(id){await action(async()=>{closeRuntimeStreams();ACTIVE_RUNTIME=await api('GET',`/api/runtime/instances/${id}`);renderRuntimeDetail();$('#runtime-detail').classList.remove('hidden');$('#runtime-detail').scrollIntoView({behavior:'smooth',block:'start'});openRuntimeStream('proxies');});}
+function renderRuntimeDetail(){
+  if(!ACTIVE_RUNTIME)return;
+  const view=ACTIVE_RUNTIME.runtime,instance=view.instance,binding=view.binding,desired=view.desired,observation=view.observation||{};
+  $('#runtime-detail-title').textContent=`${instance.name} · #${instance.id}`;
+  const subscriptions=agentCompatibleSubscriptions();
+  $('#runtime-binding-subscription').innerHTML='<option value="">选择 Agent 兼容订阅</option>'+subscriptions.map(value=>`<option value="${value.id}">${esc(value.name)} · ${esc(versionLabel(value.template_version_id))}</option>`).join('');
+  if(binding)$('#runtime-binding-subscription').value=String(binding.output_subscription_id);
+  $('#runtime-binding-auto').checked=!!binding?.auto_update;
+  $('#runtime-binding-interval').value=binding?.check_interval_sec||300;
+  $('#runtime-core-installed').checked=!!desired.desired_core_installed;
+  $('#runtime-core-channel').value=desired.core_channel||'stable';
+  $('#runtime-core-version').value=desired.desired_core_version||'';
+  $('#runtime-run-state').value=desired.desired_runtime_state||'stopped';
+  const uptime=observation.agent_uptime_seconds?`${Math.floor(observation.agent_uptime_seconds/3600)}h ${Math.floor((observation.agent_uptime_seconds%3600)/60)}m`:'—';
+  $('#runtime-observation').innerHTML=`当前：<strong>${esc(observation.core_status||'not_installed')}</strong> · Agent 运行 ${esc(uptime)}<br>远端 revision：<code>${esc((observation.remote_revision||'—').slice(0,16))}</code><br>已应用：<code>${esc((observation.applied_revision||'—').slice(0,16))}</code><br>last-good：<code>${esc((observation.last_good_revision||'—').slice(0,16))}</code><br>上一核心：<code>${esc(observation.previous_core_version||'—')}</code><br>generation：${observation.observed_generation||0} / ${desired.generation}${observation.selection_notice?`<br><span class="err">${esc(observation.selection_notice)}</span>`:''}`;
+  const docker=observation.integrations?.docker_daemon,desktop=observation.integrations?.docker_desktop;
+  $('#runtime-docker-daemon-card').classList.toggle('hidden',instance.os!=='linux');
+  $('#runtime-docker-desktop-card').classList.toggle('hidden',instance.os!=='windows');
+  $('#runtime-docker-status').textContent=docker?`观测状态：${docker.state}${docker.conflict?' · '+docker.conflict:''}`:'尚未观测 Docker Engine 集成';
+  $('#runtime-docker-desktop-status').textContent=desktop?`观测状态：${desktop.state}${desktop.conflict?' · '+desktop.conflict:''}`:'尚未观测 Docker Desktop 集成';
+  $('#runtime-job-rows').innerHTML=(ACTIVE_RUNTIME.jobs||[]).map(job=>`<tr><td>${esc(job.created_at)}</td><td>${esc(job.type)}</td><td>${runtimeStatusBadge(job.status)}</td><td><small>${esc((job.error||job.result)?JSON.stringify(job.result||job.error):'—')}</small></td></tr>`).join('')||'<tr><td colspan="4" class="empty">尚无任务</td></tr>';
+  $('#runtime-audit-rows').innerHTML=(ACTIVE_RUNTIME.audit||[]).map(event=>`<tr><td>${esc(event.created_at)}</td><td>${esc(event.actor_type)}<br><code>${esc((event.request_id||'').slice(0,12))}</code></td><td>${esc(event.action)}<br><small class="muted">${esc(event.summary||'')}</small></td><td>${esc(event.result)}</td></tr>`).join('')||'<tr><td colspan="4" class="empty">尚无审计事件</td></tr>';
+  $('#runtime-deployment-rows').innerHTML=(ACTIVE_RUNTIME.deployments||[]).map(deployment=>`<tr><td>${esc(deployment.created_at)}</td><td><code>${esc((deployment.remote_revision||'—').slice(0,16))}</code><br><small>${esc(deployment.actor_type||'—')} · ${esc((deployment.request_id||'').slice(0,12))}</small></td><td><small>artifact ${esc((deployment.artifact_hash||'—').slice(0,12))}<br>effective ${esc((deployment.effective_hash||'—').slice(0,12))}</small></td><td>${esc(deployment.mihomo_version||'—')}</td><td>${runtimeStatusBadge(deployment.status)}<br><small>${esc(deployment.validation||'—')}</small></td></tr>`).join('')||'<tr><td colspan="5" class="empty">尚无部署记录</td></tr>';
+}
+async function refreshActiveRuntime(){if(!ACTIVE_RUNTIME)return;const id=ACTIVE_RUNTIME.runtime.instance.id;await reloadRuntimeInstances();ACTIVE_RUNTIME=await api('GET',`/api/runtime/instances/${id}`);renderRuntimeDetail();}
+async function saveRuntimeBinding(){if(!ACTIVE_RUNTIME)return;const subscriptionID=Number($('#runtime-binding-subscription').value);if(!subscriptionID)return notify('请选择发布了 mihomo-agent/v1 契约的 Mihomo 订阅',true);await action(async()=>{await api('PUT',`/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/binding`,{output_subscription_id:subscriptionID,auto_update:$('#runtime-binding-auto').checked,check_interval_sec:Number($('#runtime-binding-interval').value)});await refreshActiveRuntime();},'运行实例绑定已保存');}
+async function removeRuntimeBinding(){if(!ACTIVE_RUNTIME||!ACTIVE_RUNTIME.runtime.binding)return;if(!confirm('解除绑定后 Agent 不再检查配置，继续？'))return;await action(async()=>{await api('DELETE',`/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/binding`);await refreshActiveRuntime();},'绑定已解除');}
+async function saveRuntimeDesired(){if(!ACTIVE_RUNTIME)return;const desired=ACTIVE_RUNTIME.runtime.desired,installed=$('#runtime-core-installed').checked;await action(async()=>{await api('PUT',`/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/desired`,{expected_generation:desired.generation,desired_core_installed:installed,core_channel:installed?$('#runtime-core-channel').value:'',core_version_constraint:'',desired_core_version:installed?$('#runtime-core-version').value:'',desired_runtime_state:installed?$('#runtime-run-state').value:'stopped',desired_integrations:desired.desired_integrations||{}});await refreshActiveRuntime();},'期望状态已更新，等待 Agent 对账');}
+async function rollbackRuntimeCore(){if(!ACTIVE_RUNTIME)return;const desired=ACTIVE_RUNTIME.runtime.desired,previous=ACTIVE_RUNTIME.runtime.observation.previous_core_version;if(!previous)return notify('Agent 没有可回滚的上一核心版本',true);if(!confirm(`把期望核心版本改为 ${previous}？Agent 会按 generation 对账并保留当前版本作为下一次回滚目标。`))return;const channel=/(alpha|beta|rc|pre)/i.test(previous)?'alpha':'stable';await action(async()=>{await api('PUT',`/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/desired`,{expected_generation:desired.generation,desired_core_installed:true,core_channel:channel,core_version_constraint:desired.core_version_constraint||'',desired_core_version:previous,desired_runtime_state:desired.desired_runtime_state,desired_integrations:desired.desired_integrations||{}});await refreshActiveRuntime();},'核心回滚目标已保存，等待 Agent 对账');}
+async function createRuntimeJob(type,params){if(!ACTIVE_RUNTIME)return;await action(async()=>{await api('POST',`/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/jobs`,{type,params,deadline_seconds:300,reason:'web runtime console explicit action'});await refreshActiveRuntime();},'一次性任务已创建');}
+async function revokeRuntimeInstance(){if(!ACTIVE_RUNTIME||!confirm('撤销后设备身份、下载和待执行任务立即失效，继续？'))return;await action(async()=>{await api('POST',`/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/revoke`);$('#runtime-detail').classList.add('hidden');ACTIVE_RUNTIME=null;await reloadRuntimeInstances();},'运行实例已撤销');}
+function closeRuntimeStreams(){for(const socket of RUNTIME_STREAMS.values())socket.close();RUNTIME_STREAMS.clear();RUNTIME_LOG_FRAMES=[];RUNTIME_DOCKER_PREVIEW=null;RUNTIME_DOCKER_DESKTOP_PREVIEW=null;}
+function runtimeStreamURL(kind){const scheme=location.protocol==='https:'?'wss:':'ws:';return `${scheme}//${location.host}/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/stream/${kind}`;}
+function openRuntimeStream(kind){if(!ACTIVE_RUNTIME||!['proxies','configs','rules','connections','traffic','memory','logs','docker_preview','docker_desktop_preview'].includes(kind))return;RUNTIME_STREAMS.get(kind)?.close();const socket=new WebSocket(runtimeStreamURL(kind));RUNTIME_STREAMS.set(kind,socket);socket.onmessage=event=>{try{renderRuntimeFrame(JSON.parse(event.data))}catch{notify(`无法解析 ${kind} 运行流`,true)}};socket.onerror=()=>notify(`${kind} 运行流连接失败`,true);socket.onclose=()=>{if(RUNTIME_STREAMS.get(kind)===socket)RUNTIME_STREAMS.delete(kind);};}
+function renderRuntimeFrame(frame){
+  if(frame.kind==='proxies'){
+    const groups=Object.values(frame.data||{}).filter(proxy=>proxy.type==='Selector');
+    $('#runtime-proxy-rows').innerHTML=groups.map(group=>{const members=(group.all||[]).map(name=>{const encodedGroup=encodeURIComponent(group.name),encodedName=encodeURIComponent(name);return `<span class="row" style="display:inline-flex;margin:2px"><strong>${esc(name)}</strong><button onclick="testRuntimeProxy('${encodedGroup}','${encodedName}')">测速</button><button onclick="selectRuntimeProxy('${encodedGroup}','${encodedName}')" ${name===group.now?'disabled':''}>选择</button></span>`;}).join('');return `<tr><td>${esc(group.name)}</td><td><strong>${esc(group.now||'—')}</strong></td><td>${members||'<span class="muted">无成员</span>'}</td></tr>`;}).join('')||'<tr><td colspan="3" class="empty">没有手动 select 策略组</td></tr>';
+    return;
+  }
+  if(frame.kind==='connections'){
+    const data=frame.data||{},connections=data.connections||[];
+    $('#runtime-connection-rows').innerHTML=connections.map(connection=>{const metadata=connection.metadata||{},target=metadata.host||metadata.destinationIP||metadata.destinationIPASN||'—',port=metadata.destinationPort?`:${metadata.destinationPort}`:'';return `<tr><td>${esc(target)}${esc(port)}</td><td>${esc((connection.chains||[]).join(' → ')||'—')}</td><td>↑ ${esc(formatBytes(connection.upload||0))}<br>↓ ${esc(formatBytes(connection.download||0))}</td><td><button class="danger" onclick="closeRuntimeConnection('${encodeURIComponent(connection.id)}')">关闭</button></td></tr>`;}).join('')||'<tr><td colspan="4" class="empty">当前没有连接</td></tr>';
+    return;
+  }
+  if(frame.kind==='traffic'){$('#runtime-traffic').textContent=JSON.stringify(frame.data,null,2);return;}
+  if(frame.kind==='memory'){$('#runtime-memory').textContent=JSON.stringify(frame.data,null,2);return;}
+  if(frame.kind==='configs'){$('#runtime-configs').textContent=JSON.stringify(frame.data,null,2);return;}
+  if(frame.kind==='rules'){$('#runtime-rules').textContent=JSON.stringify(frame.data,null,2);return;}
+  if(frame.kind==='logs'){RUNTIME_LOG_FRAMES.push(JSON.stringify(frame.data));if(RUNTIME_LOG_FRAMES.length>200)RUNTIME_LOG_FRAMES.splice(0,RUNTIME_LOG_FRAMES.length-200);$('#runtime-logs').textContent=RUNTIME_LOG_FRAMES.join('\n');$('#runtime-logs').scrollTop=$('#runtime-logs').scrollHeight;return;}
+  if(frame.kind==='docker_preview'){RUNTIME_DOCKER_PREVIEW=frame.data;$('#runtime-docker-preview').textContent=`${frame.data.warning}\n\nBefore:\n${frame.data.before}\nAfter:\n${frame.data.after}`;$('#runtime-docker-preview').classList.remove('hidden');$('#runtime-docker-confirm').classList.remove('hidden');return;}
+  if(frame.kind==='docker_desktop_preview'){RUNTIME_DOCKER_DESKTOP_PREVIEW=frame.data;$('#runtime-docker-desktop-preview').textContent=`${frame.data.warning}\n\nBefore:\n${frame.data.before}\nAfter:\n${frame.data.after}`;$('#runtime-docker-desktop-preview').classList.remove('hidden');$('#runtime-docker-desktop-confirm').classList.remove('hidden');}
+}
+async function testRuntimeProxy(group,proxy){await createRuntimeJob('test_proxy_delay',{group:decodeURIComponent(group),proxy:decodeURIComponent(proxy),timeout_ms:5000});}
+async function selectRuntimeProxy(group,proxy){group=decodeURIComponent(group);proxy=decodeURIComponent(proxy);if(!confirm(`把 ${group} 显式切换到 ${proxy}？`))return;await createRuntimeJob('select_proxy',{group,proxy});setTimeout(()=>openRuntimeStream('proxies'),1000);}
+async function closeRuntimeConnection(id){id=decodeURIComponent(id);if(!confirm('显式关闭这条当前连接？'))return;await createRuntimeJob('close_connection',{connection_id:id});}
+async function confirmRuntimeDocker(){if(!ACTIVE_RUNTIME||!RUNTIME_DOCKER_PREVIEW)return;const port=ACTIVE_RUNTIME.runtime.observation.proxy_port;if(!port)return notify('当前配置没有可用的本地 HTTP/mixed 代理监听',true);await updateRuntimeDocker({enabled:true,proxy_port:port,no_proxy:[],revision:`web-${Date.now()}`,expected_original_hash:RUNTIME_DOCKER_PREVIEW.original_hash},'Docker Engine 代理期望状态已确认');}
+async function disableRuntimeDocker(){if(!ACTIVE_RUNTIME||!confirm('停用时只恢复 Agent 原先接管的 proxies 值；检测到外部修改会拒绝覆盖。继续？'))return;const port=ACTIVE_RUNTIME.runtime.desired.desired_integrations?.docker_daemon?.proxy_port||ACTIVE_RUNTIME.runtime.observation.proxy_port;if(!port)return notify('缺少原集成使用的代理端口，请先恢复 Agent 状态',true);await updateRuntimeDocker({enabled:false,proxy_port:port,no_proxy:[],revision:`web-${Date.now()}`},'Docker Engine 代理停用请求已保存');}
+async function updateRuntimeDocker(config,message){await action(async()=>{const desired=ACTIVE_RUNTIME.runtime.desired,integrations={...(desired.desired_integrations||{}),docker_daemon:config};await api('PUT',`/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/desired`,{expected_generation:desired.generation,desired_core_installed:desired.desired_core_installed,core_channel:desired.core_channel||'',core_version_constraint:desired.core_version_constraint||'',desired_core_version:desired.desired_core_version||'',desired_runtime_state:desired.desired_runtime_state,desired_integrations:integrations});$('#runtime-docker-confirm').classList.add('hidden');await refreshActiveRuntime();},message);}
+async function confirmRuntimeDockerDesktop(){if(!ACTIVE_RUNTIME||!RUNTIME_DOCKER_DESKTOP_PREVIEW)return;const port=ACTIVE_RUNTIME.runtime.observation.proxy_port;if(!port)return notify('当前配置没有可用的本地 HTTP/mixed 代理监听',true);await updateRuntimeDockerDesktop({enabled:true,proxy_port:port,no_proxy:[],revision:`web-${Date.now()}`,expected_original_hash:RUNTIME_DOCKER_DESKTOP_PREVIEW.original_hash,business_admin_settings:true},'Docker Desktop 代理期望状态已确认');}
+async function disableRuntimeDockerDesktop(){if(!ACTIVE_RUNTIME||!confirm('完整重启 Docker Desktop，并仅恢复 Agent 接管前的 containersProxy 值？'))return;const port=ACTIVE_RUNTIME.runtime.desired.desired_integrations?.docker_desktop?.proxy_port||ACTIVE_RUNTIME.runtime.observation.proxy_port;if(!port)return notify('缺少原集成使用的代理端口，请先恢复 Agent 状态',true);await updateRuntimeDockerDesktop({enabled:false,proxy_port:port,no_proxy:[],revision:`web-${Date.now()}`,business_admin_settings:true},'Docker Desktop 代理停用请求已保存');}
+async function updateRuntimeDockerDesktop(config,message){await action(async()=>{const desired=ACTIVE_RUNTIME.runtime.desired,integrations={...(desired.desired_integrations||{}),docker_desktop:config};await api('PUT',`/api/runtime/instances/${ACTIVE_RUNTIME.runtime.instance.id}/desired`,{expected_generation:desired.generation,desired_core_installed:desired.desired_core_installed,core_channel:desired.core_channel||'',core_version_constraint:desired.core_version_constraint||'',desired_core_version:desired.desired_core_version||'',desired_runtime_state:desired.desired_runtime_state,desired_integrations:integrations});$('#runtime-docker-desktop-confirm').classList.add('hidden');await refreshActiveRuntime();},message);}
 
 function renderSettings(){$('#setting-base').value=SETTINGS.base_url||'';$('#setting-interval').value=SETTINGS.fetch_interval_sec||10800;}
 async function saveSettings(){await action(async()=>{await api('PUT','/api/settings',{base_url:$('#setting-base').value,fetch_interval_sec:Number($('#setting-interval').value)});SETTINGS=await api('GET','/api/settings');renderSettings();renderSubscriptions();},'设置已保存');}
