@@ -1,6 +1,6 @@
 # submux-agent 运行面设计与实现
 
-> 状态：P0–P5 的仓库实现已完成（2026-07-17）。本文同时保留产品决策、威胁模型和验收基线；正式 Release 发布及干净 Linux/Windows 主机验证仍是发布门禁，不改变 submux v4 的编排语义。
+> 状态：P0–P5 的仓库实现与 `v0.2.0` 正式 Release 已完成（2026-07-17）。本文同时保留产品决策、威胁模型和验收基线；干净 Linux/Windows 主机验证仍是发布后验收门禁，不改变 submux v4 的编排语义。
 
 ## 实现状态
 
@@ -463,13 +463,13 @@ submux install                 # 控制面
 submux-agent install           # 某台需要运行代理的主机
 ```
 
-### 当前一键安装脚本审计
+### 一键安装脚本审计与发布结果
 
-当前实现见 [`scripts/install.sh`](../scripts/install.sh)。截至 2026-07-17，GitHub `latest` 仍是 2026-06-28 发布的 [`v0.1.0`](https://github.com/Questrove/submux/releases/tag/v0.1.0)，其中只有旧版 `submux` 二进制。当前 README 中的一键安装命令会直接下载该 Release，而不是仓库 `main` 上已经完成的 v4 产品，因此在发布新版本前不能继续把这条命令当作当前版本的可用安装方式。
+当前实现见 [`scripts/install.sh`](../scripts/install.sh)。实现前的 GitHub `latest` 是 2026-06-28 发布的 [`v0.1.0`](https://github.com/Questrove/submux/releases/tag/v0.1.0)，其中只有旧版 `submux` 二进制，因此当时不能继续把 README 的一键安装命令当作当前产品的可用安装方式。
 
-现有 Release 的 Linux/macOS amd64/arm64 资产名称与初始脚本能够对应，但这只能证明下载路径存在，不能证明内容是当前产品。实现前的脚本审计发现了以下问题：
+2026-07-17 已发布新的 [`v0.2.0`](https://github.com/Questrove/submux/releases/tag/v0.2.0) 正式版本并成为 `latest`。Release 包含控制面 Linux/Windows/macOS 5 个资产、Agent Linux/Windows 4 个资产及 `checksums.txt`；发布流水线成功校验两个 Linux amd64 二进制的版本输出，9 个二进制的 GitHub SHA-256 摘要也已与清单逐项一致。README 已恢复固定 `v0.2.0` 的安装命令。下表保留实现前发现的问题和修复依据：
 
-| 优先级 | 当前问题 | 影响 | 必须采取的修复 |
+| 优先级 | 实现前问题 | 影响 | 必须采取的修复 |
 |---|---|---|---|
 | 阻断 | `latest=v0.1.0`，内容早于当前 v4 | 新用户安装到已经废弃的产品模型 | 先发布包含当前 v4 的新正式版本并验证资产，再恢复 README 一键安装入口 |
 | 阻断 | 下载二进制后不验证 SHA-256 | 下载损坏、资产错配或内容不一致时仍会安装并执行 | Release 生成 checksum manifest；脚本下载并验证目标资产摘要，失败时禁止替换 |
@@ -485,7 +485,7 @@ submux-agent install           # 某台需要运行代理的主机
 | 后续 | 当前脚本只认识 `submux`，没有 Agent 资产与命令边界 | 引入 Agent 后容易把两个不同权限的服务混装 | 保持两个资产和两个 unit；允许分别安装控制面、Agent 或显式选择组合安装 |
 | 后续 | 缺少卸载、升级策略和渠道语义 | 用户难以恢复，也可能误跟 Alpha | 增加 uninstall/upgrade/rollback；stable 默认，Alpha 必须显式选择并在执行前提示 |
 
-仓库实现已修复表中所有代码项：控制面和 Agent 使用独立安装器与 unit，完整解析参数，固定准确版本和渠道，校验 Release `checksums.txt`，在安装目录内 staging 后原子替换，保留上一二进制，并在服务/健康验证失败时恢复；安装器生命周期测试覆盖校验失败、升级、回滚、恶意版本、卸载和状态保留。仍未在仓库内完成的是发布新的正式 Release，以及在干净 Linux amd64/arm64 和 Windows 主机上的发行验收，因此 README 继续要求显式 `--version`，不静默使用旧 `latest`。
+仓库实现已修复表中所有代码项：控制面和 Agent 使用独立安装器与 unit，完整解析参数，固定准确版本和渠道，校验 Release `checksums.txt`，在安装目录内 staging 后原子替换，保留上一二进制，并在服务/健康验证失败时恢复；安装器生命周期测试覆盖校验失败、升级、回滚、恶意版本、卸载和状态保留。正式 Release 与线上资产校验已经完成；剩余外部门禁是在干净 Linux amd64/arm64 和 Windows 主机上的发行验收。README 继续要求显式 `--version`，避免安装行为随 `latest` 漂移。
 
 submux 安装链路采用相同威胁模型：v1 信任 GitHub HTTPS、`Questrove/submux` 仓库及其 Release 发布权限。由同一 Release 工作流生成并发布的 checksum manifest 用于检测下载损坏、资产错配和内容不一致，不声称能够抵御仓库管理员账号、工作流或 Release 发布权限失陷。独立签名和构建 provenance 属于后续安全增强，不阻塞当前发布修复。
 
@@ -493,12 +493,12 @@ submux 安装链路采用相同威胁模型：v1 信任 GitHub HTTPS、`Questrov
 
 安装链路按下面顺序修复，避免“脚本改好了但仍下载旧程序”：
 
-1. 建立当前 v4 的可复现构建和 Release 工作流，生成资产、摘要及版本信息。
-2. 修复 `scripts/install.sh` 的权限处理、参数解析、校验、原子替换、服务重启、健康检查和回滚。
-3. 在干净的 Linux amd64/arm64 环境分别测试首次安装、重复安装、升级、失败回滚、root、sudo 和自定义目录。
-4. 发布新的正式 Release，并确认 `releases/latest`、资产名称、摘要和实际二进制版本一致。
-5. 最后恢复 README 的一键命令；在此之前应标记为暂不可用或改为源码构建说明。
-6. Agent 开发到可交付阶段后，再扩展同一发布流水线，但不让高权限 Agent 安装逻辑隐式附带在控制面安装中。
+1. [x] 建立当前 v4 的可复现构建和 Release 工作流，生成资产、摘要及版本信息。
+2. [x] 修复 `scripts/install.sh` 的权限处理、参数解析、校验、原子替换、服务重启、健康检查和回滚。
+3. [ ] 在干净的 Linux amd64/arm64 环境分别测试首次安装、重复安装、升级、失败回滚、root、sudo 和自定义目录。
+4. [x] 发布 `v0.2.0` 正式 Release，并确认 `releases/latest`、资产名称、摘要和实际二进制版本一致。
+5. [x] 恢复 README 中固定准确版本的安装命令。
+6. [x] 扩展同一发布流水线生成独立 Agent 资产，且不让高权限 Agent 安装逻辑隐式附带在控制面安装中。
 
 修复完成的最低验收命令应覆盖：
 

@@ -46,16 +46,16 @@ SUBMUX_DB=submux.db ./submux
 
 默认监听 `127.0.0.1:8080`。首次打开 <http://127.0.0.1:8080> 设置管理员密码，然后按“来源 → 节点库 → 模板 → 输出订阅”流程创建链接。
 
-当前 GitHub `latest` 仍是旧产品版本；新的正式 Release 发布并验证前，请从源码构建。发布后可用安装器固定准确版本（安装器会验证 Release 的 SHA-256 清单）：
+当前正式版本为 [`v0.2.0`](https://github.com/Questrove/submux/releases/tag/v0.2.0)。安装器固定准确版本并验证 Release 的 SHA-256 清单：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version vX.Y.Z
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v0.2.0
 ```
 
 安装 systemd 服务：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version vX.Y.Z --service
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v0.2.0 --service
 ```
 
 ## 可选 Mihomo Agent
@@ -65,7 +65,7 @@ curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/insta
 Linux amd64/arm64：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.sh | bash -s -- --version vX.Y.Z --service
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.sh | bash -s -- --version v0.2.0 --service
 sudo submux-agent enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
 ```
 
@@ -73,7 +73,7 @@ Windows amd64/arm64（管理员 PowerShell）：
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.ps1 -OutFile .\install-agent.ps1
-.\install-agent.ps1 -Version vX.Y.Z -Service
+.\install-agent.ps1 -Version v0.2.0 -Service
 & "$env:ProgramFiles\Submux\submux-agent.exe" enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
 ```
 
