@@ -52,16 +52,16 @@ SUBMUX_DB=submux.db ./submux
 
 默认监听 `127.0.0.1:8080`。首次打开 <http://127.0.0.1:8080> 设置管理员密码，然后按“来源 → 节点库 → 模板 → 规则 → 输出订阅”流程创建链接。
 
-当前正式版本为 [`v0.3.1`](https://github.com/Questrove/submux/releases/tag/v0.3.1)。安装器固定准确版本并验证 Release 的 SHA-256 清单：
+当前正式版本为 [`v1.0.0`](https://github.com/Questrove/submux/releases/tag/v1.0.0)。安装器固定准确版本并验证 Release 的 SHA-256 清单：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v0.3.1
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.0
 ```
 
 安装 systemd 服务：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v0.3.1 --service
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.0 --service
 ```
 
 ## 可选 Mihomo Agent
@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/insta
 Linux amd64/arm64：
 
 ```sh
-AGENT_VERSION='v0.3.1'
+AGENT_VERSION='v1.0.0'
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.sh | bash -s -- --version "$AGENT_VERSION" --service
 ~/.local/bin/submux-agent enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
 ```
@@ -89,12 +89,12 @@ Windows amd64/arm64（普通 PowerShell）：
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.ps1 -OutFile .\install-agent.ps1
-$AgentVersion = 'v0.3.1'
+$AgentVersion = 'v1.0.0'
 .\install-agent.ps1 -Version $AgentVersion -Service
 & "$env:LOCALAPPDATA\Programs\Submux\submux-agent.exe" enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
 ```
 
-`v0.2.0` 的 Agent 使用旧的 root/Administrator 模型，不能直接原地升级到 `v0.3.1`。升级前请按 [Agent 迁移步骤](docs/AGENT.md#从-v020-迁移) 停止并卸载旧服务，再以普通用户安装和配对新 Agent。
+`v0.2.0` 的 Agent 使用旧的 root/Administrator 模型，不能直接原地升级到 `v1.0.0`。升级前请按 [Agent 迁移步骤](docs/AGENT.md#从-v020-迁移) 停止并卸载旧服务，再以普通用户安装和配对新 Agent。
 
 常用本机恢复入口：
 
