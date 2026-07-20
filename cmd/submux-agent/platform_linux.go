@@ -17,18 +17,26 @@ import (
 )
 
 func defaultPaths() paths {
+	home, _ := os.UserHomeDir()
+	stateRoot := os.Getenv("XDG_STATE_HOME")
+	if stateRoot == "" {
+		stateRoot = filepath.Join(home, ".local", "state")
+	}
+	dataRoot := os.Getenv("XDG_DATA_HOME")
+	if dataRoot == "" {
+		dataRoot = filepath.Join(home, ".local", "share")
+	}
+	runtimeRoot := os.Getenv("XDG_RUNTIME_DIR")
+	if runtimeRoot == "" {
+		runtimeRoot = filepath.Join(stateRoot, "submux-agent", "run")
+	} else {
+		runtimeRoot = filepath.Join(runtimeRoot, "submux-agent")
+	}
+	dataRoot = filepath.Join(dataRoot, "submux-agent")
 	return paths{
-		state:  "/var/lib/submux-agent/agent.db",
-		socket: "/run/submux-agent/agent.sock",
-		config: "/var/lib/submux-agent/mihomo-config",
+		state: filepath.Join(stateRoot, "submux-agent", "agent.db"), socket: filepath.Join(runtimeRoot, "agent.sock"),
+		config: filepath.Join(dataRoot, "mihomo-config"), core: filepath.Join(dataRoot, "mihomo-core"), runtime: filepath.Join(dataRoot, "mihomo-runtime"),
 	}
-}
-
-func requireServicePrivileges() error {
-	if os.Geteuid() != 0 {
-		return errors.New("serve must run as root because submux-agent is a host-level service")
-	}
-	return nil
 }
 
 func prepareAgentStateLocation(path string) error {
@@ -58,16 +66,21 @@ func defaultShell() (string, []string) {
 }
 
 func activateInstalledService() error {
-	const unitPath = "/etc/systemd/system/submux-agent.service"
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	configHome := os.Getenv("XDG_CONFIG_HOME")
+	if configHome == "" {
+		configHome = filepath.Join(home, ".config")
+	}
+	unitPath := filepath.Join(configHome, "systemd", "user", "submux-agent.service")
 	if _, err := os.Stat(unitPath); errors.Is(err, os.ErrNotExist) {
 		return nil
 	} else if err != nil {
 		return err
 	}
-	if os.Geteuid() != 0 {
-		return errors.New("root privileges are required to start submux-agent.service")
-	}
-	output, err := exec.Command("systemctl", "enable", "--now", "submux-agent.service").CombinedOutput()
+	output, err := exec.Command("systemctl", "--user", "enable", "--now", "submux-agent.service").CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		if len(message) > 300 {
@@ -84,10 +97,6 @@ func runAgentService(run func(context.Context) error) error {
 	return run(ctx)
 }
 
-func runPlatformMihomoService() error {
-	return errors.New("mihomo-service is an internal Windows SCM entry point")
-}
-
 func runAgentServiceCommand(args []string) error {
 	if len(args) != 1 {
 		return errors.New("service requires exactly start, stop, status, install or uninstall")
@@ -98,12 +107,9 @@ func runAgentServiceCommand(args []string) error {
 	if args[0] != "start" && args[0] != "stop" && args[0] != "status" {
 		return fmt.Errorf("unknown service command %q", args[0])
 	}
-	if os.Geteuid() != 0 && args[0] != "status" {
-		return errors.New("root privileges are required to start or stop submux-agent.service")
-	}
-	commandArgs := []string{args[0], "submux-agent.service"}
+	commandArgs := []string{"--user", args[0], "submux-agent.service"}
 	if args[0] == "status" {
-		commandArgs = []string{"is-active", "submux-agent.service"}
+		commandArgs = []string{"--user", "is-active", "submux-agent.service"}
 	}
 	output, err := exec.Command("systemctl", commandArgs...).CombinedOutput()
 	message := strings.TrimSpace(string(output))

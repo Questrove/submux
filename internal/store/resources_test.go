@@ -218,8 +218,8 @@ func TestOpenMigratesLegacySourceAndDeletesLegacyOutputState(t *testing.T) {
 	}
 	_ = st.db.View(func(tx *bolt.Tx) error {
 		meta := tx.Bucket([]byte("meta"))
-		if got := string(meta.Get([]byte("schema_version"))); got != "5" {
-			t.Fatalf("schema version = %q, want 5", got)
+		if got := string(meta.Get([]byte("schema_version"))); got != "8" {
+			t.Fatalf("schema version = %q, want 8", got)
 		}
 		if meta.Get([]byte("override")) != nil || meta.Get([]byte("lastgood:clash")) != nil {
 			t.Fatal("legacy global override/artifact keys were preserved")
@@ -283,8 +283,8 @@ func TestOpenMigratesV3OutputStateToV4(t *testing.T) {
 	defer st.Close()
 
 	if err := st.db.View(func(tx *bolt.Tx) error {
-		if got := string(tx.Bucket([]byte("meta")).Get([]byte("schema_version"))); got != "5" {
-			t.Fatalf("schema version = %q, want 5", got)
+		if got := string(tx.Bucket([]byte("meta")).Get([]byte("schema_version"))); got != "8" {
+			t.Fatalf("schema version = %q, want 8", got)
 		}
 		for _, name := range []string{"node_sets", "profiles", "profile_artifacts"} {
 			if tx.Bucket([]byte(name)) != nil {

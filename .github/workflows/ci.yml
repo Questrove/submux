@@ -34,6 +34,7 @@ jobs:
         run: |
           bash -n scripts/install.sh
           bash -n scripts/install-agent.sh
+          bash -n scripts/bootstrap-agent.sh
           bash -n scripts/test-installers.sh
           bash scripts/test-installers.sh
 

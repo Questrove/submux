@@ -7,9 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
-	"runtime"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -19,33 +18,29 @@ import (
 	"submux/internal/agentproto"
 	"submux/internal/agentstate"
 	"submux/internal/hostops"
-	"submux/internal/integration"
 	"submux/internal/mihomo"
 	"submux/internal/store"
 )
 
 var Capabilities = []string{
-	"subscription.update", "mihomo.restart", "mihomo.proxy.delay",
-	"mihomo.proxy.select", "mihomo.connection.close", "mihomo.runtime.observe", "diagnostics.collect",
+	"subscription.manage", "mihomo.core.manage", "mihomo.restart", "mihomo.proxy.delay",
+	"mihomo.proxy.select", "mihomo.connection.close", "mihomo.runtime.observe",
+	"agent.runtime.observe",
+	"mihomo.release.list",
+	"agent.resource.proxy",
 }
 
 func PlatformCapabilities() []string {
-	result := append([]string(nil), Capabilities...)
-	if runtime.GOOS == "linux" {
-		result = append(result, "integration.docker_daemon")
-	} else if runtime.GOOS == "windows" {
-		result = append(result, "integration.docker_desktop")
-	}
-	return result
+	return append([]string(nil), Capabilities...)
 }
 
 type ControlPlane interface {
 	GetState(context.Context) (agentclient.State, error)
 	SendHeartbeat(context.Context, agentclient.Heartbeat) (agentclient.State, error)
 	SendJobStatus(context.Context, string, string, json.RawMessage, string) error
-	CheckArtifact(context.Context, int64, string) (agentclient.Artifact, error)
-	FetchArtifact(context.Context, int64, string) (agentclient.Artifact, error)
 	WatchUpdates(context.Context, func(string)) error
+	FetchRuntimeSecret(context.Context, string) (agentclient.RuntimeSecret, error)
+	FetchPlatformSubscription(context.Context, int64) (agentclient.PlatformSubscription, error)
 }
 
 type MihomoAPI interface {
@@ -77,21 +72,24 @@ type DeploymentApplier interface {
 }
 
 type Daemon struct {
-	State         *agentstate.Store
-	Control       ControlPlane
-	Core          hostops.CoreManager
-	Deployer      DeploymentApplier
-	Mihomo        MihomoAPI
-	Docker        integration.DockerDaemonManager
-	DockerDesktop integration.DockerDesktopManager
-	VerifyRuntime func(context.Context, int) error
-	AgentVersion  string
-	Capabilities  []string
-	PollInterval  time.Duration
-	StartedAt     time.Time
-	Logf          func(string, ...any)
-	mutationMu    sync.Mutex
-	auditMu       sync.Mutex
+	State            *agentstate.Store
+	Control          ControlPlane
+	Core             hostops.CoreManager
+	Deployer         DeploymentApplier
+	Mihomo           MihomoAPI
+	VerifyRuntime    func(context.Context, int) error
+	AgentVersion     string
+	Capabilities     []string
+	PollInterval     time.Duration
+	SubscriptionHTTP *http.Client
+	StartedAt        time.Time
+	Logf             func(string, ...any)
+	Logs             *RuntimeLogBuffer
+	mutationMu       sync.Mutex
+	auditMu          sync.Mutex
+	operationMu      sync.Mutex
+	operation        *store.RuntimeOperation
+	progressWake     chan struct{}
 }
 
 func (d *Daemon) Run(ctx context.Context) error {
@@ -107,27 +105,29 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.Logf == nil {
 		d.Logf = log.Printf
 	}
+	if d.Logs == nil {
+		d.Logs = NewRuntimeLogBuffer()
+	}
+	baseLogf := d.Logf
+	d.Logf = func(format string, args ...any) {
+		d.Logs.Printf(format, args...)
+		baseLogf(format, args...)
+	}
+	d.progressWake = make(chan struct{}, 1)
+	if core, ok := d.Core.(hostops.ResourceProxyController); ok {
+		core.SetProgressReporter(d.handleCoreProgress)
+	}
+	go d.progressHeartbeatLoop(ctx)
 	if _, err := d.State.RecoverInterruptedJobs(); err != nil {
 		return err
 	}
 	d.reportUnreported(ctx)
 	d.FlushLocalAudits(ctx)
-	trigger := make(chan bool, 1)
-	notify := func(reason string) {
-		urgent := reason != "poll"
+	trigger := make(chan struct{}, 1)
+	notify := func(string) {
 		select {
-		case trigger <- urgent:
+		case trigger <- struct{}{}:
 		default:
-			if urgent {
-				select {
-				case <-trigger:
-				default:
-				}
-				select {
-				case trigger <- true:
-				default:
-				}
-			}
 		}
 	}
 	go d.watchUpdates(ctx, notify)
@@ -140,8 +140,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			notify("poll")
-		case ignoreCheckInterval := <-trigger:
-			if err := d.syncSerialized(ctx, ignoreCheckInterval); err != nil {
+		case <-trigger:
+			if err := d.syncSerialized(ctx); err != nil {
 				d.Logf("agent sync: %v", err)
 			}
 		}
@@ -204,47 +204,11 @@ func (d *Daemon) serveRuntimeStream(parent context.Context, session, kind string
 }
 
 func (d *Daemon) produceRuntimeStream(ctx context.Context, kind string, send func(json.RawMessage) error) error {
-	if kind == "docker_preview" {
-		if d.Docker == nil {
-			return errors.New("Docker daemon integration is unavailable")
+	if kind == "agent_logs" {
+		if d.Logs == nil {
+			return errors.New("Agent runtime logs are unavailable")
 		}
-		runtimeState, err := d.State.Runtime()
-		if err != nil {
-			return err
-		}
-		if err := validateDockerProxyRuntime(runtimeState); err != nil {
-			return err
-		}
-		preview, err := d.Docker.Preview(ctx, integration.DockerDaemonConfig{Enabled: true, ProxyPort: runtimeState.ProxyPort})
-		if err != nil {
-			return err
-		}
-		frame, err := json.Marshal(map[string]any{"kind": kind, "data": preview})
-		if err != nil {
-			return err
-		}
-		return send(frame)
-	}
-	if kind == "docker_desktop_preview" {
-		if d.DockerDesktop == nil {
-			return errors.New("Docker Desktop integration is unavailable")
-		}
-		runtimeState, err := d.State.Runtime()
-		if err != nil {
-			return err
-		}
-		if err := validateDockerProxyRuntime(runtimeState); err != nil {
-			return err
-		}
-		preview, err := d.DockerDesktop.Preview(ctx, integration.DockerDesktopConfig{Enabled: true, ProxyPort: runtimeState.ProxyPort, BusinessAdminSettings: true})
-		if err != nil {
-			return err
-		}
-		frame, err := json.Marshal(map[string]any{"kind": kind, "data": preview})
-		if err != nil {
-			return err
-		}
-		return send(frame)
+		return d.Logs.Stream(ctx, send)
 	}
 	source, ok := d.Mihomo.(MihomoStreamSource)
 	if !ok {
@@ -262,237 +226,174 @@ func parseRuntimeStreamReason(reason string) (string, string, bool) {
 		return "", "", false
 	}
 	switch parts[2] {
-	case "proxies", "configs", "rules", "connections", "traffic", "memory", "logs", "docker_preview", "docker_desktop_preview":
+	case "proxies", "configs", "rules", "connections", "traffic", "memory", "logs", "agent_logs":
 		return parts[1], parts[2], true
 	default:
 		return "", "", false
 	}
 }
 
-// SyncOnce serializes every host mutation: desired reconciliation, artifact
-// deployment, and typed one-shot jobs all run in this single call path.
+// SyncOnce serializes host observation and typed one-shot jobs. The Agent
+// never changes Mihomo merely because the control plane stores a target state.
 func (d *Daemon) SyncOnce(ctx context.Context) error {
-	return d.syncSerialized(ctx, false)
+	return d.syncSerialized(ctx)
 }
 
-func (d *Daemon) syncSerialized(ctx context.Context, ignoreCheckInterval bool) error {
+func (d *Daemon) syncSerialized(ctx context.Context) error {
 	d.mutationMu.Lock()
 	defer d.mutationMu.Unlock()
-	return d.syncOnce(ctx, ignoreCheckInterval)
+	return d.syncOnce(ctx)
 }
 
-func (d *Daemon) syncOnce(ctx context.Context, ignoreCheckInterval bool) error {
+func (d *Daemon) syncOnce(ctx context.Context) error {
 	state, err := d.Control.GetState(ctx)
 	if err != nil {
 		return err
 	}
 	d.reportUnreported(ctx)
 	d.FlushLocalAudits(ctx)
-	var deployment *store.Deployment
-	var syncError error
-	if err := d.reconcileCore(ctx, state.Desired); err != nil {
-		syncError = fmt.Errorf("reconcile core: %w", err)
-	}
-	if syncError == nil && state.Binding != nil {
-		if value, err := d.checkSubscription(ctx, *state.Binding, false, ignoreCheckInterval, agentproto.ActorScheduler, randomRequestID()); err != nil {
-			syncError = fmt.Errorf("check subscription: %w", err)
-			deployment = value
-		} else {
-			deployment = value
-		}
-	}
-	if syncError == nil {
-		if err := d.reconcileRuntime(ctx, state.Desired, state.Binding != nil); err != nil {
-			syncError = fmt.Errorf("reconcile runtime: %w", err)
-		}
-	}
-	if syncError == nil {
-		if err := d.reconcileIntegrations(ctx, state.Desired); err != nil {
-			syncError = fmt.Errorf("reconcile integrations: %w", err)
-		}
-	}
-	if syncError == nil {
-		_, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-			runtime.ObservedGeneration = state.Desired.Generation
-			runtime.RecentError = ""
-			return nil
-		})
-		if err != nil {
-			syncError = err
-		}
-	} else {
-		_, _ = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-			runtime.RecentError = safeOperationError(syncError)
-			return nil
-		})
-	}
+	observationErr := d.refreshCoreStatus(ctx)
 	for _, job := range state.Jobs {
-		d.processJob(ctx, job.Job, state.Binding)
+		d.processJob(ctx, job.Job)
 	}
-	heartbeatErr := d.heartbeat(ctx, deployment)
-	if syncError != nil {
-		return syncError
+	if err := d.refreshCoreStatus(ctx); err != nil {
+		observationErr = errors.Join(observationErr, err)
 	}
-	return heartbeatErr
+	return errors.Join(observationErr, d.heartbeat(ctx))
 }
 
-func (d *Daemon) reconcileIntegrations(ctx context.Context, desired store.RuntimeDesiredState) error {
-	raw, configured := desired.Integrations[integration.DockerDaemonType]
-	if configured {
-		if err := d.reconcileDockerDaemon(ctx, raw); err != nil {
-			return err
-		}
+func (d *Daemon) beginJobOperation(job agentproto.Job) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	d.operationMu.Lock()
+	d.operation = &store.RuntimeOperation{
+		RequestID: job.RequestID, JobID: job.ID, Kind: job.Type,
+		Phase: "accepted", Status: "running", StartedAt: now, UpdatedAt: now,
 	}
-	desktopRaw, desktopConfigured := desired.Integrations[integration.DockerDesktopType]
-	if desktopConfigured {
-		if err := d.reconcileDockerDesktop(ctx, desktopRaw); err != nil {
-			return err
-		}
-	}
-	return nil
+	d.operationMu.Unlock()
+	d.writeRuntimeLog("accepted %s job %s", job.Type, job.ID)
+	d.signalProgress()
 }
 
-func (d *Daemon) reconcileDockerDaemon(ctx context.Context, raw json.RawMessage) error {
-	if d.Docker == nil {
-		return errors.New("Docker daemon integration is not supported by this Agent")
-	}
-	var config integration.DockerDaemonConfig
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&config); err != nil {
-		return errors.New("desired Docker daemon integration is invalid")
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("desired Docker daemon integration contains trailing data")
-	}
-	if err := config.Validate(); err != nil {
+func (d *Daemon) configureResourceProxy(proxy agentproto.ResourceProxy) error {
+	proxy = agentproto.NormalizeResourceProxy(proxy)
+	if err := agentproto.ValidateResourceProxy(proxy); err != nil {
 		return err
 	}
-	if config.Enabled {
-		runtimeState, err := d.State.Runtime()
-		if err != nil {
-			return err
-		}
-		if err := validateDockerProxyRuntime(runtimeState); err != nil || config.ProxyPort != runtimeState.ProxyPort {
-			return errors.New("Docker daemon integration must use the running Agent-managed HTTP or mixed proxy listener")
-		}
+	controller, supported := d.Core.(hostops.ResourceProxyController)
+	if proxy.Mode == agentproto.ResourceProxyCustom && !supported {
+		return errors.New("this Agent does not support a custom resource proxy")
 	}
-	status, err := d.Docker.Status(ctx)
-	if err != nil {
-		return err
-	}
-	if config.Enabled {
-		preview, err := d.Docker.Preview(ctx, config)
-		if err != nil {
-			return err
+	if supported {
+		proxyURL := ""
+		if proxy.Mode == agentproto.ResourceProxyCustom {
+			proxyURL = proxy.URL
 		}
-		if status.State != "active" && config.ExpectedOriginalHash != "" && preview.OriginalHash != config.ExpectedOriginalHash {
-			return errors.New("Docker daemon configuration changed after the administrator preview")
-		}
-		if status.State == "active" && status.AppliedHash != preview.DesiredHash {
-			return errors.New("disable the active Docker daemon integration before changing its settings")
-		}
-		if status.State != "active" {
-			status, err = d.Docker.Enable(ctx, config, preview.OriginalHash)
-			if err != nil {
-				return err
-			}
-		}
-	} else if status.State != "disabled" {
-		status, err = d.Docker.Disable(ctx)
-		if err != nil {
+		if err := controller.SetResourceProxy(proxyURL); err != nil {
 			return err
 		}
 	}
-	statusRaw, _ := json.Marshal(status)
-	_, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-		runtime.Integrations[integration.DockerDaemonType] = statusRaw
+	_, err := d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+		runtime.ResourceProxyMode, runtime.ResourceProxyURL = proxy.Mode, proxy.URL
 		return nil
 	})
 	return err
 }
 
-func (d *Daemon) reconcileDockerDesktop(ctx context.Context, raw json.RawMessage) error {
-	if d.DockerDesktop == nil {
-		return errors.New("Docker Desktop integration is not supported by this Agent")
+func (d *Daemon) setOperationPhase(phase string, completed, total int64) {
+	if phase == "" {
+		return
 	}
-	var config integration.DockerDesktopConfig
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&config); err != nil {
-		return errors.New("desired Docker Desktop integration is invalid")
+	d.operationMu.Lock()
+	if d.operation == nil || d.operation.Status != "running" {
+		d.operationMu.Unlock()
+		return
 	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("desired Docker Desktop integration contains trailing data")
+	changed := d.operation.Phase != phase
+	d.operation.Phase = phase
+	d.operation.BytesCompleted = completed
+	d.operation.BytesTotal = total
+	d.operation.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	d.operationMu.Unlock()
+	if changed {
+		d.writeRuntimeLog("operation entered phase %s", phase)
 	}
-	if err := config.Validate(); err != nil {
-		return err
+	d.signalProgress()
+}
+
+func (d *Daemon) handleCoreProgress(progress hostops.CoreProgress) {
+	d.setOperationPhase(progress.Phase, progress.BytesCompleted, progress.BytesTotal)
+}
+
+func (d *Daemon) finishOperation(operationErr error) {
+	d.operationMu.Lock()
+	if d.operation == nil {
+		d.operationMu.Unlock()
+		return
 	}
-	if config.Enabled {
-		runtimeState, err := d.State.Runtime()
-		if err != nil {
-			return err
-		}
-		if err := validateDockerProxyRuntime(runtimeState); err != nil || config.ProxyPort != runtimeState.ProxyPort {
-			return errors.New("Docker Desktop integration must use the running Agent-managed HTTP or mixed proxy listener")
-		}
+	now := time.Now().UTC().Format(time.RFC3339)
+	d.operation.UpdatedAt, d.operation.FinishedAt = now, now
+	if operationErr == nil {
+		d.operation.Status, d.operation.Phase = "succeeded", "completed"
+	} else {
+		d.operation.Status, d.operation.Phase = "failed", "failed"
+		d.operation.Error = safeOperationError(operationErr)
 	}
-	status, err := d.DockerDesktop.Status(ctx)
-	if err != nil {
-		return err
-	}
-	if config.Enabled {
-		preview, err := d.DockerDesktop.Preview(ctx, config)
-		if err != nil {
-			return err
-		}
-		if status.State != "active" && config.ExpectedOriginalHash != "" && preview.OriginalHash != config.ExpectedOriginalHash {
-			return errors.New("Docker Desktop settings changed after the administrator preview")
-		}
-		if status.State == "active" && status.AppliedHash != preview.DesiredHash {
-			return errors.New("disable the active Docker Desktop integration before changing its settings")
-		}
-		if status.State != "active" {
-			status, err = d.DockerDesktop.Enable(ctx, config, preview.OriginalHash)
-			if err != nil {
-				return err
-			}
-		}
-	} else if status.State != "disabled" {
-		status, err = d.DockerDesktop.Disable(ctx)
-		if err != nil {
-			return err
-		}
-	}
-	statusRaw, _ := json.Marshal(status)
-	_, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-		runtime.Integrations[integration.DockerDesktopType] = statusRaw
+	result, kind := d.operation.Status, d.operation.Kind
+	d.operationMu.Unlock()
+	d.writeRuntimeLog("%s operation %s", kind, result)
+	d.signalProgress()
+}
+
+func (d *Daemon) currentOperation() *store.RuntimeOperation {
+	d.operationMu.Lock()
+	defer d.operationMu.Unlock()
+	if d.operation == nil {
 		return nil
-	})
-	return err
+	}
+	copyOperation := *d.operation
+	return &copyOperation
 }
 
-func validateDockerProxyRuntime(runtimeState agentstate.Runtime) error {
-	if runtimeState.CoreStatus != "running" || runtimeState.ProxyPort < 1 || (runtimeState.ProxyKind != "mixed" && runtimeState.ProxyKind != "http") {
-		return errors.New("a running Agent-managed HTTP or mixed proxy listener is required")
+func (d *Daemon) signalProgress() {
+	if d.progressWake == nil {
+		return
 	}
-	return nil
+	select {
+	case d.progressWake <- struct{}{}:
+	default:
+	}
 }
 
-func (d *Daemon) CheckSubscriptionNow(ctx context.Context, apply bool) (*store.Deployment, error) {
-	d.mutationMu.Lock()
-	defer d.mutationMu.Unlock()
-	state, err := d.Control.GetState(ctx)
-	if err != nil {
-		return nil, err
+func (d *Daemon) writeRuntimeLog(format string, args ...any) {
+	if d.Logf != nil {
+		d.Logf(format, args...)
+		return
 	}
-	if state.Binding == nil {
-		return nil, errors.New("runtime instance has no binding")
+	if d.Logs != nil {
+		d.Logs.Printf(format, args...)
 	}
-	if err := d.reconcileCore(ctx, state.Desired); err != nil {
-		return nil, err
+}
+
+func (d *Daemon) progressHeartbeatLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-d.progressWake:
+			timer := time.NewTimer(150 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			reportCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := d.heartbeat(reportCtx); err != nil && ctx.Err() == nil {
+				d.Logf("report Agent operation progress: %v", err)
+			}
+			cancel()
+		}
 	}
-	return d.checkSubscription(ctx, *state.Binding, apply, true, agentproto.ActorLocalCLI, randomRequestID())
 }
 
 func (d *Daemon) InstallCoreNow(ctx context.Context, channel, version string) error {
@@ -517,15 +418,20 @@ func (d *Daemon) RollbackCoreNow(ctx context.Context) error {
 }
 
 func (d *Daemon) refreshCoreStatus(ctx context.Context) error {
+	_, err := d.observeCoreStatus(ctx)
+	return err
+}
+
+func (d *Daemon) observeCoreStatus(ctx context.Context) (hostops.CoreStatus, error) {
 	status, err := d.Core.Status(ctx)
 	if err != nil {
-		return err
+		return status, err
 	}
 	_, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
 		runtime.CoreStatus, runtime.CoreVersion, runtime.PreviousCoreVersion = status.State, status.Version, status.PreviousVersion
 		return nil
 	})
-	return err
+	return status, err
 }
 
 func (d *Daemon) RollbackConfigNow(ctx context.Context) error {
@@ -535,181 +441,24 @@ func (d *Daemon) RollbackConfigNow(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	activeSubscriptionID := ""
+	if subscriptions, listErr := d.State.ListRuntimeSubscriptions(); listErr == nil {
+		for _, subscription := range subscriptions {
+			if subscription.Revision == result.Revision {
+				activeSubscriptionID = subscription.ID
+				break
+			}
+		}
+	}
 	_, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
 		runtime.AppliedRevision = result.Revision
+		runtime.ActiveSubscriptionID = activeSubscriptionID
 		runtime.LastGoodRevision = result.PreviousRevision
 		runtime.ProxyPort, runtime.ProxyKind = result.ProxyPort, result.ProxyKind
 		runtime.RejectedRevision, runtime.RecentError = "", ""
 		return nil
 	})
 	return err
-}
-
-func (d *Daemon) reconcileCore(ctx context.Context, desired store.RuntimeDesiredState) error {
-	status, err := d.Core.Status(ctx)
-	if err != nil {
-		return err
-	}
-	if !desired.CoreInstalled {
-		if status.Installed {
-			if err := d.Core.Uninstall(ctx); err != nil {
-				return err
-			}
-		}
-		_, err := d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-			runtime.CoreStatus, runtime.CoreVersion, runtime.PreviousCoreVersion = "not_installed", "", ""
-			return nil
-		})
-		return err
-	}
-	if !status.Installed || status.Version != desired.CoreVersion {
-		if err := d.Core.Install(ctx, desired.CoreChannel, desired.CoreVersion); err != nil {
-			return err
-		}
-		status, err = d.Core.Status(ctx)
-		if err != nil {
-			return err
-		}
-	}
-	_, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-		runtime.CoreStatus, runtime.CoreVersion, runtime.PreviousCoreVersion = status.State, status.Version, status.PreviousVersion
-		return nil
-	})
-	return err
-}
-
-func (d *Daemon) reconcileRuntime(ctx context.Context, desired store.RuntimeDesiredState, hasBinding bool) error {
-	status, err := d.Core.Status(ctx)
-	if err != nil {
-		return err
-	}
-	if !desired.CoreInstalled {
-		return nil
-	}
-	switch desired.RuntimeState {
-	case store.RuntimeRunning:
-		if !hasBinding {
-			return errors.New("cannot start Mihomo without an Agent-compatible runtime binding")
-		}
-		runtimeState, err := d.State.Runtime()
-		if err != nil {
-			return err
-		}
-		if runtimeState.AppliedRevision == "" {
-			return errors.New("cannot start Mihomo without a locally verified applied configuration")
-		}
-		if status.State != "running" {
-			if err := d.Core.Start(ctx); err != nil {
-				return err
-			}
-		}
-	case store.RuntimeStopped:
-		if status.State == "running" || status.State == "failed" {
-			if err := d.Core.Stop(ctx); err != nil {
-				return err
-			}
-		}
-	default:
-		return errors.New("unknown desired runtime state")
-	}
-	status, err = d.Core.Status(ctx)
-	if err == nil && desired.RuntimeState == store.RuntimeRunning && status.State == "running" && d.VerifyRuntime != nil {
-		runtimeState, stateErr := d.State.Runtime()
-		if stateErr != nil {
-			err = stateErr
-		} else {
-			err = d.VerifyRuntime(ctx, runtimeState.ProxyPort)
-		}
-	}
-	if err == nil {
-		_, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-			runtime.CoreStatus, runtime.CoreVersion, runtime.PreviousCoreVersion = status.State, status.Version, status.PreviousVersion
-			return nil
-		})
-	}
-	return err
-}
-
-func (d *Daemon) checkSubscription(ctx context.Context, binding store.RuntimeBinding, explicitApply, ignoreCheckInterval bool, actorType, requestID string) (*store.Deployment, error) {
-	runtimeState, err := d.State.Runtime()
-	if err != nil {
-		return nil, err
-	}
-	if runtimeState.BindingID != binding.ID {
-		runtimeState, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-			runtime.BindingID, runtime.ArtifactETag, runtime.RemoteRevision, runtime.RejectedRevision = binding.ID, "", "", ""
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !ignoreCheckInterval && runtimeState.LastCheckAt != "" {
-		lastCheck, _ := time.Parse(time.RFC3339, runtimeState.LastCheckAt)
-		if time.Since(lastCheck) < time.Duration(binding.CheckIntervalSec)*time.Second {
-			return nil, nil
-		}
-	}
-	checkETag := runtimeState.ArtifactETag
-	if explicitApply {
-		checkETag = ""
-	}
-	metadata, err := d.Control.CheckArtifact(ctx, binding.ID, checkETag)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	if metadata.NotModified {
-		_, err := d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error { runtime.LastCheckAt = now; return nil })
-		return nil, err
-	}
-	runtimeState, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-		runtime.RemoteRevision, runtime.ArtifactETag, runtime.LastCheckAt = metadata.Revision, metadata.ETag, now
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if !explicitApply && !binding.AutoUpdate {
-		return nil, nil
-	}
-	if !explicitApply && runtimeState.RejectedRevision == metadata.Revision {
-		return nil, nil
-	}
-	artifact, err := d.Control.FetchArtifact(ctx, binding.ID, "")
-	if err != nil {
-		return nil, err
-	}
-	if artifact.ContentType != "application/yaml" && artifact.ContentType != "text/yaml" && artifact.ContentType != "application/x-yaml" {
-		return nil, errors.New("bound artifact is not a Mihomo YAML document")
-	}
-	result, applyErr := d.Deployer.Apply(ctx, artifact.Revision, artifact.SHA256, artifact.Body)
-	deployment := &store.Deployment{
-		ActorType: actorType, RequestID: requestID,
-		RemoteRevision: result.Revision, PreviousRevision: result.PreviousRevision,
-		ArtifactHash: result.ArtifactHash, EffectiveHash: result.EffectiveHash,
-		MihomoVersion: runtimeState.CoreVersion,
-		Status:        result.Status, Validation: result.Validation, Error: result.Error,
-	}
-	if applyErr != nil {
-		_, _ = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-			runtime.RejectedRevision, runtime.RecentError = artifact.Revision, safeOperationError(applyErr)
-			if result.RolledBack {
-				runtime.LastGoodRevision = ""
-			}
-			return nil
-		})
-		return deployment, applyErr
-	}
-	selectionNotice := d.restoreProxySelections(ctx)
-	_, err = d.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-		runtime.AppliedRevision, runtime.RemoteRevision, runtime.ArtifactETag = artifact.Revision, artifact.Revision, artifact.ETag
-		runtime.RejectedRevision, runtime.LastUpdateAt, runtime.RecentError = "", now, ""
-		runtime.LastGoodRevision, runtime.SelectionNotice = result.PreviousRevision, selectionNotice
-		runtime.ProxyPort, runtime.ProxyKind = result.ProxyPort, result.ProxyKind
-		return nil
-	})
-	return deployment, err
 }
 
 func (d *Daemon) restoreProxySelections(ctx context.Context) string {
@@ -777,7 +526,7 @@ func randomRequestID() string {
 	return hex.EncodeToString(value)
 }
 
-func (d *Daemon) processJob(ctx context.Context, job agentproto.Job, binding *store.RuntimeBinding) {
+func (d *Daemon) processJob(ctx context.Context, job agentproto.Job) {
 	now := time.Now().UTC()
 	if err := agentproto.ValidateJob(job, d.capabilities(), now); err != nil {
 		record, _ := d.State.SaveUnstartedJob(job, agentproto.JobFailed, "job failed strict local validation")
@@ -794,8 +543,10 @@ func (d *Daemon) processJob(ctx context.Context, job agentproto.Job, binding *st
 		}
 		return
 	}
+	d.beginJobOperation(job)
 	_ = d.Control.SendJobStatus(ctx, job.ID, agentproto.JobRunning, nil, "")
-	result, runErr := d.executeJob(ctx, job, binding)
+	result, runErr := d.executeJob(ctx, job)
+	d.finishOperation(runErr)
 	status, safeError := agentproto.JobSucceeded, ""
 	if runErr != nil {
 		status, safeError = agentproto.JobFailed, safeOperationError(runErr)
@@ -807,20 +558,211 @@ func (d *Daemon) processJob(ctx context.Context, job agentproto.Job, binding *st
 	}
 }
 
-func (d *Daemon) executeJob(ctx context.Context, job agentproto.Job, binding *store.RuntimeBinding) (json.RawMessage, error) {
+func (d *Daemon) executeJob(ctx context.Context, job agentproto.Job) (json.RawMessage, error) {
 	switch job.Type {
-	case agentproto.JobUpdateSubscription:
-		if binding == nil {
-			return nil, errors.New("runtime instance has no binding")
+	case agentproto.JobAddRuntimeSubscription:
+		var params agentproto.AddRuntimeSubscriptionParams
+		_ = json.Unmarshal(job.Params, &params)
+		d.setOperationPhase("downloading_subscription", 0, 0)
+		value := agentstate.RuntimeSubscription{ID: randomRequestID(), Name: strings.TrimSpace(params.Name)}
+		var err error
+		if params.PlatformSubscriptionID > 0 {
+			value.PlatformSubscriptionID, value.Host = params.PlatformSubscriptionID, "平台订阅"
+		} else {
+			subscriptionURL, consumeErr := d.consumeSubscriptionURL(ctx, params.SecretRef)
+			if consumeErr != nil {
+				return nil, consumeErr
+			}
+			parsed, _ := validateAgentSubscriptionURL(subscriptionURL)
+			value.URL, value.Host = subscriptionURL, parsed.Hostname()
 		}
-		deployment, err := d.checkSubscription(ctx, *binding, true, true, job.ActorType, job.RequestID)
+		value, err = d.fetchRuntimeSubscription(ctx, value)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := d.State.SaveRuntimeSubscription(value); err != nil {
+			return nil, err
+		}
 		runtimeState, _ := d.State.Runtime()
-		status := "active"
-		if deployment != nil {
-			status = deployment.Status
+		return marshalResult(agentproto.RuntimeSubscriptionResult{Subscription: runtimeSubscriptionSummary(value, runtimeState.ActiveSubscriptionID), Status: "saved"}), nil
+	case agentproto.JobEditRuntimeSubscription:
+		var params agentproto.EditRuntimeSubscriptionParams
+		_ = json.Unmarshal(job.Params, &params)
+		value, err := d.State.RuntimeSubscription(params.ID)
+		if err != nil {
+			return nil, err
 		}
-		return marshalResult(agentproto.UpdateSubscriptionResult{RemoteRevision: runtimeState.RemoteRevision, AppliedRevision: runtimeState.AppliedRevision, RejectedRevision: runtimeState.RejectedRevision, Status: status}), err
+		value.Name = strings.TrimSpace(params.Name)
+		sourceChanged := params.SecretRef != "" || params.PlatformSubscriptionID > 0
+		if sourceChanged {
+			d.setOperationPhase("downloading_subscription", 0, 0)
+			if params.PlatformSubscriptionID > 0 {
+				value.URL, value.ETag, value.LastModified = "", "", ""
+				value.PlatformSubscriptionID, value.Host = params.PlatformSubscriptionID, "平台订阅"
+			} else {
+				subscriptionURL, consumeErr := d.consumeSubscriptionURL(ctx, params.SecretRef)
+				if consumeErr != nil {
+					return nil, consumeErr
+				}
+				parsed, _ := validateAgentSubscriptionURL(subscriptionURL)
+				value.URL, value.Host, value.ETag, value.LastModified = subscriptionURL, parsed.Hostname(), "", ""
+				value.PlatformSubscriptionID = 0
+			}
+			value, err = d.fetchRuntimeSubscription(ctx, value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		value, err = d.State.SaveRuntimeSubscription(value)
+		if err != nil {
+			return nil, err
+		}
+		runtimeState, _ := d.State.Runtime()
+		status := "saved"
+		if sourceChanged && runtimeState.ActiveSubscriptionID == value.ID {
+			if err := d.applyRuntimeSubscription(ctx, value); err != nil {
+				d.saveSubscriptionFetchError(value, err)
+				return nil, err
+			}
+			status = "active"
+			runtimeState, _ = d.State.Runtime()
+		}
+		return marshalResult(agentproto.RuntimeSubscriptionResult{Subscription: runtimeSubscriptionSummary(value, runtimeState.ActiveSubscriptionID), Status: status}), nil
+	case agentproto.JobRefreshRuntimeSubscription:
+		var params agentproto.RuntimeSubscriptionIDParams
+		_ = json.Unmarshal(job.Params, &params)
+		value, err := d.State.RuntimeSubscription(params.ID)
+		if err != nil {
+			return nil, err
+		}
+		d.setOperationPhase("downloading_subscription", 0, 0)
+		value, err = d.fetchRuntimeSubscription(ctx, value)
+		if err != nil {
+			d.saveSubscriptionFetchError(value, err)
+			return nil, err
+		}
+		value, err = d.State.SaveRuntimeSubscription(value)
+		if err != nil {
+			return nil, err
+		}
+		runtimeState, _ := d.State.Runtime()
+		status := "refreshed"
+		if runtimeState.ActiveSubscriptionID == value.ID {
+			if err := d.applyRuntimeSubscription(ctx, value); err != nil {
+				d.saveSubscriptionFetchError(value, err)
+				return nil, err
+			}
+			status = "active"
+			runtimeState, _ = d.State.Runtime()
+		}
+		return marshalResult(agentproto.RuntimeSubscriptionResult{Subscription: runtimeSubscriptionSummary(value, runtimeState.ActiveSubscriptionID), Status: status}), nil
+	case agentproto.JobActivateRuntimeSubscription:
+		var params agentproto.RuntimeSubscriptionIDParams
+		_ = json.Unmarshal(job.Params, &params)
+		value, err := d.State.RuntimeSubscription(params.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(value.Config) == 0 {
+			d.setOperationPhase("downloading_subscription", 0, 0)
+			value, err = d.fetchRuntimeSubscription(ctx, value)
+			if err != nil {
+				d.saveSubscriptionFetchError(value, err)
+				return nil, err
+			}
+			if value, err = d.State.SaveRuntimeSubscription(value); err != nil {
+				return nil, err
+			}
+		}
+		if err := d.applyRuntimeSubscription(ctx, value); err != nil {
+			d.saveSubscriptionFetchError(value, err)
+			return nil, err
+		}
+		value.LastError = ""
+		value, _ = d.State.SaveRuntimeSubscription(value)
+		return marshalResult(agentproto.RuntimeSubscriptionResult{Subscription: runtimeSubscriptionSummary(value, value.ID), Status: "active"}), nil
+	case agentproto.JobDeleteRuntimeSubscription:
+		var params agentproto.RuntimeSubscriptionIDParams
+		_ = json.Unmarshal(job.Params, &params)
+		runtimeState, err := d.State.Runtime()
+		if err != nil {
+			return nil, err
+		}
+		if runtimeState.ActiveSubscriptionID == params.ID {
+			return nil, errors.New("cannot delete the subscription currently used by Mihomo")
+		}
+		if err := d.State.DeleteRuntimeSubscription(params.ID); err != nil {
+			return nil, err
+		}
+		return marshalResult(agentproto.DeleteRuntimeSubscriptionResult{ID: params.ID, Deleted: true}), nil
+	case agentproto.JobConfigureResourceProxy:
+		var params agentproto.ConfigureResourceProxyParams
+		_ = json.Unmarshal(job.Params, &params)
+		d.setOperationPhase("configuring_resource_proxy", 0, 0)
+		if err := d.configureResourceProxy(params.ResourceProxy); err != nil {
+			return nil, err
+		}
+		return marshalResult(agentproto.ConfigureResourceProxyResult{ResourceProxy: agentproto.NormalizeResourceProxy(params.ResourceProxy)}), nil
+	case agentproto.JobListCoreVersions:
+		var params agentproto.ListCoreVersionsParams
+		_ = json.Unmarshal(job.Params, &params)
+		lister, ok := d.Core.(hostops.CoreVersionLister)
+		if !ok {
+			return nil, errors.New("this Agent cannot list Mihomo releases")
+		}
+		d.setOperationPhase("listing_releases", 0, 0)
+		versions, err := lister.ListCoreVersions(ctx, params.Channel, 30)
+		if err != nil {
+			return nil, err
+		}
+		return marshalResult(agentproto.ListCoreVersionsResult{Channel: params.Channel, Versions: versions}), nil
+	case agentproto.JobInstallCore:
+		var params agentproto.InstallCoreParams
+		_ = json.Unmarshal(job.Params, &params)
+		d.setOperationPhase("installing_core", 0, 0)
+		if err := d.Core.Install(ctx, params.Channel, params.Version); err != nil {
+			return nil, err
+		}
+		return d.coreOperationResult(ctx)
+	case agentproto.JobUninstallCore:
+		d.setOperationPhase("uninstalling_core", 0, 0)
+		if err := d.Core.Uninstall(ctx); err != nil {
+			return nil, err
+		}
+		return d.coreOperationResult(ctx)
+	case agentproto.JobStartCore:
+		runtimeState, err := d.State.Runtime()
+		if err != nil {
+			return nil, err
+		}
+		if runtimeState.AppliedRevision == "" {
+			return nil, errors.New("cannot start Mihomo without a locally verified applied configuration")
+		}
+		d.setOperationPhase("starting_core", 0, 0)
+		if err := d.Core.Start(ctx); err != nil {
+			return nil, err
+		}
+		if d.VerifyRuntime != nil {
+			d.setOperationPhase("verifying_runtime", 0, 0)
+			if err := d.VerifyRuntime(ctx, runtimeState.ProxyPort); err != nil {
+				return nil, err
+			}
+		}
+		return d.coreOperationResult(ctx)
+	case agentproto.JobStopCore:
+		d.setOperationPhase("stopping_core", 0, 0)
+		if err := d.Core.Stop(ctx); err != nil {
+			return nil, err
+		}
+		return d.coreOperationResult(ctx)
+	case agentproto.JobRollbackCore:
+		d.setOperationPhase("rolling_back_core", 0, 0)
+		if err := d.Core.RollbackCore(ctx); err != nil {
+			return nil, err
+		}
+		return d.coreOperationResult(ctx)
 	case agentproto.JobRestartCore:
+		d.setOperationPhase("restarting_core", 0, 0)
 		if err := d.Core.Restart(ctx); err != nil {
 			return nil, err
 		}
@@ -853,19 +795,22 @@ func (d *Daemon) executeJob(ctx context.Context, job agentproto.Job, binding *st
 			return nil, err
 		}
 		return marshalResult(agentproto.CloseConnectionResult{ConnectionID: params.ConnectionID, Closed: true}), nil
-	case agentproto.JobCollectDiagnostics:
-		status, err := d.Core.Status(ctx)
-		checkStatus, message := "ok", status.State
-		if err != nil {
-			checkStatus, message = "failed", "core status unavailable"
-		}
-		return marshalResult(agentproto.CollectDiagnosticsResult{Checks: []agentproto.DiagnosticCheck{{Name: "mihomo_service", Status: checkStatus, Message: message}}}), nil
 	default:
 		return nil, errors.New("unsupported job type")
 	}
 }
 
-func (d *Daemon) heartbeat(ctx context.Context, deployment *store.Deployment) error {
+func (d *Daemon) coreOperationResult(ctx context.Context) (json.RawMessage, error) {
+	status, err := d.observeCoreStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return marshalResult(agentproto.CoreOperationResult{
+		CoreStatus: status.State, CoreVersion: status.Version, PreviousCoreVersion: status.PreviousVersion,
+	}), nil
+}
+
+func (d *Daemon) heartbeat(ctx context.Context) error {
 	runtimeState, err := d.State.Runtime()
 	if err != nil {
 		return err
@@ -881,22 +826,25 @@ func (d *Daemon) heartbeat(ctx context.Context, deployment *store.Deployment) er
 			uptime = 0
 		}
 	}
+	subscriptions, activeSubscriptionID, err := d.runtimeSubscriptionSummaries()
+	if err != nil {
+		return err
+	}
 	_, err = d.Control.SendHeartbeat(ctx, agentclient.Heartbeat{
 		AgentVersion: d.AgentVersion, Capabilities: d.capabilities(), Status: status,
 		Observation: store.RuntimeObservation{
-			ObservedGeneration: runtimeState.ObservedGeneration,
-			RemoteRevision:     runtimeState.RemoteRevision, AppliedRevision: runtimeState.AppliedRevision,
+			RemoteRevision: runtimeState.RemoteRevision, AppliedRevision: runtimeState.AppliedRevision,
 			RejectedRevision: runtimeState.RejectedRevision, UpdateAvailable: runtimeState.RemoteRevision != "" && runtimeState.RemoteRevision != runtimeState.AppliedRevision,
-			LastCheckAt: runtimeState.LastCheckAt, LastUpdateAt: runtimeState.LastUpdateAt,
-			CoreVersion: runtimeState.CoreVersion, PreviousCoreVersion: runtimeState.PreviousCoreVersion, CoreStatus: runtimeState.CoreStatus,
+			LastUpdateAt: runtimeState.LastUpdateAt,
+			CoreVersion:  runtimeState.CoreVersion, PreviousCoreVersion: runtimeState.PreviousCoreVersion, CoreStatus: runtimeState.CoreStatus,
 			AgentUptimeSeconds: uptime,
 			ProxyListening:     runtimeState.CoreStatus == "running" && runtimeState.ProxyPort > 0, RecentError: runtimeState.RecentError,
 			ProxyPort: runtimeState.ProxyPort, ProxyKind: runtimeState.ProxyKind, ControllerPort: runtimeState.ControllerPort,
+			ResourceProxyMode: runtimeState.ResourceProxyMode, ResourceProxyURL: runtimeState.ResourceProxyURL, Operation: d.currentOperation(),
 			SelectedProxies: runtimeState.SelectedProxies, SelectionNotice: runtimeState.SelectionNotice,
-			LastGoodRevision: runtimeState.LastGoodRevision,
-			Integrations:     runtimeState.Integrations,
+			LastGoodRevision:     runtimeState.LastGoodRevision,
+			ActiveSubscriptionID: activeSubscriptionID, Subscriptions: subscriptions,
 		},
-		Deployment: deployment,
 	})
 	return err
 }
@@ -958,8 +906,24 @@ func safeOperationError(err error) string {
 	}
 	message := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(message, "mihomo startup timed out"):
+		return "Mihomo startup timed out"
+	case strings.Contains(message, "runtime secret"):
+		return "subscription address expired or unavailable"
+	case strings.Contains(message, "subscription") && (strings.Contains(message, "deadline exceeded") || strings.Contains(message, "client.timeout") || strings.Contains(message, "timeout")):
+		return "subscription download timed out"
+	case strings.Contains(message, "subscription") && !strings.Contains(message, "config"):
+		return "subscription download failed"
+	case strings.Contains(message, "socks5") || strings.Contains(message, "proxyconnect") || strings.Contains(message, "resource proxy"):
+		return "Agent resource proxy connection failed"
+	case strings.Contains(message, "release list"):
+		return "Mihomo official release list failed"
+	case strings.Contains(message, "deadline exceeded") || strings.Contains(message, "client.timeout") || strings.Contains(message, "timeout"):
+		return "Mihomo release download timed out"
 	case strings.Contains(message, "checksum") || strings.Contains(message, "sha-256"):
 		return "integrity verification failed"
+	case strings.Contains(message, "official release") || strings.Contains(message, "official asset"):
+		return "Mihomo official release download failed"
 	case strings.Contains(message, "validate") || strings.Contains(message, "config"):
 		return "configuration validation or activation failed"
 	case strings.Contains(message, "version") || strings.Contains(message, "install"):

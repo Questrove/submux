@@ -25,6 +25,7 @@ type Source struct {
 	LifecyclePolicy  string   `json:"lifecycle_policy,omitempty"`
 	WarnBeforeDays   int      `json:"warn_before_days,omitempty"`
 	TrustNodeNotices bool     `json:"trust_node_notices,omitempty"`
+	FetchMode        string   `json:"fetch_mode,omitempty"`
 	CreatedAt        string   `json:"created_at"` // RFC3339 UTC
 	UpdatedAt        string   `json:"updated_at"`
 }
@@ -34,6 +35,8 @@ const (
 	SourceKindManual       = "manual"
 	LifecycleContinuity    = "continuity"
 	LifecycleStrict        = "strict"
+	SourceFetchDirectOnly  = "direct_only"
+	SourceFetchProxyBackup = "direct_then_platform_proxy"
 )
 
 // SubscriptionMetadata is the last successfully observed entitlement data.
@@ -63,12 +66,15 @@ type NodeNotice struct {
 
 // Cache 是单个源的拉取缓存。
 type Cache struct {
-	SourceID      int64                `json:"source_id"`
-	UserinfoJSON  string               `json:"userinfo_json,omitempty"`
-	Metadata      SubscriptionMetadata `json:"metadata,omitempty"`
-	LastSuccessAt string               `json:"last_success_at,omitempty"`
-	LastError     string               `json:"last_error,omitempty"`
-	UpdatedAt     string               `json:"updated_at"`
+	SourceID         int64                `json:"source_id"`
+	UserinfoJSON     string               `json:"userinfo_json,omitempty"`
+	Metadata         SubscriptionMetadata `json:"metadata,omitempty"`
+	LastSuccessAt    string               `json:"last_success_at,omitempty"`
+	LastError        string               `json:"last_error,omitempty"`
+	LastSuccessRoute string               `json:"last_success_route,omitempty"`
+	LastDirectError  string               `json:"last_direct_error,omitempty"`
+	LastProxyError   string               `json:"last_proxy_error,omitempty"`
+	UpdatedAt        string               `json:"updated_at"`
 }
 
 type Store struct {
@@ -78,8 +84,10 @@ type Store struct {
 var bucketNames = []string{
 	"settings", "sources", "source_cache", "meta",
 	"nodes", "templates", "template_versions", "subscriptions", "subscription_artifacts", "token_index", "lifecycle_events",
-	"runtime_instances", "runtime_bindings", "runtime_desired_states", "runtime_observations",
-	"agent_jobs", "deployments", "integration_states", "audit_events", "agent_enrollments",
+	"rule_profiles",
+	"rule_catalog_snapshots",
+	"runtime_instances", "runtime_observations",
+	"agent_jobs", "audit_events", "agent_enrollments",
 }
 
 func Open(path string) (*Store, error) {
@@ -116,7 +124,22 @@ func Open(path string) (*Store, error) {
 		if version == "4" {
 			version = "5"
 		}
-		if version != "5" {
+		if version == "5" {
+			if e := migrateV6(tx); e != nil {
+				return e
+			}
+			version = "6"
+		}
+		if version == "6" {
+			version = "7"
+		}
+		if version == "7" {
+			if e := migrateV8(tx); e != nil {
+				return e
+			}
+			version = "8"
+		}
+		if version != "8" {
 			return fmt.Errorf("unsupported database schema version %q", version)
 		}
 		if string(meta.Get([]byte("schema_version"))) != version {
@@ -131,6 +154,204 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func migrateV8(tx *bolt.Tx) error {
+	if err := rewriteJSONBucket(tx.Bucket([]byte("runtime_observations")), func(value map[string]json.RawMessage) bool {
+		changed := false
+		for _, pair := range [][2]string{{"download_proxy_mode", "resource_proxy_mode"}, {"download_proxy_url", "resource_proxy_url"}} {
+			if raw, ok := value[pair[0]]; ok {
+				if _, exists := value[pair[1]]; !exists {
+					value[pair[1]] = raw
+				}
+				delete(value, pair[0])
+				changed = true
+			}
+		}
+		return changed
+	}); err != nil {
+		return err
+	}
+	if err := rewriteJSONBucket(tx.Bucket([]byte("runtime_instances")), func(value map[string]json.RawMessage) bool {
+		var capabilities []string
+		if err := json.Unmarshal(value["capabilities"], &capabilities); err != nil {
+			return false
+		}
+		changed := false
+		normalized := make([]string, 0, len(capabilities))
+		seen := make(map[string]bool, len(capabilities))
+		for _, capability := range capabilities {
+			if capability == "mihomo.release.proxy" {
+				capability, changed = "agent.resource.proxy", true
+			}
+			if seen[capability] {
+				changed = true
+				continue
+			}
+			seen[capability] = true
+			normalized = append(normalized, capability)
+		}
+		if changed {
+			value["capabilities"], _ = json.Marshal(normalized)
+		}
+		return changed
+	}); err != nil {
+		return err
+	}
+	return rewriteJSONBucket(tx.Bucket([]byte("agent_jobs")), func(value map[string]json.RawMessage) bool {
+		var jobType string
+		_ = json.Unmarshal(value["type"], &jobType)
+		if jobType != "configure_download_proxy" {
+			return false
+		}
+		value["type"], _ = json.Marshal("configure_resource_proxy")
+		for _, field := range []string{"params", "result"} {
+			var object map[string]json.RawMessage
+			if err := json.Unmarshal(value[field], &object); err != nil {
+				continue
+			}
+			if raw, ok := object["download_proxy"]; ok {
+				if _, exists := object["resource_proxy"]; !exists {
+					object["resource_proxy"] = raw
+				}
+				delete(object, "download_proxy")
+				value[field], _ = json.Marshal(object)
+			}
+		}
+		return true
+	})
+}
+
+// v6 removes the abandoned control-plane binding/artifact flow. Runtime
+// subscriptions now live entirely on the Agent and are changed only through
+// typed one-shot jobs.
+func migrateV6(tx *bolt.Tx) error {
+	for _, name := range []string{"runtime_bindings", "runtime_desired_states", "deployments", "integration_states"} {
+		if tx.Bucket([]byte(name)) != nil {
+			if err := tx.DeleteBucket([]byte(name)); err != nil {
+				return err
+			}
+		}
+	}
+	if err := rewriteJSONBucket(tx.Bucket([]byte("template_versions")), func(value map[string]json.RawMessage) bool {
+		_, changed := value["runtime_contract"]
+		delete(value, "runtime_contract")
+		return changed
+	}); err != nil {
+		return err
+	}
+	if err := rewriteJSONBucket(tx.Bucket([]byte("runtime_observations")), func(value map[string]json.RawMessage) bool {
+		changed := false
+		for _, field := range []string{"last_check_at", "integrations"} {
+			if _, exists := value[field]; exists {
+				delete(value, field)
+				changed = true
+			}
+		}
+		return changed
+	}); err != nil {
+		return err
+	}
+	if err := rewriteJSONBucket(tx.Bucket([]byte("runtime_instances")), func(value map[string]json.RawMessage) bool {
+		raw, exists := value["capabilities"]
+		if !exists {
+			return false
+		}
+		var capabilities []string
+		if err := json.Unmarshal(raw, &capabilities); err != nil {
+			return false
+		}
+		filtered := capabilities[:0]
+		for _, capability := range capabilities {
+			if capability != "subscription.update" && capability != "diagnostics.collect" {
+				filtered = append(filtered, capability)
+			}
+		}
+		if len(filtered) == len(capabilities) {
+			return false
+		}
+		value["capabilities"], _ = json.Marshal(filtered)
+		return true
+	}); err != nil {
+		return err
+	}
+	jobs := tx.Bucket([]byte("agent_jobs"))
+	var staleJobs [][]byte
+	if err := jobs.ForEach(func(key, raw []byte) error {
+		var value struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if value.Type == "update_subscription" || value.Type == "collect_diagnostics" {
+			staleJobs = append(staleJobs, append([]byte(nil), key...))
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, key := range staleJobs {
+		if err := jobs.Delete(key); err != nil {
+			return err
+		}
+	}
+	audit := tx.Bucket([]byte("audit_events"))
+	var staleAudit [][]byte
+	if err := audit.ForEach(func(key, raw []byte) error {
+		var value struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if strings.HasPrefix(value.Action, "job.update_subscription.") || strings.HasPrefix(value.Action, "job.collect_diagnostics.") || strings.HasPrefix(value.Action, "runtime.binding.") {
+			staleAudit = append(staleAudit, append([]byte(nil), key...))
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, key := range staleAudit {
+		if err := audit.Delete(key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rewriteJSONBucket(bucket *bolt.Bucket, transform func(map[string]json.RawMessage) bool) error {
+	if bucket == nil {
+		return nil
+	}
+	type update struct {
+		key []byte
+		raw []byte
+	}
+	var updates []update
+	if err := bucket.ForEach(func(key, raw []byte) error {
+		var value map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if !transform(value) {
+			return nil
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return err
+		}
+		updates = append(updates, update{key: append([]byte(nil), key...), raw: encoded})
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, item := range updates {
+		if err := bucket.Put(item.key, item.raw); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // v4 replaces the internal NodeSet/Profile split with output subscriptions

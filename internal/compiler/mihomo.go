@@ -89,6 +89,11 @@ func compileMihomo(value resolvedSubscription) ([]byte, error) {
 		}
 		group["proxies"] = uniqueStrings(append(current, names...))
 	}
+	if value.RuleProfile != nil {
+		if err := applyMihomoRuleProfileWithCatalog(root, *value.RuleProfile, value.RuleCatalog); err != nil {
+			return nil, fmt.Errorf("apply rule profile: %w", err)
+		}
+	}
 	if err := validateMihomoReferences(root, proxyNames, groupNames); err != nil {
 		return nil, err
 	}

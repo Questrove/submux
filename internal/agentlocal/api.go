@@ -20,12 +20,10 @@ import (
 )
 
 type API struct {
-	State         *agentstate.Store
-	Core          hostops.CoreManager
-	Daemon        *agent.Daemon
-	Docker        integration.DockerDaemonManager
-	DockerDesktop integration.DockerDesktopManager
-	Stop          func()
+	State  *agentstate.Store
+	Core   hostops.CoreManager
+	Daemon *agent.Daemon
+	Stop   func()
 }
 
 func (a *API) Handler() http.Handler {
@@ -42,19 +40,9 @@ func (a *API) Handler() http.Handler {
 	router.Post("/v1/mihomo/install", a.installCore)
 	router.Post("/v1/mihomo/restart", a.restartCore)
 	router.Post("/v1/mihomo/rollback", a.rollbackCore)
-	router.Post("/v1/subscription/check", a.checkSubscription)
-	router.Post("/v1/subscription/update", a.updateSubscription)
 	router.Post("/v1/subscription/rollback", a.rollbackSubscription)
 	router.Post("/v1/unenroll", a.unenroll)
 	router.Get("/v1/proxy/env/{format}", a.proxyEnvironment)
-	router.Get("/v1/proxy/docker/status", a.dockerStatus)
-	router.Post("/v1/proxy/docker/preview", a.dockerPreview)
-	router.Post("/v1/proxy/docker/enable", a.dockerEnable)
-	router.Post("/v1/proxy/docker/disable", a.dockerDisable)
-	router.Get("/v1/proxy/docker-desktop/status", a.dockerDesktopStatus)
-	router.Post("/v1/proxy/docker-desktop/preview", a.dockerDesktopPreview)
-	router.Post("/v1/proxy/docker-desktop/enable", a.dockerDesktopEnable)
-	router.Post("/v1/proxy/docker-desktop/disable", a.dockerDesktopDisable)
 	return router
 }
 
@@ -103,230 +91,6 @@ func (a *API) recordAudit(_ context.Context, action, revision, result, summary s
 			a.Daemon.FlushLocalAudits(ctx)
 		}()
 	}
-}
-
-func (a *API) saveIntegrationObservation(kind string, status integration.DockerStatus) {
-	raw, err := json.Marshal(status)
-	if err != nil {
-		return
-	}
-	_, _ = a.State.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-		runtime.Integrations[kind] = raw
-		return nil
-	})
-}
-
-func (a *API) dockerDesktopStatus(w http.ResponseWriter, r *http.Request) {
-	if a.DockerDesktop == nil {
-		http.Error(w, "Docker Desktop integration is unavailable", http.StatusNotImplemented)
-		return
-	}
-	status, err := a.DockerDesktop.Status(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, status)
-}
-
-func (a *API) dockerDesktopPreview(w http.ResponseWriter, r *http.Request) {
-	if a.DockerDesktop == nil {
-		http.Error(w, "Docker Desktop integration is unavailable", http.StatusNotImplemented)
-		return
-	}
-	config, ok := a.decodeDockerDesktopConfig(w, r)
-	if !ok {
-		return
-	}
-	preview, err := a.DockerDesktop.Preview(r.Context(), config)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, preview)
-}
-
-func (a *API) dockerDesktopEnable(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		ProxyPort            int      `json:"proxy_port"`
-		NoProxy              []string `json:"no_proxy,omitempty"`
-		ExpectedOriginalHash string   `json:"expected_original_hash"`
-	}
-	if a.DockerDesktop == nil {
-		http.Error(w, "Docker Desktop integration is unavailable", http.StatusNotImplemented)
-		return
-	}
-	if err := decodeJSON(r, &body); err != nil || body.ExpectedOriginalHash == "" {
-		http.Error(w, "a confirmed preview hash and valid Docker Desktop proxy config are required", http.StatusBadRequest)
-		return
-	}
-	if err := a.validateDockerProxyPort(body.ProxyPort); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	config := integration.DockerDesktopConfig{Enabled: true, ProxyPort: body.ProxyPort, NoProxy: body.NoProxy, BusinessAdminSettings: true}
-	status, err := a.DockerDesktop.Enable(r.Context(), config, body.ExpectedOriginalHash)
-	if err != nil {
-		a.recordAudit(r.Context(), "integration.docker_desktop.enable", "", "failed", "Docker Desktop proxy activation failed")
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	a.saveIntegrationObservation(integration.DockerDesktopType, status)
-	a.recordAudit(r.Context(), "integration.docker_desktop.enable", "", "succeeded", "Docker Desktop proxy activated from a confirmed preview")
-	writeJSON(w, status)
-}
-
-func (a *API) dockerDesktopDisable(w http.ResponseWriter, r *http.Request) {
-	if a.DockerDesktop == nil {
-		http.Error(w, "Docker Desktop integration is unavailable", http.StatusNotImplemented)
-		return
-	}
-	if err := decodeEmpty(r); err != nil {
-		http.Error(w, "request body must be empty JSON", http.StatusBadRequest)
-		return
-	}
-	status, err := a.DockerDesktop.Disable(r.Context())
-	if err != nil {
-		a.recordAudit(r.Context(), "integration.docker_desktop.disable", "", "failed", "Docker Desktop proxy restore failed")
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	a.saveIntegrationObservation(integration.DockerDesktopType, status)
-	a.recordAudit(r.Context(), "integration.docker_desktop.disable", "", "succeeded", "Docker Desktop proxy fields restored")
-	writeJSON(w, status)
-}
-
-func (a *API) decodeDockerDesktopConfig(w http.ResponseWriter, r *http.Request) (integration.DockerDesktopConfig, bool) {
-	var body struct {
-		ProxyPort int      `json:"proxy_port"`
-		NoProxy   []string `json:"no_proxy,omitempty"`
-	}
-	if err := decodeJSON(r, &body); err != nil {
-		http.Error(w, "invalid Docker Desktop proxy config", http.StatusBadRequest)
-		return integration.DockerDesktopConfig{}, false
-	}
-	config := integration.DockerDesktopConfig{Enabled: true, ProxyPort: body.ProxyPort, NoProxy: body.NoProxy, BusinessAdminSettings: true}
-	if err := config.Validate(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return integration.DockerDesktopConfig{}, false
-	}
-	if err := a.validateDockerProxyPort(config.ProxyPort); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return integration.DockerDesktopConfig{}, false
-	}
-	return config, true
-}
-
-func (a *API) dockerStatus(w http.ResponseWriter, r *http.Request) {
-	if a.Docker == nil {
-		http.Error(w, "Docker daemon integration is unavailable", http.StatusNotImplemented)
-		return
-	}
-	status, err := a.Docker.Status(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, status)
-}
-
-func (a *API) dockerPreview(w http.ResponseWriter, r *http.Request) {
-	if a.Docker == nil {
-		http.Error(w, "Docker daemon integration is unavailable", http.StatusNotImplemented)
-		return
-	}
-	config, ok := a.decodeDockerConfig(w, r)
-	if !ok {
-		return
-	}
-	preview, err := a.Docker.Preview(r.Context(), config)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, preview)
-}
-
-func (a *API) dockerEnable(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		ProxyPort            int      `json:"proxy_port"`
-		NoProxy              []string `json:"no_proxy,omitempty"`
-		ExpectedOriginalHash string   `json:"expected_original_hash"`
-	}
-	if a.Docker == nil {
-		http.Error(w, "Docker daemon integration is unavailable", http.StatusNotImplemented)
-		return
-	}
-	if err := decodeJSON(r, &body); err != nil || body.ExpectedOriginalHash == "" {
-		http.Error(w, "a confirmed preview hash and valid Docker proxy config are required", http.StatusBadRequest)
-		return
-	}
-	if err := a.validateDockerProxyPort(body.ProxyPort); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	config := integration.DockerDaemonConfig{Enabled: true, ProxyPort: body.ProxyPort, NoProxy: body.NoProxy}
-	status, err := a.Docker.Enable(r.Context(), config, body.ExpectedOriginalHash)
-	if err != nil {
-		a.recordAudit(r.Context(), "integration.docker_daemon.enable", "", "failed", "Docker Engine proxy activation failed")
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	a.saveIntegrationObservation(integration.DockerDaemonType, status)
-	a.recordAudit(r.Context(), "integration.docker_daemon.enable", "", "succeeded", "Docker Engine proxy activated from a confirmed preview")
-	writeJSON(w, status)
-}
-
-func (a *API) dockerDisable(w http.ResponseWriter, r *http.Request) {
-	if a.Docker == nil {
-		http.Error(w, "Docker daemon integration is unavailable", http.StatusNotImplemented)
-		return
-	}
-	if err := decodeEmpty(r); err != nil {
-		http.Error(w, "request body must be empty JSON", http.StatusBadRequest)
-		return
-	}
-	status, err := a.Docker.Disable(r.Context())
-	if err != nil {
-		a.recordAudit(r.Context(), "integration.docker_daemon.disable", "", "failed", "Docker Engine proxy restore failed")
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	a.saveIntegrationObservation(integration.DockerDaemonType, status)
-	a.recordAudit(r.Context(), "integration.docker_daemon.disable", "", "succeeded", "Docker Engine proxy fields restored")
-	writeJSON(w, status)
-}
-
-func (a *API) decodeDockerConfig(w http.ResponseWriter, r *http.Request) (integration.DockerDaemonConfig, bool) {
-	var body struct {
-		ProxyPort int      `json:"proxy_port"`
-		NoProxy   []string `json:"no_proxy,omitempty"`
-	}
-	if err := decodeJSON(r, &body); err != nil {
-		http.Error(w, "invalid Docker daemon proxy config", http.StatusBadRequest)
-		return integration.DockerDaemonConfig{}, false
-	}
-	config := integration.DockerDaemonConfig{Enabled: true, ProxyPort: body.ProxyPort, NoProxy: body.NoProxy}
-	if err := config.Validate(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return integration.DockerDaemonConfig{}, false
-	}
-	if err := a.validateDockerProxyPort(config.ProxyPort); err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return integration.DockerDaemonConfig{}, false
-	}
-	return config, true
-}
-
-func (a *API) validateDockerProxyPort(port int) error {
-	runtimeState, err := a.State.Runtime()
-	if err != nil {
-		return errors.New("Agent runtime state is unavailable")
-	}
-	if runtimeState.CoreStatus != "running" || runtimeState.ProxyPort != port || (runtimeState.ProxyKind != "mixed" && runtimeState.ProxyKind != "http") {
-		return errors.New("Docker integration requires the running Agent-managed HTTP or mixed proxy listener")
-	}
-	return nil
 }
 
 func (a *API) status(w http.ResponseWriter, r *http.Request) {
@@ -422,38 +186,6 @@ func (a *API) rollbackCore(w http.ResponseWriter, r *http.Request) {
 	}
 	a.recordAudit(r.Context(), "mihomo.rollback", "", "succeeded", "Mihomo core rolled back to the managed previous version")
 	writeJSON(w, map[string]bool{"ok": true})
-}
-
-func (a *API) checkSubscription(w http.ResponseWriter, r *http.Request) {
-	if err := decodeEmpty(r); err != nil {
-		http.Error(w, "request body must be empty JSON", http.StatusBadRequest)
-		return
-	}
-	deployment, err := a.Daemon.CheckSubscriptionNow(r.Context(), false)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true, "deployment": deployment})
-}
-
-func (a *API) updateSubscription(w http.ResponseWriter, r *http.Request) {
-	if err := decodeEmpty(r); err != nil {
-		http.Error(w, "request body must be empty JSON", http.StatusBadRequest)
-		return
-	}
-	deployment, err := a.Daemon.CheckSubscriptionNow(r.Context(), true)
-	if err != nil {
-		a.recordAudit(r.Context(), "subscription.update", "", "failed", "bound current artifact update failed")
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	revision := ""
-	if deployment != nil {
-		revision = deployment.RemoteRevision
-	}
-	a.recordAudit(r.Context(), "subscription.update", revision, "succeeded", "bound current artifact explicitly applied")
-	writeJSON(w, map[string]any{"ok": true, "deployment": deployment})
 }
 
 func (a *API) rollbackSubscription(w http.ResponseWriter, r *http.Request) {

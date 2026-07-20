@@ -52,15 +52,14 @@ type Template struct {
 }
 
 type TemplateVersion struct {
-	ID              int64          `json:"id"`
-	TemplateID      int64          `json:"template_id"`
-	Version         int            `json:"version"`
-	EngineVersion   string         `json:"engine_version,omitempty"`
-	RuntimeContract string         `json:"runtime_contract,omitempty"`
-	Content         string         `json:"content"`
-	Slots           []TemplateSlot `json:"slots"`
-	Checksum        string         `json:"checksum"`
-	PublishedAt     string         `json:"published_at"`
+	ID            int64          `json:"id"`
+	TemplateID    int64          `json:"template_id"`
+	Version       int            `json:"version"`
+	EngineVersion string         `json:"engine_version,omitempty"`
+	Content       string         `json:"content"`
+	Slots         []TemplateSlot `json:"slots"`
+	Checksum      string         `json:"checksum"`
+	PublishedAt   string         `json:"published_at"`
 }
 
 func (s *Store) ReplaceSourceNodes(sourceID int64, incoming []NodeRecord) error {
@@ -504,10 +503,6 @@ func (s *Store) DeleteTemplate(id int64) error {
 }
 
 func (s *Store) PublishTemplateVersion(templateID int64, engineVersion, content string, slots []TemplateSlot) (TemplateVersion, error) {
-	return s.PublishTemplateVersionWithContract(templateID, engineVersion, "", content, slots)
-}
-
-func (s *Store) PublishTemplateVersionWithContract(templateID int64, engineVersion, runtimeContract, content string, slots []TemplateSlot) (TemplateVersion, error) {
 	var result TemplateVersion
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		tb := tx.Bucket([]byte("templates"))
@@ -537,8 +532,8 @@ func (s *Store) PublishTemplateVersionWithContract(templateID int64, engineVersi
 		if err != nil {
 			return err
 		}
-		sum := sha256.Sum256([]byte(content + "\x00" + mustJSON(slots) + "\x00" + runtimeContract))
-		result = TemplateVersion{ID: int64(seq), TemplateID: templateID, Version: version, EngineVersion: engineVersion, RuntimeContract: runtimeContract, Content: content, Slots: slots, Checksum: hex.EncodeToString(sum[:]), PublishedAt: nowRFC3339()}
+		sum := sha256.Sum256([]byte(content + "\x00" + mustJSON(slots)))
+		result = TemplateVersion{ID: int64(seq), TemplateID: templateID, Version: version, EngineVersion: engineVersion, Content: content, Slots: slots, Checksum: hex.EncodeToString(sum[:]), PublishedAt: nowRFC3339()}
 		if err := putJSON(versions, itob(result.ID), result); err != nil {
 			return err
 		}
@@ -551,10 +546,6 @@ func (s *Store) PublishTemplateVersionWithContract(templateID int64, engineVersi
 // OverwriteTemplateVersionForDevelopment is a pre-release escape hatch used
 // only by built-in catalog migrations. Normal template APIs remain append-only.
 func (s *Store) OverwriteTemplateVersionForDevelopment(id int64, engineVersion, content string, slots []TemplateSlot) (TemplateVersion, error) {
-	return s.OverwriteTemplateVersionForDevelopmentWithContract(id, engineVersion, "", content, slots)
-}
-
-func (s *Store) OverwriteTemplateVersionForDevelopmentWithContract(id int64, engineVersion, runtimeContract, content string, slots []TemplateSlot) (TemplateVersion, error) {
 	var result TemplateVersion
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		versions := tx.Bucket([]byte("template_versions"))
@@ -565,9 +556,8 @@ func (s *Store) OverwriteTemplateVersionForDevelopmentWithContract(id int64, eng
 		if err := json.Unmarshal(raw, &result); err != nil {
 			return err
 		}
-		sum := sha256.Sum256([]byte(content + "\x00" + mustJSON(slots) + "\x00" + runtimeContract))
+		sum := sha256.Sum256([]byte(content + "\x00" + mustJSON(slots)))
 		result.EngineVersion = engineVersion
-		result.RuntimeContract = runtimeContract
 		result.Content = content
 		result.Slots = slots
 		result.Checksum = hex.EncodeToString(sum[:])

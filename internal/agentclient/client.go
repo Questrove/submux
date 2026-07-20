@@ -45,10 +45,8 @@ type EnrollmentResponse struct {
 }
 
 type State struct {
-	ProtocolVersion int                       `json:"protocol_version"`
-	Desired         store.RuntimeDesiredState `json:"desired"`
-	Binding         *store.RuntimeBinding     `json:"binding,omitempty"`
-	Jobs            []store.AgentJob          `json:"jobs"`
+	ProtocolVersion int              `json:"protocol_version"`
+	Jobs            []store.AgentJob `json:"jobs"`
 }
 
 type Heartbeat struct {
@@ -56,7 +54,6 @@ type Heartbeat struct {
 	Capabilities []string                 `json:"capabilities"`
 	Status       string                   `json:"status"`
 	Observation  store.RuntimeObservation `json:"observation"`
-	Deployment   *store.Deployment        `json:"deployment,omitempty"`
 }
 
 type LocalAudit struct {
@@ -67,13 +64,15 @@ type LocalAudit struct {
 	Summary   string `json:"summary,omitempty"`
 }
 
-type Artifact struct {
+type RuntimeSecret struct {
+	Kind  string `json:"kind"`
+	Value string `json:"value"`
+}
+
+type PlatformSubscription struct {
 	Body        []byte
-	Revision    string
-	SHA256      string
-	ETag        string
 	ContentType string
-	NotModified bool
+	Revision    string
 }
 
 func Enroll(ctx context.Context, httpClient *http.Client, serverURL string, request EnrollmentRequest) (EnrollmentResponse, error) {
@@ -147,53 +146,49 @@ func (c *Client) RevokeSelf(ctx context.Context) error {
 	return c.doJSON(ctx, http.MethodPost, "/api/agent/revoke-self", struct{}{}, nil)
 }
 
-func (c *Client) CheckArtifact(ctx context.Context, bindingID int64, etag string) (Artifact, error) {
-	return c.artifact(ctx, http.MethodHead, bindingID, etag)
-}
-
-func (c *Client) FetchArtifact(ctx context.Context, bindingID int64, etag string) (Artifact, error) {
-	return c.artifact(ctx, http.MethodGet, bindingID, etag)
-}
-
-func (c *Client) artifact(ctx context.Context, method string, bindingID int64, etag string) (Artifact, error) {
-	path := "/api/agent/bindings/" + strconv.FormatInt(bindingID, 10) + "/artifact"
-	request, err := c.signedRequest(ctx, method, path, nil)
-	if err != nil {
-		return Artifact{}, err
+func (c *Client) FetchRuntimeSecret(ctx context.Context, ref string) (RuntimeSecret, error) {
+	var result RuntimeSecret
+	if err := c.doJSON(ctx, http.MethodPost, "/api/agent/secrets/"+url.PathEscape(ref), struct{}{}, &result); err != nil {
+		return result, err
 	}
-	if etag != "" {
-		request.Header.Set("If-None-Match", etag)
-	}
-	response, err := c.httpClient().Do(request)
-	if err != nil {
-		return Artifact{}, err
-	}
-	defer response.Body.Close()
-	result := Artifact{
-		Revision: response.Header.Get("X-Submux-Revision"), SHA256: response.Header.Get("X-Submux-SHA256"),
-		ETag: response.Header.Get("ETag"), ContentType: response.Header.Get("Content-Type"),
-	}
-	if response.StatusCode == http.StatusNotModified {
-		result.NotModified = true
-		return result, nil
-	}
-	if response.StatusCode != http.StatusOK {
-		return result, responseError(response)
-	}
-	if method == http.MethodGet {
-		result.Body, err = io.ReadAll(io.LimitReader(response.Body, (10<<20)+1))
-		if err != nil {
-			return result, err
-		}
-		if len(result.Body) > 10<<20 {
-			return result, errors.New("artifact exceeds 10 MiB")
-		}
+	if result.Kind == "" || result.Value == "" {
+		return result, errors.New("control plane returned an empty runtime secret")
 	}
 	return result, nil
 }
 
+func (c *Client) FetchPlatformSubscription(ctx context.Context, id int64) (PlatformSubscription, error) {
+	var result PlatformSubscription
+	if id <= 0 {
+		return result, errors.New("platform subscription id is invalid")
+	}
+	request, err := c.signedRequest(ctx, http.MethodGet, "/api/agent/platform-subscriptions/"+strconv.FormatInt(id, 10), nil)
+	if err != nil {
+		return result, err
+	}
+	response, err := c.httpClient().Do(request)
+	if err != nil {
+		return result, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return result, responseError(response)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, (10<<20)+1))
+	if err != nil {
+		return result, err
+	}
+	if len(body) == 0 || len(body) > 10<<20 {
+		return result, errors.New("platform subscription config is empty or exceeds 10 MiB")
+	}
+	result.Body = body
+	result.ContentType = response.Header.Get("Content-Type")
+	result.Revision = response.Header.Get("X-Submux-Revision")
+	return result, nil
+}
+
 // WatchUpdates is only a latency hint. Callers must retain periodic state and
-// artifact polling because a WebSocket notification may be lost.
+// state polling because a WebSocket notification may be lost.
 func (c *Client) WatchUpdates(ctx context.Context, notify func(reason string)) error {
 	server, err := url.Parse(strings.TrimRight(c.ServerURL, "/") + "/api/agent/updates")
 	if err != nil {
@@ -246,7 +241,7 @@ func (c *Client) WatchUpdates(ctx context.Context, notify func(reason string)) e
 // stream to a browser-created relay session. Frames are never persisted by
 // the control plane.
 func (c *Client) OpenRuntimeStream(ctx context.Context, session, kind string, frames <-chan json.RawMessage) error {
-	if session == "" || (kind != "proxies" && kind != "configs" && kind != "rules" && kind != "connections" && kind != "traffic" && kind != "memory" && kind != "logs" && kind != "docker_preview" && kind != "docker_desktop_preview") {
+	if session == "" || (kind != "proxies" && kind != "configs" && kind != "rules" && kind != "connections" && kind != "traffic" && kind != "memory" && kind != "logs" && kind != "agent_logs") {
 		return errors.New("invalid runtime stream session")
 	}
 	server, err := url.Parse(strings.TrimRight(c.ServerURL, "/") + "/api/agent/runtime-stream/" + url.PathEscape(session))

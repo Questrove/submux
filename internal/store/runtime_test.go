@@ -44,39 +44,18 @@ func TestAgentEnrollmentIsShortLivedAndOneTime(t *testing.T) {
 	}
 }
 
-func TestRuntimeDesiredStateUsesOptimisticGeneration(t *testing.T) {
+func TestRuntimeInstanceStartsWithObservedNotInstalledState(t *testing.T) {
 	st := runtimeTestStore(t)
 	instance, err := st.CreateRuntimeInstance(RuntimeInstance{Name: "host", DeviceKey: "public", OS: "linux", Arch: "amd64"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	desired, err := st.GetRuntimeDesiredState(instance.ID)
-	if err != nil || desired.Generation != 1 || desired.RuntimeState != RuntimeStopped {
-		t.Fatalf("unexpected initial desired state: %#v, %v", desired, err)
-	}
-	desired.CoreInstalled, desired.CoreVersion, desired.RuntimeState = true, "v1.19.10", RuntimeRunning
-	updated, err := st.UpdateRuntimeDesiredState(desired, 1)
-	if err != nil || updated.Generation != 2 {
-		t.Fatalf("desired update failed: %#v, %v", updated, err)
-	}
-	if _, err := st.UpdateRuntimeDesiredState(desired, 1); err == nil {
-		t.Fatal("stale desired generation was accepted")
-	}
-}
-
-func TestRuntimeBindingIsOnePerInstance(t *testing.T) {
-	st := runtimeTestStore(t)
-	instance, _ := st.CreateRuntimeInstance(RuntimeInstance{Name: "host", DeviceKey: "key"})
-	first, err := st.SaveRuntimeBinding(RuntimeBinding{InstanceID: instance.ID, OutputSubscriptionID: 1, RuntimeContract: "mihomo-agent/v1", CheckIntervalSec: 300})
+	observation, err := st.GetRuntimeObservation(instance.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := st.SaveRuntimeBinding(RuntimeBinding{InstanceID: instance.ID, OutputSubscriptionID: 2, RuntimeContract: "mihomo-agent/v1", CheckIntervalSec: 600})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if second.ID != first.ID || second.OutputSubscriptionID != 2 {
-		t.Fatalf("binding was duplicated instead of replaced: first=%#v second=%#v", first, second)
+	if observation.InstanceID != instance.ID || observation.CoreStatus != RuntimeNotInstalled {
+		t.Fatalf("unexpected initial observation: %#v", observation)
 	}
 }
 
@@ -112,32 +91,9 @@ func TestAgentJobTransitionsExpireAndDoNotReplay(t *testing.T) {
 	}
 }
 
-func TestDeploymentIntegrationAndAuditRecordsRemainDistinct(t *testing.T) {
+func TestAuditRecordsAreIdempotent(t *testing.T) {
 	st := runtimeTestStore(t)
 	instance, _ := st.CreateRuntimeInstance(RuntimeInstance{Name: "host", DeviceKey: "key"})
-	first, err := st.AddDeployment(Deployment{InstanceID: instance.ID, RequestID: "request-1", ActorType: agentproto.ActorScheduler, RemoteRevision: "rev-1", Status: "active"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.AddDeployment(Deployment{InstanceID: instance.ID, RequestID: "request-2", ActorType: agentproto.ActorAdminSession, RemoteRevision: "rev-2", Status: "failed"}); err != nil {
-		t.Fatal(err)
-	}
-	deployments, err := st.ListDeployments(instance.ID, 1)
-	if err != nil || len(deployments) != 1 || deployments[0].RemoteRevision != "rev-2" || deployments[0].ID == first.ID {
-		t.Fatalf("unexpected deployments: %#v, %v", deployments, err)
-	}
-	integrationState, err := st.UpsertIntegrationState(IntegrationState{InstanceID: instance.ID, Type: "docker_daemon", Scope: "system", DesiredState: "active", ObservedState: "applying"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	updated, err := st.UpsertIntegrationState(IntegrationState{InstanceID: instance.ID, Type: "docker_daemon", Scope: "system", DesiredState: "active", ObservedState: "active", Validation: "verified"})
-	if err != nil || updated.ID != integrationState.ID {
-		t.Fatalf("integration upsert failed: %#v, %v", updated, err)
-	}
-	states, err := st.ListIntegrationStates(instance.ID)
-	if err != nil || len(states) != 1 || states[0].ObservedState != "active" || states[0].Validation != "verified" {
-		t.Fatalf("unexpected integration states: %#v, %v", states, err)
-	}
 	event := AuditEvent{ActorType: agentproto.ActorLocalCLI, RequestID: "audit-request", InstanceID: instance.ID, Action: "mihomo.restart", Result: "succeeded"}
 	firstAudit, err := st.AddAuditEvent(event)
 	if err != nil {

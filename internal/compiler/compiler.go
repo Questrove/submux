@@ -12,6 +12,7 @@ import (
 
 	"submux/internal/lifecycle"
 	"submux/internal/node"
+	"submux/internal/rulecatalog"
 	"submux/internal/store"
 )
 
@@ -34,6 +35,8 @@ type Result struct {
 type resolvedSubscription struct {
 	Subscription store.OutputSubscription
 	Template     store.TemplateVersion
+	RuleProfile  *store.RuleProfile
+	RuleCatalog  rulecatalog.Snapshot
 	Records      []store.NodeRecord
 	Names        map[string]string
 	Slots        map[string][]string
@@ -64,6 +67,68 @@ func ValidateTemplate(engine, content string, slots []store.TemplateSlot) error 
 		return validateMihomoTemplate(content, slots)
 	}
 	return validateSingBoxTemplate(content, slots)
+}
+
+// InferTemplateSlots keeps the editor focused on the actual engine config.
+// New template versions use the conventional PROXY/MEDIA groups rather than
+// accepting a second, error-prone JSON contract from the page.
+func InferTemplateSlots(engine, content string) ([]store.TemplateSlot, error) {
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("template content is empty")
+	}
+	slots := make([]store.TemplateSlot, 0, 2)
+	switch engine {
+	case EngineMihomo:
+		root, err := parseYAMLMap(content)
+		if err != nil {
+			return nil, err
+		}
+		groups, err := objectList(root["proxy-groups"], "proxy-groups")
+		if err != nil {
+			return nil, err
+		}
+		names := map[string]bool{}
+		for _, group := range groups {
+			names[stringValue(group["name"])] = true
+		}
+		if !names["PROXY"] {
+			return nil, fmt.Errorf("mihomo template must contain a PROXY proxy group")
+		}
+		slots = append(slots, store.TemplateSlot{Key: "primary", Target: "PROXY", Mode: "replace", Required: true})
+		if names["MEDIA"] {
+			slots = append(slots, store.TemplateSlot{Key: "media", Target: "MEDIA", Mode: "append"})
+		}
+	case EngineSingBox:
+		var root struct {
+			Outbounds []struct {
+				Tag string `json:"tag"`
+			} `json:"outbounds"`
+		}
+		if err := json.Unmarshal([]byte(content), &root); err != nil {
+			return nil, fmt.Errorf("invalid sing-box JSON: %w", err)
+		}
+		names := map[string]bool{}
+		for _, outbound := range root.Outbounds {
+			names[outbound.Tag] = true
+		}
+		mainTarget := "PROXY"
+		if !names[mainTarget] {
+			mainTarget = "AUTO"
+		}
+		if !names[mainTarget] {
+			return nil, fmt.Errorf("sing-box template must contain a PROXY or AUTO outbound")
+		}
+		slots = append(slots, store.TemplateSlot{Key: "primary", Target: mainTarget, Mode: "replace", Required: true})
+		if names["MEDIA"] {
+			slots = append(slots, store.TemplateSlot{Key: "media", Target: "MEDIA", Mode: "append"})
+		}
+	default:
+		return nil, fmt.Errorf("unsupported template engine %q", engine)
+	}
+	if err := ValidateTemplate(engine, content, slots); err != nil {
+		return nil, err
+	}
+	return slots, nil
 }
 
 func (s *Service) Preview(subscription store.OutputSubscription) (Result, error) {
@@ -137,6 +202,26 @@ func (s *Service) resolve(subscription store.OutputSubscription) (resolvedSubscr
 	}
 	if subscription.Engine != template.Engine {
 		return resolvedSubscription{}, fmt.Errorf("output subscription engine %q does not match template engine %q", subscription.Engine, template.Engine)
+	}
+	var ruleProfile *store.RuleProfile
+	var resolvedCatalog rulecatalog.Snapshot
+	if subscription.RuleProfileID != 0 {
+		if subscription.Engine != EngineMihomo {
+			return resolvedSubscription{}, fmt.Errorf("rule profiles are only supported by mihomo subscriptions")
+		}
+		profile, err := s.store.GetRuleProfile(subscription.RuleProfileID)
+		if err != nil {
+			return resolvedSubscription{}, err
+		}
+		catalog, err := rulecatalog.CatalogAt(s.store, profile.CatalogCommit)
+		if err != nil {
+			return resolvedSubscription{}, fmt.Errorf("rule profile %q catalog: %w", profile.Name, err)
+		}
+		if err := ValidateRuleProfileWithCatalog(profile, catalog); err != nil {
+			return resolvedSubscription{}, fmt.Errorf("rule profile %q: %w", profile.Name, err)
+		}
+		ruleProfile = &profile
+		resolvedCatalog = catalog
 	}
 	if err := ValidateTemplate(subscription.Engine, version.Content, version.Slots); err != nil {
 		return resolvedSubscription{}, err
@@ -217,7 +302,7 @@ func (s *Service) resolve(subscription store.OutputSubscription) (resolvedSubscr
 			}
 		}
 	}
-	return resolvedSubscription{Subscription: subscription, Template: version, Records: records, Names: names, Slots: slots, Counts: counts, Warnings: sortedKeys(warningSet)}, nil
+	return resolvedSubscription{Subscription: subscription, Template: version, RuleProfile: ruleProfile, RuleCatalog: resolvedCatalog, Records: records, Names: names, Slots: slots, Counts: counts, Warnings: sortedKeys(warningSet)}, nil
 }
 
 type nodeSelectionResolution struct {

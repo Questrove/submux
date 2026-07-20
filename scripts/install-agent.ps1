@@ -21,26 +21,16 @@ param(
     [Parameter(Mandatory, ParameterSetName = 'Uninstall')]
     [switch]$Uninstall,
 
-    [string]$InstallDir = "$env:ProgramFiles\Submux"
+    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\Submux"
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = 'Questrove/submux'
 $target = Join-Path $InstallDir 'submux-agent.exe'
 $previous = Join-Path $InstallDir '.submux-agent.previous.exe'
-$serviceName = 'submux-agent'
-
-function Assert-Administrator {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'Run this installer from an elevated PowerShell session.'
-    }
-}
-
-function Test-AgentService {
-    return $null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)
-}
+$startupDir = [Environment]::GetFolderPath('Startup')
+$startupFile = Join-Path $startupDir 'submux-agent.cmd'
+$startupMarker = 'rem Managed by submux-agent installer; do not edit.'
 
 function Assert-NoReparsePath([string]$Path) {
     $current = [IO.Path]::GetFullPath($Path)
@@ -58,20 +48,17 @@ function Assert-NoReparsePath([string]$Path) {
     }
 }
 
-function Wait-AgentHealthy {
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        $serviceState = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-        if ($serviceState -and $serviceState.Status -eq 'Running') {
-            & $target status *> $null
-            if ($LASTEXITCODE -eq 0) { return }
+function Assert-ManagedStartup {
+    if (Test-Path -LiteralPath $startupFile) {
+        $item = Get-Item -LiteralPath $startupFile -Force
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Refusing to manage an invalid Agent startup entry.'
         }
-        Start-Sleep -Milliseconds 500
+        $firstLine = Get-Content -LiteralPath $startupFile -TotalCount 1
+        if ($firstLine -ne $startupMarker) { throw 'Refusing to replace an unmanaged submux-agent.cmd startup entry.' }
     }
-    throw 'The Agent service did not become healthy.'
 }
 
-Assert-Administrator
 Assert-NoReparsePath $InstallDir
 foreach ($managedPath in @($target, $previous)) {
     if (Test-Path -LiteralPath $managedPath) {
@@ -81,31 +68,24 @@ foreach ($managedPath in @($target, $previous)) {
         }
     }
 }
+Assert-ManagedStartup
 
 if ($Uninstall) {
-    if (Test-AgentService) {
-        & $target service uninstall
-        if ($LASTEXITCODE -ne 0) { throw 'The Agent refused service removal.' }
-    }
+    Remove-Item -LiteralPath $startupFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $target, $previous -Force -ErrorAction SilentlyContinue
-    Write-Host 'submux-agent was uninstalled; ProgramData\submux-agent was preserved.'
+    Write-Host 'submux-agent was uninstalled; current-user state under LocalAppData\submux-agent was preserved.'
     return
 }
 
 if ($Rollback) {
     if (-not (Test-Path -LiteralPath $previous -PathType Leaf)) { throw 'No previous Agent binary is available.' }
-    $wasRunning = (Get-Service -Name $serviceName -ErrorAction SilentlyContinue).Status -eq 'Running'
-    if ($wasRunning) { Stop-Service -Name $serviceName -Force }
     $failed = Join-Path $InstallDir ".submux-agent.failed.$PID.exe"
     Move-Item -LiteralPath $target -Destination $failed -Force
-    Move-Item -LiteralPath $previous -Destination $target -Force
     try {
-        if ($wasRunning) { Start-Service -Name $serviceName; Wait-AgentHealthy }
+        Move-Item -LiteralPath $previous -Destination $target -Force
         Remove-Item -LiteralPath $failed -Force
     } catch {
-        Move-Item -LiteralPath $target -Destination $previous -Force
-        Move-Item -LiteralPath $failed -Destination $target -Force
-        if ($wasRunning) { Start-Service -Name $serviceName }
+        Move-Item -LiteralPath $failed -Destination $target -Force -ErrorAction SilentlyContinue
         throw
     }
     & $target --version
@@ -118,13 +98,13 @@ if ($Upgrade -and -not (Test-Path -LiteralPath $target -PathType Leaf)) {
 
 if (-not $Version) {
     if ($Channel -eq 'stable') {
-		$location = $null
-		try {
-			$latest = Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest" -MaximumRedirection 0
-			$location = $latest.Headers.Location
-		} catch {
-			if ($_.Exception.Response) { $location = $_.Exception.Response.Headers['Location'] }
-		}
+        $location = $null
+        try {
+            $latest = Invoke-WebRequest -Uri "https://github.com/$repo/releases/latest" -MaximumRedirection 0
+            $location = $latest.Headers.Location
+        } catch {
+            if ($_.Exception.Response) { $location = $_.Exception.Response.Headers['Location'] }
+        }
         if (-not $location) { throw 'Could not resolve the latest stable release.' }
         $Version = Split-Path $location -Leaf
     } else {
@@ -135,9 +115,7 @@ if (-not $Version) {
     }
 }
 if ($Version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$') { throw "Invalid exact release version: $Version" }
-if ($Channel -eq 'stable' -and $Version -match '(?i)(alpha|beta|rc|pre)') {
-    throw "Pre-release $Version requires -Channel alpha"
-}
+if ($Channel -eq 'stable' -and $Version -match '(?i)(alpha|beta|rc|pre)') { throw "Pre-release $Version requires -Channel alpha" }
 
 $arch = switch ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
     'X64' { 'amd64' }
@@ -155,29 +133,15 @@ try {
     Invoke-WebRequest -Uri "$baseUrl/checksums.txt" -OutFile $manifest
     $matchingLines = @(Get-Content -LiteralPath $manifest | Where-Object { $_ -match "\s\*?$([Regex]::Escape($asset))$" })
     if ($matchingLines.Count -ne 1) { throw "checksums.txt must contain exactly one entry for $asset" }
-    $line = $matchingLines[0]
-    $expected = ($line -split '\s+')[0].ToLowerInvariant()
+    $expected = (($matchingLines[0] -split '\s+')[0]).ToLowerInvariant()
     if ($expected -notmatch '^[0-9a-f]{64}$') { throw "checksums.txt has an invalid digest for $asset" }
     $actual = (Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actual -ne $expected) { throw "Checksum verification failed for $asset" }
     $reported = & $download --version
     if ($LASTEXITCODE -ne 0 -or "$reported" -notmatch [Regex]::Escape(" $Version (")) { throw 'Downloaded binary version does not match the requested release.' }
 
-    Assert-NoReparsePath $InstallDir
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     Assert-NoReparsePath $InstallDir
-    $installDirectory = Get-Item -LiteralPath $InstallDir
-    if ($installDirectory.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'InstallDir must not be a reparse point.' }
-    foreach ($managedPath in @($target, $previous)) {
-        if (Test-Path -LiteralPath $managedPath) {
-            $managedItem = Get-Item -LiteralPath $managedPath -Force
-            if ($managedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Refusing to replace reparse-point path $managedPath" }
-        }
-    }
-    $serviceExistedBefore = Test-AgentService
-    $serviceState = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-    $wasRunning = $serviceState -and $serviceState.Status -eq 'Running'
-    if ($wasRunning) { Stop-Service -Name $serviceName -Force }
     $staging = Join-Path $InstallDir ".submux-agent.staging.$PID.exe"
     Copy-Item -LiteralPath $download -Destination $staging -Force
     $hadPrevious = Test-Path -LiteralPath $target -PathType Leaf
@@ -185,31 +149,19 @@ try {
         Remove-Item -LiteralPath $previous -Force -ErrorAction SilentlyContinue
         Move-Item -LiteralPath $target -Destination $previous -Force
     }
-    Move-Item -LiteralPath $staging -Destination $target -Force
     try {
+        Move-Item -LiteralPath $staging -Destination $target -Force
         if ($Service) {
-            & $target service install
-            if ($LASTEXITCODE -ne 0) { throw 'Agent service installation failed.' }
+            New-Item -ItemType Directory -Path $startupDir -Force | Out-Null
+            @($startupMarker, '@start "" /b "' + $target + '" serve') | Set-Content -LiteralPath $startupFile -Encoding Ascii
         }
-        if ($wasRunning) { Start-Service -Name $serviceName; Wait-AgentHealthy }
     } catch {
-        if ($Service -and -not $serviceExistedBefore -and (Test-AgentService)) {
-            & $target service uninstall *> $null
-        }
-        if ($hadPrevious) {
-            Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-            Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-            Move-Item -LiteralPath $previous -Destination $target -Force
-            if ($wasRunning) { Start-Service -Name $serviceName; Wait-AgentHealthy }
-        } else {
-            Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
-        }
+        Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+        if ($hadPrevious) { Move-Item -LiteralPath $previous -Destination $target -Force }
         throw
     }
     & $target --version
-    if ($Service -and -not $wasRunning) {
-        Write-Host 'Service installed but not started. Run submux-agent enroll --server https://... from this elevated shell.'
-    }
+    if ($Service) { Write-Host 'Current-user startup entry installed. Enroll this user, then start submux-agent serve once or sign in again.' }
 } finally {
     Remove-Item -LiteralPath $tempDir -Recurse -Force -ErrorAction SilentlyContinue
 }

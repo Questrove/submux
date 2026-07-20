@@ -43,6 +43,28 @@ func (s *Store) UpsertCacheError(sourceID int64, errMsg string) error {
 	})
 }
 
+// SetCacheFetchResult records which route was used without replacing the
+// last-good subscription metadata or node snapshot.
+func (s *Store) SetCacheFetchResult(sourceID int64, successRoute, directError, proxyError string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("source_cache"))
+		var c Cache
+		if raw := b.Get(itob(sourceID)); raw != nil {
+			if err := json.Unmarshal(raw, &c); err != nil {
+				return err
+			}
+		}
+		c.SourceID = sourceID
+		if successRoute != "" {
+			c.LastSuccessRoute = successRoute
+		}
+		c.LastDirectError = directError
+		c.LastProxyError = proxyError
+		c.UpdatedAt = nowRFC3339()
+		return putJSON(b, itob(sourceID), c)
+	})
+}
+
 func (s *Store) GetCache(sourceID int64) (Cache, error) {
 	var c Cache
 	found := false

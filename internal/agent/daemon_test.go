@@ -1,9 +1,13 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,17 +17,17 @@ import (
 	"submux/internal/agentproto"
 	"submux/internal/agentstate"
 	"submux/internal/hostops"
-	"submux/internal/integration"
 	"submux/internal/mihomo"
 	"submux/internal/store"
 )
 
 type fakeControl struct {
-	state          agentclient.State
-	artifact       agentclient.Artifact
-	heartbeats     []agentclient.Heartbeat
-	jobStatuses    []string
-	artifactChecks int
+	state                 agentclient.State
+	heartbeats            []agentclient.Heartbeat
+	jobStatuses           []string
+	jobResults            []json.RawMessage
+	runtimeSecrets        map[string]agentclient.RuntimeSecret
+	platformSubscriptions map[int64]agentclient.PlatformSubscription
 }
 
 func (c *fakeControl) GetState(context.Context) (agentclient.State, error) { return c.state, nil }
@@ -31,64 +35,19 @@ func (c *fakeControl) SendHeartbeat(_ context.Context, value agentclient.Heartbe
 	c.heartbeats = append(c.heartbeats, value)
 	return c.state, nil
 }
-func (c *fakeControl) SendJobStatus(_ context.Context, _ string, status string, _ json.RawMessage, _ string) error {
+func (c *fakeControl) SendJobStatus(_ context.Context, _ string, status string, result json.RawMessage, _ string) error {
 	c.jobStatuses = append(c.jobStatuses, status)
+	c.jobResults = append(c.jobResults, append(json.RawMessage(nil), result...))
 	return nil
 }
-func (c *fakeControl) CheckArtifact(_ context.Context, _ int64, etag string) (agentclient.Artifact, error) {
-	c.artifactChecks++
-	if etag != "" && etag == c.artifact.ETag {
-		result := c.artifact
-		result.NotModified, result.Body = true, nil
-		return result, nil
-	}
-	result := c.artifact
-	result.Body = nil
-	return result, nil
-}
-
-func TestManualCheckBypassesIntervalWithoutApplyingWhenAutoUpdateIsOff(t *testing.T) {
-	local := daemonStateStore(t)
-	_, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-		runtime.BindingID = 7
-		runtime.LastCheckAt = time.Now().UTC().Format(time.RFC3339)
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	control := &fakeControl{
-		state: agentclient.State{
-			Desired: store.RuntimeDesiredState{InstanceID: 1, CoreInstalled: true, CoreChannel: "stable", CoreVersion: "v1.19.28", RuntimeState: store.RuntimeStopped},
-			Binding: &store.RuntimeBinding{ID: 7, InstanceID: 1, AutoUpdate: false, CheckIntervalSec: 3600},
-		},
-		artifact: agentclient.Artifact{Body: []byte("config"), Revision: "new", SHA256: "hash", ETag: `"new"`, ContentType: "application/yaml"},
-	}
-	deployer := &fakeDeployer{}
-	daemon := &Daemon{
-		State: local, Control: control,
-		Core:     &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}},
-		Deployer: deployer, Mihomo: fakeMihomo{},
-	}
-	if deployment, err := daemon.CheckSubscriptionNow(context.Background(), false); err != nil || deployment != nil {
-		t.Fatalf("manual check: deployment=%#v err=%v", deployment, err)
-	}
-	if control.artifactChecks != 1 || deployer.calls != 0 {
-		t.Fatalf("manual check did not preserve apply policy: checks=%d applies=%d", control.artifactChecks, deployer.calls)
-	}
-	if _, err := daemon.CheckSubscriptionNow(context.Background(), true); err != nil {
-		t.Fatal(err)
-	}
-	if deployer.calls != 1 {
-		t.Fatalf("explicit update did not apply: %d", deployer.calls)
-	}
-}
-
 func TestRuntimeStreamNotificationsAreStrictlyParsed(t *testing.T) {
 	session := "0123456789abcdef0123456789abcdef0123456789abcdef"
 	gotSession, kind, ok := parseRuntimeStreamReason("runtime_stream|" + session + "|logs")
 	if !ok || gotSession != session || kind != "logs" {
 		t.Fatalf("valid stream hint was rejected: %q %q %v", gotSession, kind, ok)
+	}
+	if _, kind, ok := parseRuntimeStreamReason("runtime_stream|" + session + "|agent_logs"); !ok || kind != "agent_logs" {
+		t.Fatal("Agent log stream hint was rejected")
 	}
 	for _, value := range []string{
 		"runtime_stream|short|logs",
@@ -102,88 +61,34 @@ func TestRuntimeStreamNotificationsAreStrictlyParsed(t *testing.T) {
 	}
 }
 
-type fakeDockerManager struct {
-	preview     integration.DockerPreview
-	status      integration.DockerStatus
-	enableCalls int
-}
-
-func (m *fakeDockerManager) Status(context.Context) (integration.DockerStatus, error) {
-	return m.status, nil
-}
-func (m *fakeDockerManager) Preview(context.Context, integration.DockerDaemonConfig) (integration.DockerPreview, error) {
-	return m.preview, nil
-}
-func (m *fakeDockerManager) Enable(context.Context, integration.DockerDaemonConfig, string) (integration.DockerStatus, error) {
-	m.enableCalls++
-	return integration.DockerStatus{State: "active"}, nil
-}
-func (m *fakeDockerManager) Disable(context.Context) (integration.DockerStatus, error) {
-	return integration.DockerStatus{State: "disabled"}, nil
-}
-
-func TestDockerReconcileRejectsConfigurationChangedAfterPreview(t *testing.T) {
-	local := daemonStateStore(t)
-	_, _ = local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-		runtime.CoreStatus, runtime.ProxyPort, runtime.ProxyKind = "running", 7890, "mixed"
-		return nil
-	})
-	docker := &fakeDockerManager{
-		status:  integration.DockerStatus{State: "disabled"},
-		preview: integration.DockerPreview{OriginalHash: strings.Repeat("a", 64), DesiredHash: strings.Repeat("c", 64)},
+func TestUserAgentAdvertisesNoApplicationConfigurationCapabilities(t *testing.T) {
+	for _, capability := range PlatformCapabilities() {
+		if strings.HasPrefix(capability, "integration.") || capability == "subscription.update" || capability == "diagnostics.collect" {
+			t.Fatalf("user Agent still advertises removed capability %q", capability)
+		}
 	}
-	daemon := &Daemon{State: local, Docker: docker}
-	config, _ := json.Marshal(integration.DockerDaemonConfig{
-		Enabled: true, ProxyPort: 7890, Revision: "confirmed", ExpectedOriginalHash: strings.Repeat("b", 64),
-	})
-	desired := store.RuntimeDesiredState{Integrations: map[string]json.RawMessage{integration.DockerDaemonType: config}}
-	if err := daemon.reconcileIntegrations(context.Background(), desired); err == nil {
-		t.Fatal("Docker configuration changed after preview but was applied")
-	}
-	if docker.enableCalls != 0 {
-		t.Fatalf("Docker enable ran despite stale preview: %d", docker.enableCalls)
+	session := "0123456789abcdef0123456789abcdef0123456789abcdef"
+	for _, kind := range []string{"docker_preview", "docker_desktop_preview"} {
+		if _, _, ok := parseRuntimeStreamReason("runtime_stream|" + session + "|" + kind); ok {
+			t.Fatalf("removed application configuration stream %q was accepted", kind)
+		}
 	}
 }
 
-func TestDockerReconcileRequiresCurrentRunningHTTPProxy(t *testing.T) {
-	for _, test := range []struct {
-		name        string
-		coreStatus  string
-		proxyPort   int
-		proxyKind   string
-		desiredPort int
-	}{
-		{"stopped", "stopped", 7890, "mixed", 7890},
-		{"stale-port", "running", 7890, "mixed", 7891},
-		{"socks-only", "running", 7890, "socks5", 7890},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			local := daemonStateStore(t)
-			_, _ = local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
-				runtime.CoreStatus, runtime.ProxyPort, runtime.ProxyKind = test.coreStatus, test.proxyPort, test.proxyKind
-				return nil
-			})
-			docker := &fakeDockerManager{
-				status:  integration.DockerStatus{State: "disabled"},
-				preview: integration.DockerPreview{OriginalHash: strings.Repeat("a", 64), DesiredHash: strings.Repeat("b", 64)},
-			}
-			daemon := &Daemon{State: local, Docker: docker}
-			config, _ := json.Marshal(integration.DockerDaemonConfig{
-				Enabled: true, ProxyPort: test.desiredPort, Revision: "confirmed", ExpectedOriginalHash: strings.Repeat("a", 64),
-			})
-			desired := store.RuntimeDesiredState{Integrations: map[string]json.RawMessage{integration.DockerDaemonType: config}}
-			if err := daemon.reconcileIntegrations(context.Background(), desired); err == nil {
-				t.Fatal("unsafe Docker proxy state was accepted")
-			}
-			if docker.enableCalls != 0 {
-				t.Fatalf("Docker enable ran for unsafe proxy state: %d", docker.enableCalls)
-			}
-		})
+func (c *fakeControl) FetchRuntimeSecret(_ context.Context, ref string) (agentclient.RuntimeSecret, error) {
+	value, ok := c.runtimeSecrets[ref]
+	if !ok {
+		return value, errors.New("missing runtime secret")
 	}
+	delete(c.runtimeSecrets, ref)
+	return value, nil
 }
-
-func (c *fakeControl) FetchArtifact(context.Context, int64, string) (agentclient.Artifact, error) {
-	return c.artifact, nil
+func (c *fakeControl) FetchPlatformSubscription(_ context.Context, id int64) (agentclient.PlatformSubscription, error) {
+	value, ok := c.platformSubscriptions[id]
+	if !ok {
+		return value, errors.New("missing platform subscription")
+	}
+	return value, nil
 }
 func (c *fakeControl) WatchUpdates(ctx context.Context, _ func(string)) error {
 	<-ctx.Done()
@@ -194,6 +99,20 @@ type fakeCore struct {
 	status                       hostops.CoreStatus
 	installs, uninstalls, starts int
 	stops, restarts, validations int
+}
+
+type proxyFakeCore struct {
+	*fakeCore
+	proxy       string
+	listChannel string
+	versions    []string
+}
+
+func (c *proxyFakeCore) SetResourceProxy(value string) error            { c.proxy = value; return nil }
+func (*proxyFakeCore) SetProgressReporter(hostops.CoreProgressReporter) {}
+func (c *proxyFakeCore) ListCoreVersions(_ context.Context, channel string, _ int) ([]string, error) {
+	c.listChannel = channel
+	return append([]string(nil), c.versions...), nil
 }
 
 func (c *fakeCore) Install(_ context.Context, _, version string) error {
@@ -284,67 +203,214 @@ func TestLocalCoreOperationsImmediatelyRefreshObservedState(t *testing.T) {
 	}
 }
 
-func TestSyncReconcilesAndDoesNotRepeatReachedGenerationOrArtifact(t *testing.T) {
+func TestSyncOnlyObservesWhenThereIsNoOneShotJob(t *testing.T) {
 	local := daemonStateStore(t)
-	control := &fakeControl{
-		state:    agentclient.State{ProtocolVersion: 1, Desired: store.RuntimeDesiredState{InstanceID: 1, Generation: 2, CoreInstalled: true, CoreChannel: "stable", CoreVersion: "v1.19.28", RuntimeState: store.RuntimeStopped}, Binding: &store.RuntimeBinding{ID: 3, InstanceID: 1, RuntimeContract: "mihomo-agent/v1", AutoUpdate: true, CheckIntervalSec: 300}},
-		artifact: agentclient.Artifact{Body: []byte("config"), Revision: "revision", SHA256: "hash", ETag: `"revision"`, ContentType: "application/yaml"},
-	}
-	core := &fakeCore{status: hostops.CoreStatus{State: "not_installed"}}
+	control := &fakeControl{state: agentclient.State{ProtocolVersion: 1}}
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "running"}}
 	deployer := &fakeDeployer{}
 	daemon := &Daemon{State: local, Control: control, Core: core, Deployer: deployer, Mihomo: fakeMihomo{}, AgentVersion: "test"}
 	if err := daemon.SyncOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if core.installs != 1 || deployer.calls != 1 {
-		t.Fatalf("install=%d deploy=%d", core.installs, deployer.calls)
+	if core.installs != 0 || core.starts != 0 || core.stops != 0 || deployer.calls != 0 {
+		t.Fatalf("sync mutated Mihomo without a job: core=%#v deploy=%d", core, deployer.calls)
 	}
 	runtimeState, _ := local.Runtime()
-	if runtimeState.ObservedGeneration != 2 || runtimeState.AppliedRevision != "revision" || runtimeState.ProxyPort != 7890 || runtimeState.ProxyKind != "mixed" {
+	if runtimeState.CoreVersion != "v1.19.28" || runtimeState.CoreStatus != "running" {
 		t.Fatalf("unexpected local runtime: %#v", runtimeState)
 	}
-	if err := daemon.SyncOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if core.installs != 1 || deployer.calls != 1 {
-		t.Fatalf("reached state repeated side effects: install=%d deploy=%d", core.installs, deployer.calls)
+	if len(control.heartbeats) != 1 || control.heartbeats[0].Observation.Operation != nil {
+		t.Fatalf("unexpected observation heartbeat: %#v", control.heartbeats)
 	}
 }
 
-func TestExplicitUpdateRetriesRejectedRevisionAndDuplicateJobDoesNotReplay(t *testing.T) {
+func TestConfigureResourceProxyJobRunsOnceAndReportsOperation(t *testing.T) {
 	local := daemonStateStore(t)
 	job := store.AgentJob{Job: agentproto.Job{
-		ID: "update", ProtocolVersion: 1, InstanceID: 1, Type: agentproto.JobUpdateSubscription,
-		Params: json.RawMessage(`{"retry_rejected":true}`), Status: agentproto.JobQueued,
-		ActorType: agentproto.ActorAdminSession, RequestID: "request", Deadline: time.Now().Add(time.Minute).Format(time.RFC3339),
+		ID: "proxy-job", ProtocolVersion: 1, InstanceID: 1, Type: agentproto.JobConfigureResourceProxy,
+		Params: json.RawMessage(`{"resource_proxy":{"mode":"custom","url":"socks5://127.0.0.1:1080"}}`), Status: agentproto.JobQueued,
+		ActorType: agentproto.ActorAdminSession, RequestID: "proxy-request", Deadline: time.Now().Add(time.Minute).Format(time.RFC3339),
+	}}
+	control := &fakeControl{state: agentclient.State{ProtocolVersion: 1, Jobs: []store.AgentJob{job}}}
+	core := &proxyFakeCore{fakeCore: &fakeCore{status: hostops.CoreStatus{State: store.RuntimeNotInstalled}}}
+	daemon := &Daemon{State: local, Control: control, Core: core, Deployer: &fakeDeployer{}, Mihomo: fakeMihomo{}, AgentVersion: "test"}
+	if err := daemon.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if core.proxy != "socks5://127.0.0.1:1080" {
+		t.Fatalf("release proxy = %q", core.proxy)
+	}
+	lastHeartbeat := control.heartbeats[len(control.heartbeats)-1]
+	if lastHeartbeat.Observation.ResourceProxyMode != agentproto.ResourceProxyCustom || lastHeartbeat.Observation.ResourceProxyURL != "socks5://127.0.0.1:1080" {
+		t.Fatalf("custom proxy was not observed: %#v", control.heartbeats)
+	}
+	operation := lastHeartbeat.Observation.Operation
+	if operation == nil || operation.JobID != job.ID || operation.Kind != agentproto.JobConfigureResourceProxy || operation.Status != "succeeded" || operation.Phase != "completed" {
+		t.Fatalf("operation was not reported: %#v", operation)
+	}
+	if err := daemon.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(control.jobStatuses) != 2 {
+		t.Fatalf("duplicate proxy job was replayed: statuses=%#v", control.jobStatuses)
+	}
+}
+
+func TestListCoreVersionsJobRunsOnAgentAndReturnsBoundedChoices(t *testing.T) {
+	local := daemonStateStore(t)
+	job := store.AgentJob{Job: agentproto.Job{
+		ID: "versions-job", ProtocolVersion: 1, InstanceID: 1, Type: agentproto.JobListCoreVersions,
+		Params: json.RawMessage(`{"channel":"stable"}`), Status: agentproto.JobQueued,
+		ActorType: agentproto.ActorAdminSession, RequestID: "versions-request", Deadline: time.Now().Add(time.Minute).Format(time.RFC3339),
+	}}
+	control := &fakeControl{state: agentclient.State{ProtocolVersion: 1, Jobs: []store.AgentJob{job}}}
+	core := &proxyFakeCore{fakeCore: &fakeCore{status: hostops.CoreStatus{State: store.RuntimeNotInstalled}}, versions: []string{"v1.19.28", "v1.19.27"}}
+	daemon := &Daemon{State: local, Control: control, Core: core, Deployer: &fakeDeployer{}, Mihomo: fakeMihomo{}, AgentVersion: "test"}
+	if err := daemon.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if core.listChannel != "stable" {
+		t.Fatalf("release channel = %q", core.listChannel)
+	}
+	var result agentproto.ListCoreVersionsResult
+	if err := json.Unmarshal(control.jobResults[len(control.jobResults)-1], &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Channel != "stable" || len(result.Versions) != 2 || result.Versions[0] != "v1.19.28" {
+		t.Fatalf("release choices = %#v", result)
+	}
+	lastHeartbeat := control.heartbeats[len(control.heartbeats)-1]
+	if operation := lastHeartbeat.Observation.Operation; operation == nil || operation.Kind != agentproto.JobListCoreVersions || operation.Status != "succeeded" {
+		t.Fatalf("release list operation was not reported: %#v", operation)
+	}
+}
+
+func TestRuntimeSubscriptionsAreFetchedStoredAndActivatedByAgent(t *testing.T) {
+	config := []byte("mixed-port: 7890\nproxies: []\nproxy-groups: []\nrules:\n  - MATCH,DIRECT\n")
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Subscription-Userinfo", "upload=100; download=200; total=1000; expire=1893456000")
+		w.Header().Set("ETag", `"revision-1"`)
+		_, _ = w.Write(config)
+	}))
+	defer provider.Close()
+
+	local := daemonStateStore(t)
+	secretRef := strings.Repeat("a", 48)
+	addJob := store.AgentJob{Job: agentproto.Job{
+		ID: "add-subscription", ProtocolVersion: 1, InstanceID: 1, Type: agentproto.JobAddRuntimeSubscription,
+		Params: json.RawMessage(`{"name":"临时测试","secret_ref":"` + secretRef + `"}`), Status: agentproto.JobQueued,
+		ActorType: agentproto.ActorAdminSession, RequestID: "add-subscription-request", Deadline: time.Now().Add(time.Minute).Format(time.RFC3339),
 	}}
 	control := &fakeControl{
-		state:    agentclient.State{ProtocolVersion: 1, Desired: store.RuntimeDesiredState{InstanceID: 1, Generation: 1, CoreInstalled: true, CoreChannel: "stable", CoreVersion: "v1.19.28", RuntimeState: store.RuntimeStopped}, Binding: &store.RuntimeBinding{ID: 1, InstanceID: 1, AutoUpdate: true, CheckIntervalSec: 300}},
-		artifact: agentclient.Artifact{Body: []byte("config"), Revision: "bad-revision", SHA256: "hash", ETag: `"bad-revision"`, ContentType: "application/yaml"},
+		state:          agentclient.State{ProtocolVersion: 1, Jobs: []store.AgentJob{addJob}},
+		runtimeSecrets: map[string]agentclient.RuntimeSecret{secretRef: {Kind: runtimeSubscriptionSecretKind, Value: provider.URL}},
 	}
-	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}}
-	deployer := &fakeDeployer{failures: 1}
-	daemon := &Daemon{State: local, Control: control, Core: core, Deployer: deployer, Mihomo: fakeMihomo{}}
-	if err := daemon.SyncOnce(context.Background()); err == nil {
-		t.Fatal("automatic rejected deployment unexpectedly succeeded")
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: store.RuntimeRunning}}
+	deployer := &fakeDeployer{}
+	daemon := &Daemon{State: local, Control: control, Core: core, Deployer: deployer, Mihomo: fakeMihomo{}, AgentVersion: "test", SubscriptionHTTP: provider.Client()}
+	if err := daemon.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	values, err := local.ListRuntimeSubscriptions()
+	if err != nil || len(values) != 1 {
+		t.Fatalf("stored subscriptions = %#v, %v", values, err)
+	}
+	value := values[0]
+	if value.URL != provider.URL || !strings.EqualFold(value.Host, "127.0.0.1") || !strings.EqualFold(string(value.Config), string(config)) || value.UsedBytes != 300 || value.TotalBytes != 1000 {
+		t.Fatalf("stored subscription = %#v", value)
+	}
+	if deployer.calls != 0 {
+		t.Fatalf("adding an inactive subscription applied it: %d", deployer.calls)
+	}
+	heartbeatJSON, _ := json.Marshal(control.heartbeats[len(control.heartbeats)-1])
+	if bytes.Contains(heartbeatJSON, []byte(provider.URL)) || bytes.Contains(heartbeatJSON, config) {
+		t.Fatalf("heartbeat exposed private subscription data: %s", heartbeatJSON)
+	}
+	observation := control.heartbeats[len(control.heartbeats)-1].Observation
+	if len(observation.Subscriptions) != 1 || observation.Subscriptions[0].Name != "临时测试" || observation.Subscriptions[0].Active {
+		t.Fatalf("safe subscription summary = %#v", observation.Subscriptions)
+	}
+
+	activateJob := store.AgentJob{Job: agentproto.Job{
+		ID: "activate-subscription", ProtocolVersion: 1, InstanceID: 1, Type: agentproto.JobActivateRuntimeSubscription,
+		Params: json.RawMessage(`{"id":"` + value.ID + `"}`), Status: agentproto.JobQueued,
+		ActorType: agentproto.ActorAdminSession, RequestID: "activate-subscription-request", Deadline: time.Now().Add(time.Minute).Format(time.RFC3339),
+	}}
+	control.state.Jobs = []store.AgentJob{activateJob}
+	if err := daemon.SyncOnce(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	runtimeState, _ := local.Runtime()
-	if runtimeState.RejectedRevision != "bad-revision" || deployer.calls != 1 {
-		t.Fatalf("rejected state not persisted: %#v calls=%d", runtimeState, deployer.calls)
+	if deployer.calls != 1 || runtimeState.ActiveSubscriptionID != value.ID || runtimeState.AppliedRevision != value.Revision {
+		t.Fatalf("subscription was not activated: runtime=%#v deploys=%d", runtimeState, deployer.calls)
 	}
-	control.state.Jobs = []store.AgentJob{job}
+}
+
+func TestRuntimeSubscriptionCanUsePublishedPlatformConfiguration(t *testing.T) {
+	config := []byte("mixed-port: 7890\nproxies: []\nproxy-groups: []\nrules:\n  - MATCH,DIRECT\n")
+	local := daemonStateStore(t)
+	job := store.AgentJob{Job: agentproto.Job{
+		ID: "add-platform-subscription", ProtocolVersion: 1, InstanceID: 1, Type: agentproto.JobAddRuntimeSubscription,
+		Params: json.RawMessage(`{"name":"平台配置","platform_subscription_id":12}`), Status: agentproto.JobQueued,
+		ActorType: agentproto.ActorAdminSession, RequestID: "add-platform-subscription-request", Deadline: time.Now().Add(time.Minute).Format(time.RFC3339),
+	}}
+	control := &fakeControl{
+		state:                 agentclient.State{ProtocolVersion: 1, Jobs: []store.AgentJob{job}},
+		platformSubscriptions: map[int64]agentclient.PlatformSubscription{12: {Body: config, ContentType: "text/yaml", Revision: "published-revision"}},
+	}
+	daemon := &Daemon{State: local, Control: control, Core: &fakeCore{}, Deployer: &fakeDeployer{}, Mihomo: fakeMihomo{}, AgentVersion: "test"}
 	if err := daemon.SyncOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	runtimeState, _ = local.Runtime()
-	if runtimeState.AppliedRevision != "bad-revision" || deployer.calls != 2 {
-		t.Fatalf("explicit retry did not apply: %#v calls=%d", runtimeState, deployer.calls)
+	values, err := local.ListRuntimeSubscriptions()
+	if err != nil || len(values) != 1 {
+		t.Fatalf("stored platform subscriptions = %#v, %v", values, err)
 	}
-	if err := daemon.SyncOnce(context.Background()); err != nil {
-		t.Fatal(err)
+	value := values[0]
+	if value.PlatformSubscriptionID != 12 || value.URL != "" || value.Host != "平台订阅" || !bytes.Equal(value.Config, config) {
+		t.Fatalf("stored platform subscription = %#v", value)
 	}
-	if deployer.calls != 2 {
-		t.Fatalf("duplicate job replayed deployment: %d", deployer.calls)
+	observation := control.heartbeats[len(control.heartbeats)-1].Observation
+	if len(observation.Subscriptions) != 1 || observation.Subscriptions[0].PlatformSubscriptionID != 12 {
+		t.Fatalf("platform subscription summary = %#v", observation.Subscriptions)
+	}
+	heartbeatJSON, _ := json.Marshal(observation)
+	if bytes.Contains(heartbeatJSON, config) {
+		t.Fatalf("heartbeat exposed platform configuration: %s", heartbeatJSON)
+	}
+}
+
+func TestRuntimeSubscriptionDefaultFetcherRejectsLocalAndPrivateTargets(t *testing.T) {
+	for _, value := range []string{"127.0.0.1", "10.0.0.1", "100.64.0.1", "169.254.1.1", "::1", "fd00::1"} {
+		if publicSubscriptionIP(netip.MustParseAddr(value)) {
+			t.Fatalf("private subscription target %s was accepted", value)
+		}
+	}
+	for _, value := range []string{"1.1.1.1", "2606:4700:4700::1111"} {
+		if !publicSubscriptionIP(netip.MustParseAddr(value)) {
+			t.Fatalf("public subscription target %s was rejected", value)
+		}
+	}
+}
+
+func TestReleaseListErrorsDistinguishProxyAndGitHubFailures(t *testing.T) {
+	if got := safeOperationError(errors.New("Mihomo startup timed out after 15s: connection refused")); got != "Mihomo startup timed out" {
+		t.Fatalf("startup timeout error = %q", got)
+	}
+	if got := safeOperationError(errors.New("Mihomo release list: request failed")); got != "Mihomo official release list failed" {
+		t.Fatalf("release list error = %q", got)
+	}
+	if got := safeOperationError(errors.New("Mihomo release list: proxyconnect tcp failed")); got != "Agent resource proxy connection failed" {
+		t.Fatalf("release list proxy error = %q", got)
+	}
+}
+
+func TestSubscriptionErrorsDoNotExposeURLOrLookLikeReleaseFailures(t *testing.T) {
+	if got := safeOperationError(errors.New("download subscription: Get https://provider.example/private-token: context deadline exceeded")); got != "subscription download timed out" {
+		t.Fatalf("subscription timeout = %q", got)
+	}
+	if got := safeOperationError(errors.New("runtime secret is missing or expired")); got != "subscription address expired or unavailable" {
+		t.Fatalf("subscription secret error = %q", got)
 	}
 }
 

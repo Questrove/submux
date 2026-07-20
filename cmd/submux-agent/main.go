@@ -34,7 +34,7 @@ import (
 )
 
 type paths struct {
-	state, socket, config string
+	state, socket, config, core, runtime string
 }
 
 func main() {
@@ -62,11 +62,6 @@ func run(args []string) error {
 			return errors.New("serve accepts no arguments")
 		}
 		return runAgentService(runServe)
-	case "mihomo-service":
-		if len(args) != 1 {
-			return errors.New("mihomo-service accepts no arguments")
-		}
-		return runPlatformMihomoService()
 	case "service":
 		return runAgentServiceCommand(args[1:])
 	case "unenroll":
@@ -96,16 +91,14 @@ func usage() {
 
   enroll --server https://submux.example.com [--code CODE]
   serve
-  service install|start|stop|status|uninstall
+  service start|stop|status                  (Linux systemd user unit)
   unenroll [--force-local] [--yes]
   status | doctor | logs
   mihomo install --version vX.Y.Z [--channel stable|alpha]
   mihomo status | restart | rollback
-  subscription status | check | update | rollback
+  subscription status | rollback
   proxy env bash|powershell
   proxy shell
-  proxy docker status|enable [--preview]|disable
-  proxy docker-desktop status|enable [--preview]|disable
 `)
 }
 
@@ -121,9 +114,6 @@ func runEnroll(args []string) error {
 	}
 	if err := secureControlURL(*serverURL); err != nil {
 		return err
-	}
-	if err := requireServicePrivileges(); err != nil {
-		return fmt.Errorf("enrollment requires host administrator privileges: %w", err)
 	}
 	if *code == "" {
 		fmt.Fprint(os.Stderr, "Pairing code: ")
@@ -175,9 +165,6 @@ func runEnroll(args []string) error {
 }
 
 func runServe(ctx context.Context) error {
-	if err := requireServicePrivileges(); err != nil {
-		return err
-	}
 	serveCtx, stopServe := context.WithCancel(ctx)
 	defer stopServe()
 	defaults := defaultPaths()
@@ -215,12 +202,28 @@ func runServe(ctx context.Context) error {
 			return err
 		}
 	}
-	core, err := hostops.DefaultLinuxManager(nil)
+	core, err := hostops.NewUserManager(defaults.core, defaults.config, defaults.runtime, nil)
 	if err != nil {
 		return err
 	}
-	dockerManager, _ := integration.DefaultDockerDaemonManager()
-	dockerDesktopManager, _ := integration.DefaultDockerDesktopManager()
+	resourceProxy := agentproto.NormalizeResourceProxy(agentproto.ResourceProxy{Mode: runtimeState.ResourceProxyMode, URL: runtimeState.ResourceProxyURL})
+	if err := agentproto.ValidateResourceProxy(resourceProxy); err != nil {
+		return errors.New("stored Agent resource proxy is invalid")
+	}
+	proxyController, supported := core.(hostops.ResourceProxyController)
+	if resourceProxy.Mode == agentproto.ResourceProxyCustom && !supported {
+		return errors.New("this Agent build cannot restore its stored resource proxy")
+	}
+	if supported {
+		proxyURL := ""
+		if resourceProxy.Mode == agentproto.ResourceProxyCustom {
+			proxyURL = resourceProxy.URL
+		}
+		if err := proxyController.SetResourceProxy(proxyURL); err != nil {
+			return errors.New("stored Agent resource proxy could not be restored")
+		}
+	}
+	defer core.Stop(context.Background())
 	controllerURL := "http://127.0.0.1:" + strconv.Itoa(runtimeState.ControllerPort)
 	mihomoClient, err := mihomo.NewClient(controllerURL, runtimeState.MihomoSecret, nil)
 	if err != nil {
@@ -232,14 +235,14 @@ func runServe(ctx context.Context) error {
 		Secret: runtimeState.MihomoSecret, Validator: core, Service: core, Verifier: verifier,
 	}
 	control := &agentclient.Client{ServerURL: identity.ServerURL, InstanceID: identity.InstanceID, PrivateKey: ed25519.PrivateKey(privateKey)}
-	daemon := &agent.Daemon{State: state, Control: control, Core: core, Deployer: deployer, Mihomo: mihomoClient, Docker: dockerManager, DockerDesktop: dockerDesktopManager, VerifyRuntime: func(ctx context.Context, port int) error {
+	daemon := &agent.Daemon{State: state, Control: control, Core: core, Deployer: deployer, Mihomo: mihomoClient, VerifyRuntime: func(ctx context.Context, port int) error {
 		address := ""
 		if port > 0 {
 			address = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
 		}
 		return verifier.VerifyRuntime(ctx, address)
 	}, AgentVersion: buildinfo.Current().Version, Capabilities: agent.PlatformCapabilities()}
-	localAPI := &agentlocal.API{State: state, Core: core, Daemon: daemon, Docker: dockerManager, DockerDesktop: dockerDesktopManager, Stop: stopServe}
+	localAPI := &agentlocal.API{State: state, Core: core, Daemon: daemon, Stop: stopServe}
 	listener, err := agentlocal.Listen(envOr("SUBMUX_AGENT_SOCKET", defaults.socket))
 	if err != nil {
 		return err
@@ -318,12 +321,12 @@ func runMihomo(args []string) error {
 
 func runSubscription(args []string) error {
 	if len(args) != 1 {
-		return errors.New("subscription requires exactly one of status, check, update or rollback")
+		return errors.New("subscription requires exactly one of status or rollback")
 	}
 	switch args[0] {
 	case "status":
 		return localPrint(http.MethodGet, "/v1/status", nil)
-	case "check", "update", "rollback":
+	case "rollback":
 		return localPrint(http.MethodPost, "/v1/subscription/"+args[0], []byte(`{}`))
 	default:
 		return fmt.Errorf("unknown subscription command %q", args[0])
@@ -331,12 +334,6 @@ func runSubscription(args []string) error {
 }
 
 func runProxy(args []string) error {
-	if len(args) >= 1 && args[0] == "docker" {
-		return runProxyDocker(args[1:])
-	}
-	if len(args) >= 1 && args[0] == "docker-desktop" {
-		return runProxyDockerDesktop(args[1:])
-	}
 	if len(args) == 2 && args[0] == "env" && (args[1] == "bash" || args[1] == "powershell") {
 		return localPrint(http.MethodGet, "/v1/proxy/env/"+args[1], nil)
 	}
@@ -369,112 +366,6 @@ func runProxy(args []string) error {
 		return command.Run()
 	}
 	return errors.New("proxy requires 'env bash', 'env powershell', or 'shell'")
-}
-
-func runProxyDockerDesktop(args []string) error {
-	if len(args) == 1 && args[0] == "status" {
-		return localPrint(http.MethodGet, "/v1/proxy/docker-desktop/status", nil)
-	}
-	if len(args) == 1 && args[0] == "disable" {
-		return localPrint(http.MethodPost, "/v1/proxy/docker-desktop/disable", []byte(`{}`))
-	}
-	if len(args) == 0 || args[0] != "enable" {
-		return errors.New("proxy docker-desktop requires status, enable [--preview], or disable")
-	}
-	flags := flag.NewFlagSet("proxy docker-desktop enable", flag.ContinueOnError)
-	previewOnly := flags.Bool("preview", false, "preview admin-settings.json without applying it")
-	if err := flags.Parse(args[1:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("proxy docker-desktop enable accepts only --preview")
-	}
-	proxyPort, err := localProxyPort()
-	if err != nil {
-		return err
-	}
-	previewBody, _ := json.Marshal(map[string]any{"proxy_port": proxyPort})
-	previewRaw, err := localCall(http.MethodPost, "/v1/proxy/docker-desktop/preview", previewBody)
-	if err != nil {
-		return err
-	}
-	if *previewOnly {
-		_, err = os.Stdout.Write(previewRaw)
-		return err
-	}
-	var preview integration.DockerPreview
-	if err := json.Unmarshal(previewRaw, &preview); err != nil {
-		return err
-	}
-	fmt.Printf("Before:\n%sAfter:\n%s%s\nConfirm Docker Business, enforced sign-in, and restart impact? [y/N]: ", preview.Before, preview.After, preview.Warning)
-	var answer string
-	if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil || !strings.EqualFold(answer, "y") {
-		return errors.New("Docker Desktop proxy activation cancelled")
-	}
-	enableBody, _ := json.Marshal(map[string]any{"proxy_port": proxyPort, "expected_original_hash": preview.OriginalHash})
-	return localPrint(http.MethodPost, "/v1/proxy/docker-desktop/enable", enableBody)
-}
-
-func runProxyDocker(args []string) error {
-	if len(args) == 1 && args[0] == "status" {
-		return localPrint(http.MethodGet, "/v1/proxy/docker/status", nil)
-	}
-	if len(args) == 1 && args[0] == "disable" {
-		return localPrint(http.MethodPost, "/v1/proxy/docker/disable", []byte(`{}`))
-	}
-	if len(args) == 0 || args[0] != "enable" {
-		return errors.New("proxy docker requires status, enable [--preview], or disable")
-	}
-	flags := flag.NewFlagSet("proxy docker enable", flag.ContinueOnError)
-	previewOnly := flags.Bool("preview", false, "preview the semantic daemon.json change without applying it")
-	if err := flags.Parse(args[1:]); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return errors.New("proxy docker enable accepts only --preview")
-	}
-	proxyPort, err := localProxyPort()
-	if err != nil {
-		return err
-	}
-	previewBody, _ := json.Marshal(map[string]any{"proxy_port": proxyPort})
-	previewRaw, err := localCall(http.MethodPost, "/v1/proxy/docker/preview", previewBody)
-	if err != nil {
-		return err
-	}
-	if *previewOnly {
-		_, err = os.Stdout.Write(previewRaw)
-		return err
-	}
-	var preview integration.DockerPreview
-	if err := json.Unmarshal(previewRaw, &preview); err != nil {
-		return err
-	}
-	fmt.Printf("Before:\n%sAfter:\n%s%s\nApply and restart Docker Engine? [y/N]: ", preview.Before, preview.After, preview.Warning)
-	var answer string
-	if _, err := fmt.Fscanln(os.Stdin, &answer); err != nil || !strings.EqualFold(answer, "y") {
-		return errors.New("Docker daemon proxy activation cancelled")
-	}
-	enableBody, _ := json.Marshal(map[string]any{"proxy_port": proxyPort, "expected_original_hash": preview.OriginalHash})
-	return localPrint(http.MethodPost, "/v1/proxy/docker/enable", enableBody)
-}
-
-func localProxyPort() (int, error) {
-	status, err := localCall(http.MethodGet, "/v1/status", nil)
-	if err != nil {
-		return 0, err
-	}
-	var value struct {
-		Runtime struct {
-			ProxyPort  int    `json:"proxy_port"`
-			ProxyKind  string `json:"proxy_kind"`
-			CoreStatus string `json:"core_status"`
-		} `json:"runtime"`
-	}
-	if err := json.Unmarshal(status, &value); err != nil || value.Runtime.CoreStatus != "running" || value.Runtime.ProxyPort < 1 || (value.Runtime.ProxyKind != "mixed" && value.Runtime.ProxyKind != "http") {
-		return 0, errors.New("Agent proxy port is unavailable")
-	}
-	return value.Runtime.ProxyPort, nil
 }
 
 func localPrint(method, path string, body []byte) error {

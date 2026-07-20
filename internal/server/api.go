@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"submux/internal/lifecycle"
+	"submux/internal/resourceproxy"
 	"submux/internal/store"
 )
 
@@ -24,6 +25,12 @@ const (
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
 }
 
 func randomHex(nBytes int) string {
@@ -50,10 +57,14 @@ type sourceDTO struct {
 	LifecyclePolicy  string            `json:"lifecycle_policy,omitempty"`
 	WarnBeforeDays   int               `json:"warn_before_days,omitempty"`
 	TrustNodeNotices bool              `json:"trust_node_notices,omitempty"`
+	FetchMode        string            `json:"fetch_mode,omitempty"`
 	NodeCount        int               `json:"node_count"`
 	NoticeCount      int               `json:"notice_count,omitempty"`
 	LastSuccessAt    string            `json:"last_success_at,omitempty"`
 	LastError        string            `json:"last_error,omitempty"`
+	LastSuccessRoute string            `json:"last_success_route,omitempty"`
+	LastDirectError  string            `json:"last_direct_error,omitempty"`
+	LastProxyError   string            `json:"last_proxy_error,omitempty"`
 	Userinfo         string            `json:"userinfo,omitempty"`
 	Lifecycle        *lifecycle.Status `json:"lifecycle,omitempty"`
 }
@@ -81,6 +92,7 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 			Tags: src.Tags, URL: src.URL, UserAgent: src.UserAgent,
 			Enabled: src.Enabled, SortOrder: src.SortOrder, NodeCount: counts[src.ID], NoticeCount: noticeCounts[src.ID],
 			LifecyclePolicy: src.LifecyclePolicy, WarnBeforeDays: src.WarnBeforeDays, TrustNodeNotices: src.TrustNodeNotices,
+			FetchMode: src.FetchMode,
 		}
 		if src.Kind == store.SourceKindSubscription {
 			c, err := s.store.GetCache(src.ID)
@@ -92,6 +104,9 @@ func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
 			}
 			d.LastSuccessAt = c.LastSuccessAt
 			d.LastError = c.LastError
+			d.LastSuccessRoute = c.LastSuccessRoute
+			d.LastDirectError = c.LastDirectError
+			d.LastProxyError = c.LastProxyError
 			d.Userinfo = c.UserinfoJSON
 			status := lifecycle.Evaluate(src, c, time.Now())
 			d.Lifecycle = &status
@@ -121,6 +136,7 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		LifecyclePolicy  string   `json:"lifecycle_policy"`
 		WarnBeforeDays   int      `json:"warn_before_days"`
 		TrustNodeNotices bool     `json:"trust_node_notices"`
+		FetchMode        string   `json:"fetch_mode"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -151,11 +167,19 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "warn_before_days must be between 1 and 365", http.StatusBadRequest)
 			return
 		}
+		if body.FetchMode == "" {
+			body.FetchMode = store.SourceFetchDirectOnly
+		}
+		if !validSourceFetchMode(body.FetchMode, body.URL) {
+			http.Error(w, "fetch_mode must be direct_only, or direct_then_platform_proxy for an HTTPS source", http.StatusBadRequest)
+			return
+		}
 	}
 	id, err := s.store.CreateSource(store.Source{
 		Kind: body.Kind, Name: body.Name, Description: strings.TrimSpace(body.Description),
 		Tags: store.NormalizeStringSet(body.Tags), URL: body.URL, UserAgent: strings.TrimSpace(body.UserAgent),
 		LifecyclePolicy: body.LifecyclePolicy, WarnBeforeDays: body.WarnBeforeDays, TrustNodeNotices: body.TrustNodeNotices,
+		FetchMode: body.FetchMode,
 	})
 	if err != nil {
 		http.Error(w, "create failed", http.StatusInternalServerError)
@@ -197,6 +221,7 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 		LifecyclePolicy  string   `json:"lifecycle_policy"`
 		WarnBeforeDays   int      `json:"warn_before_days"`
 		TrustNodeNotices *bool    `json:"trust_node_notices"`
+		FetchMode        string   `json:"fetch_mode"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -229,6 +254,7 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 		Tags: store.NormalizeStringSet(body.Tags), URL: body.URL, UserAgent: strings.TrimSpace(body.UserAgent),
 		SortOrder: body.SortOrder, Enabled: body.Enabled,
 		LifecyclePolicy: body.LifecyclePolicy, WarnBeforeDays: body.WarnBeforeDays,
+		FetchMode: body.FetchMode,
 	}
 	if body.TrustNodeNotices != nil {
 		src.TrustNodeNotices = *body.TrustNodeNotices
@@ -240,6 +266,13 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 	}
 	if src.WarnBeforeDays == 0 {
 		src.WarnBeforeDays = old.WarnBeforeDays
+	}
+	if src.FetchMode == "" {
+		src.FetchMode = old.FetchMode
+	}
+	if src.Kind == store.SourceKindSubscription && !validSourceFetchMode(src.FetchMode, src.URL) {
+		http.Error(w, "fetch_mode must be direct_only, or direct_then_platform_proxy for an HTTPS source", http.StatusBadRequest)
+		return
 	}
 	if src.Kind == store.SourceKindSubscription && src.LifecyclePolicy != store.LifecycleContinuity && src.LifecyclePolicy != store.LifecycleStrict {
 		http.Error(w, "lifecycle_policy must be continuity or strict", http.StatusBadRequest)
@@ -323,19 +356,48 @@ func (s *Server) handleRefreshSource(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+func (s *Server) handleRefreshSourceViaPlatformProxy(w http.ResponseWriter, r *http.Request) {
+	if s.fetcher == nil {
+		http.Error(w, "fetcher unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	id, err := idParam(r)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	src, err := s.store.GetSource(id)
+	if err != nil {
+		http.Error(w, "no such source", http.StatusNotFound)
+		return
+	}
+	fetchErr := s.fetcher.FetchOneViaPlatformProxy(r.Context(), src)
+	result := map[string]any{"ok": fetchErr == nil}
+	if fetchErr != nil {
+		result["error"] = fetchErr.Error()
+	}
+	writeJSON(w, result)
+}
+
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	base, _ := s.store.GetSetting("base_url")
 	interval, _ := s.store.GetSettingInt("fetch_interval_sec", 10800)
+	proxy, err := resourceproxy.Load(s.store)
+	if err != nil {
+		proxy = resourceproxy.Config{Mode: resourceproxy.ModeDirect}
+	}
 	writeJSON(w, map[string]any{
-		"base_url":           base,
-		"fetch_interval_sec": interval,
+		"base_url":                base,
+		"fetch_interval_sec":      interval,
+		"platform_resource_proxy": proxy,
 	})
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		BaseURL          string `json:"base_url"`
-		FetchIntervalSec int    `json:"fetch_interval_sec"`
+		BaseURL               string               `json:"base_url"`
+		FetchIntervalSec      int                  `json:"fetch_interval_sec"`
+		PlatformResourceProxy resourceproxy.Config `json:"platform_resource_proxy"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -348,6 +410,10 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.FetchIntervalSec != 0 && (body.FetchIntervalSec < minFetchIntervalSec || body.FetchIntervalSec > maxFetchIntervalSec) {
 		http.Error(w, "fetch_interval_sec must be between 60 and 604800", http.StatusBadRequest)
+		return
+	}
+	if err := resourceproxy.Validate(body.PlatformResourceProxy); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := s.store.SetSetting("base_url", body.BaseURL); err != nil {
@@ -363,12 +429,50 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 			s.fetcher.NotifyIntervalChanged()
 		}
 	}
+	if err := resourceproxy.Save(s.store, body.PlatformResourceProxy); err != nil {
+		http.Error(w, "save platform resource proxy failed", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+func (s *Server) handleTestPlatformResourceProxy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PlatformResourceProxy resourceproxy.Config `json:"platform_resource_proxy"`
+	}
+	if err := decodeJSON(r, &body); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	config := body.PlatformResourceProxy
+	client, err := resourceproxy.NewClient(config, 15*time.Second)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	req, _ := http.NewRequestWithContext(r.Context(), http.MethodGet, "https://api.github.com/rate_limit", nil)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "submux-platform-resource-proxy-test")
+	resp, err := client.Do(req)
+	if err != nil {
+		writeJSON(w, map[string]any{"ok": false, "error": "GitHub connection failed"})
+		return
+	}
+	resp.Body.Close()
+	writeJSON(w, map[string]any{"ok": resp.StatusCode >= 200 && resp.StatusCode < 400, "status": resp.StatusCode, "mode": config.Mode})
 }
 
 func validHTTPURL(raw string) bool {
 	u, err := url.Parse(raw)
 	return err == nil && u.Host != "" && (u.Scheme == "http" || u.Scheme == "https")
+}
+
+func validSourceFetchMode(mode, rawURL string) bool {
+	if mode == "" || mode == store.SourceFetchDirectOnly {
+		return true
+	}
+	u, err := url.Parse(rawURL)
+	return mode == store.SourceFetchProxyBackup && err == nil && u.Scheme == "https"
 }
 
 func validSource(kind, rawURL string) bool {

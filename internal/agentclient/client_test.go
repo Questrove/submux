@@ -11,7 +11,7 @@ import (
 	"submux/internal/agentproto"
 )
 
-func TestClientSignsStateAndBoundsArtifacts(t *testing.T) {
+func TestClientSignsStateRequest(t *testing.T) {
 	publicKey, privateKey, _ := agentproto.GenerateDeviceKey()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, _, err := agentproto.VerifyRequest(r, agentproto.VerifyOptions{Now: time.Now().UTC(), PublicKey: publicKey}); err != nil {
@@ -20,11 +20,11 @@ func TestClientSignsStateAndBoundsArtifacts(t *testing.T) {
 		}
 		switch r.URL.Path {
 		case "/api/agent/state":
-			_ = json.NewEncoder(w).Encode(map[string]any{"protocol_version": agentproto.Version, "desired": map[string]any{"instance_id": 1, "generation": 1, "desired_runtime_state": "stopped"}, "jobs": []any{}})
-		case "/api/agent/bindings/1/artifact":
-			w.Header().Set("ETag", `"revision"`)
-			w.Header().Set("X-Submux-Revision", "revision")
-			_, _ = w.Write([]byte("config"))
+			_ = json.NewEncoder(w).Encode(map[string]any{"protocol_version": agentproto.Version, "jobs": []any{}})
+		case "/api/agent/platform-subscriptions/12":
+			w.Header().Set("Content-Type", "text/yaml")
+			w.Header().Set("X-Submux-Revision", "revision-12")
+			_, _ = w.Write([]byte("mixed-port: 7890\n"))
 		default:
 			http.NotFound(w, r)
 		}
@@ -32,11 +32,11 @@ func TestClientSignsStateAndBoundsArtifacts(t *testing.T) {
 	defer server.Close()
 	client := &Client{ServerURL: server.URL, InstanceID: 1, PrivateKey: privateKey}
 	state, err := client.GetState(context.Background())
-	if err != nil || state.Desired.Generation != 1 {
+	if err != nil || state.ProtocolVersion != agentproto.Version || len(state.Jobs) != 0 {
 		t.Fatalf("state: %#v, %v", state, err)
 	}
-	artifact, err := client.FetchArtifact(context.Background(), 1, "")
-	if err != nil || string(artifact.Body) != "config" || artifact.Revision != "revision" {
-		t.Fatalf("artifact: %#v, %v", artifact, err)
+	published, err := client.FetchPlatformSubscription(context.Background(), 12)
+	if err != nil || string(published.Body) != "mixed-port: 7890\n" || published.Revision != "revision-12" {
+		t.Fatalf("platform subscription: %#v, %v", published, err)
 	}
 }

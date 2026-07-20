@@ -17,11 +17,12 @@ import (
 )
 
 var (
-	bucketConfig = []byte("config")
-	bucketJobs   = []byte("jobs")
-	bucketAudits = []byte("audits")
-	keyIdentity  = []byte("identity")
-	keyRuntime   = []byte("runtime")
+	bucketConfig        = []byte("config")
+	bucketJobs          = []byte("jobs")
+	bucketAudits        = []byte("audits")
+	bucketSubscriptions = []byte("subscriptions")
+	keyIdentity         = []byte("identity")
+	keyRuntime          = []byte("runtime")
 )
 
 type Identity struct {
@@ -41,26 +42,45 @@ func (i Identity) PrivateKeyBytes() ([]byte, error) {
 }
 
 type Runtime struct {
-	ObservedGeneration  int64                      `json:"observed_generation"`
-	BindingID           int64                      `json:"binding_id,omitempty"`
-	ArtifactETag        string                     `json:"artifact_etag,omitempty"`
-	RemoteRevision      string                     `json:"remote_revision,omitempty"`
-	AppliedRevision     string                     `json:"applied_revision,omitempty"`
-	RejectedRevision    string                     `json:"rejected_revision,omitempty"`
-	LastGoodRevision    string                     `json:"last_good_revision,omitempty"`
-	CoreVersion         string                     `json:"core_version,omitempty"`
-	PreviousCoreVersion string                     `json:"previous_core_version,omitempty"`
-	CoreStatus          string                     `json:"core_status"`
-	MihomoSecret        string                     `json:"mihomo_secret,omitempty"`
-	ProxyPort           int                        `json:"proxy_port,omitempty"`
-	ProxyKind           string                     `json:"proxy_kind,omitempty"`
-	ControllerPort      int                        `json:"controller_port,omitempty"`
-	SelectedProxies     map[string]string          `json:"selected_proxies,omitempty"`
-	SelectionNotice     string                     `json:"selection_notice,omitempty"`
-	Integrations        map[string]json.RawMessage `json:"integrations,omitempty"`
-	RecentError         string                     `json:"recent_error,omitempty"`
-	LastCheckAt         string                     `json:"last_check_at,omitempty"`
-	LastUpdateAt        string                     `json:"last_update_at,omitempty"`
+	RemoteRevision       string            `json:"remote_revision,omitempty"`
+	AppliedRevision      string            `json:"applied_revision,omitempty"`
+	RejectedRevision     string            `json:"rejected_revision,omitempty"`
+	LastGoodRevision     string            `json:"last_good_revision,omitempty"`
+	CoreVersion          string            `json:"core_version,omitempty"`
+	PreviousCoreVersion  string            `json:"previous_core_version,omitempty"`
+	CoreStatus           string            `json:"core_status"`
+	MihomoSecret         string            `json:"mihomo_secret,omitempty"`
+	ProxyPort            int               `json:"proxy_port,omitempty"`
+	ProxyKind            string            `json:"proxy_kind,omitempty"`
+	ControllerPort       int               `json:"controller_port,omitempty"`
+	SelectedProxies      map[string]string `json:"selected_proxies,omitempty"`
+	SelectionNotice      string            `json:"selection_notice,omitempty"`
+	ResourceProxyMode    string            `json:"resource_proxy_mode,omitempty"`
+	ResourceProxyURL     string            `json:"resource_proxy_url,omitempty"`
+	RecentError          string            `json:"recent_error,omitempty"`
+	LastUpdateAt         string            `json:"last_update_at,omitempty"`
+	ActiveSubscriptionID string            `json:"active_subscription_id,omitempty"`
+}
+
+// RuntimeSubscription is Agent-owned state. External URLs and downloaded
+// configuration are never returned in heartbeat observations.
+type RuntimeSubscription struct {
+	ID                     string `json:"id"`
+	Name                   string `json:"name"`
+	URL                    string `json:"url,omitempty"`
+	PlatformSubscriptionID int64  `json:"platform_subscription_id,omitempty"`
+	Host                   string `json:"host"`
+	Config                 []byte `json:"config,omitempty"`
+	Revision               string `json:"revision,omitempty"`
+	ETag                   string `json:"etag,omitempty"`
+	LastModified           string `json:"last_modified,omitempty"`
+	UsedBytes              int64  `json:"used_bytes,omitempty"`
+	TotalBytes             int64  `json:"total_bytes,omitempty"`
+	ExpiresAt              string `json:"expires_at,omitempty"`
+	LastUpdatedAt          string `json:"last_updated_at,omitempty"`
+	LastError              string `json:"last_error,omitempty"`
+	CreatedAt              string `json:"created_at"`
+	UpdatedAt              string `json:"updated_at"`
 }
 
 type LocalJob struct {
@@ -129,8 +149,78 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{bucketConfig, bucketJobs, bucketAudits} {
+		for _, name := range [][]byte{bucketConfig, bucketJobs, bucketAudits, bucketSubscriptions} {
 			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
+		}
+		config := tx.Bucket(bucketConfig)
+		if raw := config.Get(keyRuntime); raw != nil {
+			value := defaultRuntime()
+			if err := decodeRuntime(raw, &value); err != nil {
+				return err
+			}
+			if value.SelectedProxies == nil {
+				value.SelectedProxies = map[string]string{}
+			}
+			if err := putJSON(config, keyRuntime, value); err != nil {
+				return err
+			}
+		}
+		jobs := tx.Bucket(bucketJobs)
+		var staleJobs [][]byte
+		type jobUpdate struct {
+			key []byte
+			raw []byte
+		}
+		var jobUpdates []jobUpdate
+		if err := jobs.ForEach(func(key, raw []byte) error {
+			var value LocalJob
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return err
+			}
+			if value.Job.Type == "update_subscription" || value.Job.Type == "collect_diagnostics" {
+				staleJobs = append(staleJobs, append([]byte(nil), key...))
+			} else if value.Job.Type == "configure_download_proxy" {
+				value.Job.Type = agentproto.JobConfigureResourceProxy
+				value.Job.Params = migrateProxyObject(value.Job.Params)
+				value.Result = migrateProxyObject(value.Result)
+				encoded, err := json.Marshal(value)
+				if err != nil {
+					return err
+				}
+				jobUpdates = append(jobUpdates, jobUpdate{key: append([]byte(nil), key...), raw: encoded})
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, key := range staleJobs {
+			if err := jobs.Delete(key); err != nil {
+				return err
+			}
+		}
+		for _, update := range jobUpdates {
+			if err := jobs.Put(update.key, update.raw); err != nil {
+				return err
+			}
+		}
+		audits := tx.Bucket(bucketAudits)
+		var staleAudits [][]byte
+		if err := audits.ForEach(func(key, raw []byte) error {
+			var value LocalAudit
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return err
+			}
+			if value.Action == "subscription.update" {
+				staleAudits = append(staleAudits, append([]byte(nil), key...))
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		for _, key := range staleAudits {
+			if err := audits.Delete(key); err != nil {
 				return err
 			}
 		}
@@ -178,7 +268,7 @@ func (s *Store) ClearEnrollment() error {
 		if err := config.Delete(keyRuntime); err != nil {
 			return err
 		}
-		for _, name := range [][]byte{bucketJobs, bucketAudits} {
+		for _, name := range [][]byte{bucketJobs, bucketAudits, bucketSubscriptions} {
 			if err := tx.DeleteBucket(name); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
 				return err
 			}
@@ -190,20 +280,93 @@ func (s *Store) ClearEnrollment() error {
 	})
 }
 
+func (s *Store) ListRuntimeSubscriptions() ([]RuntimeSubscription, error) {
+	values := make([]RuntimeSubscription, 0)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketSubscriptions).ForEach(func(_, raw []byte) error {
+			var value RuntimeSubscription
+			if err := json.Unmarshal(raw, &value); err != nil {
+				return err
+			}
+			values = append(values, value)
+			return nil
+		})
+	})
+	sort.Slice(values, func(i, j int) bool {
+		if values[i].CreatedAt == values[j].CreatedAt {
+			return values[i].ID < values[j].ID
+		}
+		return values[i].CreatedAt < values[j].CreatedAt
+	})
+	return values, err
+}
+
+func (s *Store) RuntimeSubscription(id string) (RuntimeSubscription, error) {
+	var value RuntimeSubscription
+	err := s.db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket(bucketSubscriptions).Get([]byte(id))
+		if raw == nil {
+			return fmt.Errorf("no runtime subscription %q", id)
+		}
+		return json.Unmarshal(raw, &value)
+	})
+	return value, err
+}
+
+func (s *Store) SaveRuntimeSubscription(value RuntimeSubscription) (RuntimeSubscription, error) {
+	hasURL, hasPlatform := value.URL != "", value.PlatformSubscriptionID > 0
+	if value.ID == "" || value.Name == "" || value.Host == "" || hasURL == hasPlatform {
+		return RuntimeSubscription{}, errors.New("complete runtime subscription identity is required")
+	}
+	if len(value.Config) > 10<<20 {
+		return RuntimeSubscription{}, errors.New("runtime subscription config exceeds 10 MiB")
+	}
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketSubscriptions)
+		now := time.Now().UTC().Format(time.RFC3339)
+		if raw := bucket.Get([]byte(value.ID)); raw != nil {
+			var existing RuntimeSubscription
+			if err := json.Unmarshal(raw, &existing); err != nil {
+				return err
+			}
+			value.CreatedAt = existing.CreatedAt
+		} else {
+			count := 0
+			if err := bucket.ForEach(func(_, _ []byte) error { count++; return nil }); err != nil {
+				return err
+			}
+			if count >= 32 {
+				return errors.New("runtime subscription limit reached")
+			}
+			value.CreatedAt = now
+		}
+		value.UpdatedAt = now
+		return putJSON(bucket, []byte(value.ID), value)
+	})
+	return value, err
+}
+
+func (s *Store) DeleteRuntimeSubscription(id string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket(bucketSubscriptions)
+		if bucket.Get([]byte(id)) == nil {
+			return fmt.Errorf("no runtime subscription %q", id)
+		}
+		return bucket.Delete([]byte(id))
+	})
+}
+
 func (s *Store) Runtime() (Runtime, error) {
-	value := Runtime{CoreStatus: "not_installed", ControllerPort: 9090, SelectedProxies: map[string]string{}, Integrations: map[string]json.RawMessage{}}
+	value := defaultRuntime()
 	err := s.db.View(func(tx *bolt.Tx) error {
 		raw := tx.Bucket(bucketConfig).Get(keyRuntime)
 		if raw == nil {
 			return nil
 		}
-		return json.Unmarshal(raw, &value)
+		return decodeRuntime(raw, &value)
 	})
 	if value.SelectedProxies == nil {
 		value.SelectedProxies = map[string]string{}
-	}
-	if value.Integrations == nil {
-		value.Integrations = map[string]json.RawMessage{}
 	}
 	return value, err
 }
@@ -212,17 +375,14 @@ func (s *Store) UpdateRuntime(update func(*Runtime) error) (Runtime, error) {
 	var value Runtime
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(bucketConfig)
-		value = Runtime{CoreStatus: "not_installed", ControllerPort: 9090, SelectedProxies: map[string]string{}, Integrations: map[string]json.RawMessage{}}
+		value = defaultRuntime()
 		if raw := bucket.Get(keyRuntime); raw != nil {
-			if err := json.Unmarshal(raw, &value); err != nil {
+			if err := decodeRuntime(raw, &value); err != nil {
 				return err
 			}
 		}
 		if value.SelectedProxies == nil {
 			value.SelectedProxies = map[string]string{}
-		}
-		if value.Integrations == nil {
-			value.Integrations = map[string]json.RawMessage{}
 		}
 		if err := update(&value); err != nil {
 			return err
@@ -230,6 +390,53 @@ func (s *Store) UpdateRuntime(update func(*Runtime) error) (Runtime, error) {
 		return putJSON(bucket, keyRuntime, value)
 	})
 	return value, err
+}
+
+func defaultRuntime() Runtime {
+	return Runtime{CoreStatus: "not_installed", ControllerPort: 9090, ResourceProxyMode: agentproto.ResourceProxyDirect, SelectedProxies: map[string]string{}}
+}
+
+// decodeRuntime migrates the development-only download_proxy fields in place.
+// The next write keeps only resource_proxy fields.
+func decodeRuntime(raw []byte, value *Runtime) error {
+	if err := json.Unmarshal(raw, value); err != nil {
+		return err
+	}
+	var proxyFields struct {
+		ResourceMode *string `json:"resource_proxy_mode"`
+		LegacyMode   *string `json:"download_proxy_mode"`
+		LegacyURL    string  `json:"download_proxy_url"`
+	}
+	if err := json.Unmarshal(raw, &proxyFields); err != nil {
+		return err
+	}
+	if proxyFields.ResourceMode == nil && proxyFields.LegacyMode != nil {
+		value.ResourceProxyMode, value.ResourceProxyURL = *proxyFields.LegacyMode, proxyFields.LegacyURL
+	}
+	if value.ResourceProxyMode == "" {
+		value.ResourceProxyMode = agentproto.ResourceProxyDirect
+	}
+	return nil
+}
+
+func migrateProxyObject(raw json.RawMessage) json.RawMessage {
+	var object map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &object) != nil {
+		return raw
+	}
+	value, ok := object["download_proxy"]
+	if !ok {
+		return raw
+	}
+	if _, exists := object["resource_proxy"]; !exists {
+		object["resource_proxy"] = value
+	}
+	delete(object, "download_proxy")
+	encoded, err := json.Marshal(object)
+	if err != nil {
+		return raw
+	}
+	return encoded
 }
 
 // BeginJob durably records running before any external side effect. Repeated

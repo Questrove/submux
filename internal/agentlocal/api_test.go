@@ -92,4 +92,26 @@ func TestLocalAPILimitsMutationBodies(t *testing.T) {
 	}
 }
 
+func TestLocalAPIRemovesAbandonedRoutes(t *testing.T) {
+	handler := (&API{}).Handler()
+	for _, path := range []string{
+		"/v1/subscription/check",
+		"/v1/subscription/update",
+		"/v1/proxy/docker/status",
+		"/v1/proxy/docker/preview",
+		"/v1/proxy/docker/enable",
+		"/v1/proxy/docker/disable",
+		"/v1/proxy/docker-desktop/status",
+		"/v1/proxy/docker-desktop/preview",
+		"/v1/proxy/docker-desktop/enable",
+		"/v1/proxy/docker-desktop/disable",
+	} {
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("removed application configuration route %s returned %d", path, response.Code)
+		}
+	}
+}
+
 func containsText(value, target string) bool { return strings.Contains(value, target) }

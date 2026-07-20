@@ -10,16 +10,12 @@ import (
 )
 
 func defaultPaths() paths {
-	root := os.Getenv("ProgramData")
-	if root == "" {
-		root = os.TempDir()
-	}
+	root, _ := os.UserConfigDir()
 	root = filepath.Join(root, "submux-agent")
-	return paths{state: filepath.Join(root, "agent.db"), socket: `\\.\pipe\submux-agent`, config: filepath.Join(root, "mihomo-config")}
-}
-
-func requireServicePrivileges() error {
-	return errors.New("submux-agent service mode is currently implemented only on Linux")
+	return paths{
+		state: filepath.Join(root, "agent.db"), socket: filepath.Join(root, "agent.sock"),
+		config: filepath.Join(root, "mihomo-config"), core: filepath.Join(root, "mihomo-core"), runtime: filepath.Join(root, "mihomo-runtime"),
+	}
 }
 
 func prepareAgentStateLocation(string) error {
@@ -31,10 +27,6 @@ func defaultShell() (string, []string) { return "powershell.exe", []string{"-NoL
 func activateInstalledService() error { return nil }
 
 func runAgentService(run func(context.Context) error) error { return run(context.Background()) }
-
-func runPlatformMihomoService() error {
-	return errors.New("Mihomo service mode is unavailable on this platform")
-}
 
 func runAgentServiceCommand([]string) error {
 	return errors.New("Agent service management is unavailable on this platform")
