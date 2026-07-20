@@ -41,7 +41,6 @@ func TestEnsureBuiltinTemplatesSeedsDesktopTUNAndLinuxServer(t *testing.T) {
 		"find-process-mode: strict",
 		"stack: mixed",
 		"strict-route: true",
-		"route-exclude-address:\n    - 192.0.2.0/24\n    - 198.51.100.0/24",
 		"sniff:\n    HTTP:",
 		"cache-algorithm: arc",
 		"direct-nameserver:",
@@ -76,6 +75,7 @@ func TestEnsureBuiltinTemplatesSeedsDesktopTUNAndLinuxServer(t *testing.T) {
 		"DOMAIN-SUFFIX,gov,DIRECT",
 		"rule-providers:",
 		"DOMAIN-SUFFIX,",
+		"route-exclude-address:",
 	} {
 		if strings.Contains(version.Content, forbidden) {
 			t.Fatalf("recommended desktop TUN template contains forbidden legacy or service-specific setting %q:\n%s", forbidden, version.Content)
@@ -107,11 +107,11 @@ func TestEnsureBuiltinTemplatesSeedsDesktopTUNAndLinuxServer(t *testing.T) {
 	}
 }
 
-func TestEnsureBuiltinTemplatesUpgradesV3TUNTemplateWithWireGuardRoutes(t *testing.T) {
+func TestEnsureBuiltinTemplatesRemovesLegacyRouteExclusions(t *testing.T) {
 	st := compilerTestStore(t)
 	item := mihomoDesktopTUNTemplate()
 	routeBlock := "  route-exclude-address:\n    - 192.0.2.0/24\n    - 198.51.100.0/24\n"
-	legacyContent := strings.Replace(item.content, routeBlock, "", 1)
+	legacyContent := strings.Replace(item.content, "  strict-route: true\n", "  strict-route: true\n"+routeBlock, 1)
 	templateID, err := st.SaveTemplate(store.Template{
 		Name: item.name, Engine: item.engine, Scenario: item.scenario, Description: item.description, Status: "draft",
 	})
@@ -137,8 +137,8 @@ func TestEnsureBuiltinTemplatesUpgradesV3TUNTemplateWithWireGuardRoutes(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if current.Version != 1 || current.ID != legacyVersion.ID || !strings.Contains(current.Content, routeBlock) {
-		t.Fatalf("v3 TUN template was not upgraded with WireGuard exclusions: %#v", current)
+	if current.Version != 1 || current.ID != legacyVersion.ID || strings.Contains(current.Content, "route-exclude-address:") {
+		t.Fatalf("built-in TUN template retained legacy route exclusions: %#v", current)
 	}
 	if current.Checksum == legacyVersion.Checksum {
 		t.Fatal("in-place development migration did not update the version checksum")
@@ -161,7 +161,7 @@ func TestEnsureBuiltinTemplatesV5OverwritesCurrentVersionInDevelopment(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyContent := strings.Replace(item.content, "    - 198.51.100.0/24", "    - 172.28.8.1/32", 1)
+	legacyContent := strings.Replace(item.content, "  strict-route: true", "  strict-route: false", 1)
 	if _, err := st.PublishTemplateVersion(templateID, item.engineVersion, legacyContent, item.slots); err != nil {
 		t.Fatal(err)
 	}

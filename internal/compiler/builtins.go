@@ -12,7 +12,7 @@ type builtinTemplate struct {
 	slots                                                       []store.TemplateSlot
 }
 
-const builtinTemplatesCatalogVersion = "builtin_templates_v11"
+const builtinTemplatesCatalogVersion = "builtin_templates_v12"
 
 var retiredBuiltinTemplateKeys = map[string]bool{
 	templateKey(EngineMihomo, "Mihomo 桌面"):              true,
@@ -525,7 +525,7 @@ func mihomoDesktopTUNTemplate() builtinTemplate {
 		engine:        EngineMihomo,
 		scenario:      "desktop",
 		engineVersion: "mihomo 1.19+",
-		description:   "IPv4-only、mixed TUN、fake-ip DNS、MRS 分流与 WireGuard 网段绕行；适合由 Mihomo 独占默认路由的桌面客户端。",
+		description:   "IPv4-only、mixed TUN、fake-ip DNS 与 MRS 分流；适合由 Mihomo 独占默认路由的桌面客户端。",
 		content: `mixed-port: 7890
 allow-lan: false
 bind-address: 127.0.0.1
@@ -544,9 +544,6 @@ tun:
   auto-route: true
   auto-detect-interface: true
   strict-route: true
-  route-exclude-address:
-    - 192.0.2.0/24
-    - 198.51.100.0/24
   dns-hijack:
     - any:53
     - tcp://any:53

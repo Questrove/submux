@@ -159,7 +159,7 @@ v1 数据库首次打开时执行破坏式迁移：旧 Source 归类为 subscrip
 
 当前产品尚未发布，内置模板目录迁移可原地修正已有版本内容；正式发布后恢复严格的版本不可变约束。
 
-- Mihomo 桌面 TUN：IPv4-only、mixed TUN、严格路由和 fake-ip DNS，并排除 `192.0.2.0/24` 与 `198.51.100.0/24` 两个 WireGuard 网段。
+- Mihomo 桌面 TUN：IPv4-only、mixed TUN、严格路由和 fake-ip DNS；内置模板不预设任何用户网络的路由排除项。
 - Mihomo Linux 服务器：只向本机应用提供回环 mixed 代理，使用 redir-host 内部 DNS，不启用 TUN、透明代理、系统路由或进程匹配。
 
 两个模板都提供必填 `PROXY` 节点槽位和可选 `MEDIA` 节点槽位。`MEDIA` 默认包含 `PROXY` 作为回退，用户选择流媒体节点后追加到该策略组。通用规则由规则方案注入，自定义域名和网段只有在管理员明确添加后才进入编译结果。
