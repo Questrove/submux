@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -58,6 +60,25 @@ func TestRuntimeStreamNotificationsAreStrictlyParsed(t *testing.T) {
 		if _, _, ok := parseRuntimeStreamReason(value); ok {
 			t.Fatalf("unsafe stream hint was accepted: %q", value)
 		}
+	}
+}
+
+func TestExpectedStreamEndsAreNotReportedAsFailures(t *testing.T) {
+	for _, err := range []error{
+		nil,
+		context.Canceled,
+		context.DeadlineExceeded,
+		fmt.Errorf("wrapped: %w", io.EOF),
+		errors.New("write tcp 127.0.0.1:37902->127.0.0.1:8080: write: broken pipe"),
+		errors.New("read tcp: connection reset by peer"),
+		errors.New("websocket: close 1000 (normal)"),
+	} {
+		if !isExpectedStreamEnd(err) {
+			t.Fatalf("expected stream end was treated as a failure: %v", err)
+		}
+	}
+	if err := errors.New("dial tcp 127.0.0.1:9090: connect: connection refused"); isExpectedStreamEnd(err) {
+		t.Fatalf("Mihomo connection failure was hidden: %v", err)
 	}
 }
 

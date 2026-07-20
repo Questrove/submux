@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -160,7 +162,9 @@ func (d *Daemon) watchUpdates(ctx context.Context, notify func(string)) {
 		if ctx.Err() != nil {
 			return
 		}
-		d.Logf("agent update stream: %v", err)
+		if err != nil && !errors.Is(err, io.EOF) {
+			d.Logf("agent update stream: %v", err)
+		}
 		timer := time.NewTimer(5 * time.Second)
 		select {
 		case <-ctx.Done():
@@ -196,11 +200,24 @@ func (d *Daemon) serveRuntimeStream(parent context.Context, session, kind string
 	streamErr := control.OpenRuntimeStream(ctx, session, kind, frames)
 	cancel()
 	producerErr := <-producerDone
-	if streamErr != nil && !errors.Is(streamErr, context.Canceled) {
+	if !isExpectedStreamEnd(streamErr) {
 		d.Logf("runtime stream relay ended: %v", streamErr)
-	} else if producerErr != nil && !errors.Is(producerErr, context.Canceled) {
+	} else if !isExpectedStreamEnd(producerErr) {
 		d.Logf("Mihomo runtime stream ended: %v", producerErr)
 	}
+}
+
+func isExpectedStreamEnd(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{"broken pipe", "connection reset by peer", "use of closed network connection", "websocket: close"} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Daemon) produceRuntimeStream(ctx context.Context, kind string, send func(json.RawMessage) error) error {

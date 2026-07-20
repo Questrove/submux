@@ -264,6 +264,27 @@ func TestRuntimeWorkspaceUsesTaskOrientedDashboardLayout(t *testing.T) {
 	}
 }
 
+func TestRuntimeTrafficChartIncludesSpeedAndTimeAxes(t *testing.T) {
+	content, err := FS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(content)
+	for _, required := range []string{
+		`.runtime-chart-axis`,
+		`.runtime-chart-grid`,
+		`RUNTIME_TRAFFIC_HISTORY.push({up,down,at:Date.now()})`,
+		`function formatRuntimeTrafficTime(value)`,
+		`function runtimeTrafficScale(value)`,
+		`formatBytes(level*max)`,
+		`formatRuntimeTrafficTime(values[index].at)`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("runtime traffic chart is missing coordinate support %q", required)
+		}
+	}
+}
+
 func TestRuntimeProxyGroupsSeparateBuiltinsGroupsAndNodes(t *testing.T) {
 	content, err := FS.ReadFile("index.html")
 	if err != nil {
