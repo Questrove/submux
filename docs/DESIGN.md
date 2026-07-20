@@ -84,7 +84,7 @@ SourceCache 保存带 provenance 的生命周期元数据；高置信度 notice 
 
 编译 Mihomo 时只为启用项生成 `rule-provider`，URL 固定到目录快照对应的上游提交，格式为 MRS，下载更新统一设置 `proxy: PROXY`。域名 provider 同时生成 `nameserver-policy`：直连使用模板的 `direct-nameserver`，主代理和流媒体分别通过 `PROXY`、`MEDIA` 查询，拦截规则返回空结果。模板不再保存另一份 `rule-providers` 或 `rules`。
 
-内置“常用规则”包含私有地址、国内外地区分流、微软、Apple、Steam、开发服务和常见流媒体；广告过滤保留在目录中但默认不启用。`example.com` 与 `example.net` 作为最前面的自定义直连规则。宽泛集合之前必须放置对应的具体集合，例如 `microsoft@cn` 和 `onedrive` 在 `microsoft` 之前，`apple-cn` 和 Apple Music 在 `apple` 之前。
+内置“常用规则”包含私有地址、国内外地区分流、微软、Apple、Steam、开发服务和常见流媒体；广告过滤保留在目录中但默认不启用。内置方案的自定义规则默认为空，管理员添加的域名、网段和处理方式只保存在自己的规则方案中。宽泛集合之前必须放置对应的具体集合，例如 `microsoft@cn` 和 `onedrive` 在 `microsoft` 之前，`apple-cn` 和 Apple Music 在 `apple` 之前。
 
 ### 输出订阅编译与发布
 
@@ -162,7 +162,7 @@ v1 数据库首次打开时执行破坏式迁移：旧 Source 归类为 subscrip
 - Mihomo 桌面 TUN：IPv4-only、mixed TUN、严格路由和 fake-ip DNS，并排除 `192.0.2.0/24` 与 `198.51.100.0/24` 两个 WireGuard 网段。
 - Mihomo Linux 服务器：只向本机应用提供回环 mixed 代理，使用 redir-host 内部 DNS，不启用 TUN、透明代理、系统路由或进程匹配。
 
-两个模板都提供必填 `PROXY` 节点槽位和可选 `MEDIA` 节点槽位。`MEDIA` 默认包含 `PROXY` 作为回退，用户选择流媒体节点后追加到该策略组。规则及 `example.com`、`example.net` 的直连设置由规则方案注入。
+两个模板都提供必填 `PROXY` 节点槽位和可选 `MEDIA` 节点槽位。`MEDIA` 默认包含 `PROXY` 作为回退，用户选择流媒体节点后追加到该策略组。通用规则由规则方案注入，自定义域名和网段只有在管理员明确添加后才进入编译结果。
 
 Linux 服务器模板遵循 Mihomo 官方配置边界：`allow-lan: false` 且 mixed 入口绑定 `127.0.0.1`；显式代理场景使用 redir-host 而非 fake-ip/DNS 劫持；MRS 只用于 domain/ipcidr provider；控制 API 地址和 secret 由 Agent 在部署时注入。依据见 [General configuration](https://wiki.metacubex.one/en/config/general/)、[DNS configuration](https://wiki.metacubex.one/en/config/dns/)、[Route Rules](https://wiki.metacubex.one/en/config/rules/) 与 [Rule-Providers](https://wiki.metacubex.one/en/config/rule-providers/)。官方 systemd 示例包含 TUN/透明代理所需的广泛 capabilities，但本项目的服务器 sidecar 不使用这些能力，始终保持普通用户权限。
 

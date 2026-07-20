@@ -75,7 +75,7 @@ func TestEnsureBuiltinTemplatesSeedsDesktopTUNAndLinuxServer(t *testing.T) {
 		"DST-PORT,25",
 		"DOMAIN-SUFFIX,gov,DIRECT",
 		"rule-providers:",
-		"DOMAIN-SUFFIX,example.com,DIRECT",
+		"DOMAIN-SUFFIX,",
 	} {
 		if strings.Contains(version.Content, forbidden) {
 			t.Fatalf("recommended desktop TUN template contains forbidden legacy or service-specific setting %q:\n%s", forbidden, version.Content)
@@ -97,10 +97,13 @@ func TestEnsureBuiltinTemplatesSeedsDesktopTUNAndLinuxServer(t *testing.T) {
 	if !strings.Contains(string(result.Body), "server: example.com") {
 		t.Fatalf("compiled desktop TUN template is missing selected node:\n%s", result.Body)
 	}
-	for _, required := range []string{"example.com", "format: mrs", "proxy: PROXY", "MATCH,PROXY"} {
+	for _, required := range []string{"format: mrs", "proxy: PROXY", "MATCH,PROXY"} {
 		if !strings.Contains(string(result.Body), required) {
 			t.Fatalf("compiled desktop TUN configuration is missing rule profile output %q:\n%s", required, result.Body)
 		}
+	}
+	if strings.Contains(string(result.Body), "DOMAIN-SUFFIX,") {
+		t.Fatalf("compiled desktop TUN configuration contains user-specific defaults:\n%s", result.Body)
 	}
 }
 
@@ -395,7 +398,7 @@ func TestLinuxServerTemplateIsRootlessAgentSafe(t *testing.T) {
 	if !strings.Contains(string(result.Body), "server: example.com") {
 		t.Fatalf("compiled Linux server template is missing selected node:\n%s", result.Body)
 	}
-	if !strings.Contains(string(result.Body), "DOMAIN-SUFFIX,example.com,DIRECT") || !strings.Contains(string(result.Body), "RULE-SET") {
+	if !strings.Contains(string(result.Body), "RULE-SET") || strings.Contains(string(result.Body), "DOMAIN-SUFFIX,") {
 		t.Fatalf("compiled Linux server template is missing the default rule profile:\n%s", result.Body)
 	}
 }
@@ -503,7 +506,7 @@ func TestEnsureBuiltinTemplatesV11RenamesEntriesAndExtractsRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyContent := strings.Replace(desktop.content, "rules: []", "rules:\n  - DOMAIN-SUFFIX,example.com,DIRECT\n  - DOMAIN-SUFFIX,example.net,DIRECT\n  - MATCH,PROXY", 1)
+	legacyContent := strings.Replace(desktop.content, "rules: []", "rules:\n  - DOMAIN-SUFFIX,example.com,DIRECT\n  - MATCH,PROXY", 1)
 	legacyVersion, err := st.PublishTemplateVersion(legacyDesktopID, desktop.engineVersion, legacyContent, desktop.slots)
 	if err != nil {
 		t.Fatal(err)

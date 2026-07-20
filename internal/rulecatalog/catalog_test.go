@@ -48,8 +48,8 @@ func TestDefaultProfileUsesSpecificRulesBeforeBroadRules(t *testing.T) {
 			t.Fatalf("specific rule %q must precede %q", specific, broad)
 		}
 	}
-	if len(profile.CustomRules) != 2 || profile.CustomRules[0].Value != "example.com" || profile.CustomRules[1].Value != "example.net" {
-		t.Fatalf("default direct-domain overrides are missing: %+v", profile.CustomRules)
+	if len(profile.CustomRules) != 0 {
+		t.Fatalf("built-in profile must not contain user-specific custom rules: %+v", profile.CustomRules)
 	}
 }
 

@@ -531,7 +531,7 @@ func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 		if sub.StatusCode != http.StatusOK || !strings.Contains(string(content), "node.example.com") {
 			t.Fatalf("compiled %s subscription wrong: %d %s", engine, sub.StatusCode, content)
 		}
-		if engine == "mihomo" && (!strings.Contains(string(content), "rule-providers:") || !strings.Contains(string(content), "DOMAIN-SUFFIX,example.com,DIRECT") || !strings.Contains(string(content), "name: MEDIA")) {
+		if engine == "mihomo" && (!strings.Contains(string(content), "rule-providers:") || !strings.Contains(string(content), "name: MEDIA") || strings.Contains(string(content), "DOMAIN-SUFFIX,")) {
 			t.Fatalf("compiled Mihomo subscription is missing its default rule profile or MEDIA group: %s", content)
 		}
 		if engine == "sing-box" && !strings.Contains(sub.Header.Get("Content-Type"), "json") {
@@ -566,6 +566,9 @@ func TestRuleCatalogAndProfileAPI(t *testing.T) {
 	profilesResponse.Body.Close()
 	if len(profiles) != 1 || profiles[0].Key != "default" || !profiles[0].Builtin {
 		t.Fatalf("default rule profile was not seeded: %+v", profiles)
+	}
+	if len(profiles[0].CustomRules) != 0 {
+		t.Fatalf("default rule profile contains user-specific custom rules: %+v", profiles[0].CustomRules)
 	}
 
 	created := mustPost(t, client, srv.URL+"/api/rule-profiles", `{

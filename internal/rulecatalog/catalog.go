@@ -190,15 +190,11 @@ func DefaultProfileFor(value Snapshot) store.RuleProfile {
 		rules = append(rules, store.RuleSelection{Key: key, Action: entry.RecommendedAction})
 	}
 	return store.RuleProfile{
-		Key:         "default",
-		Name:        "常用规则",
-		Description: "国内服务直连，国际服务使用主代理，流媒体使用流媒体代理。",
-		Builtin:     true,
-		Rules:       rules,
-		CustomRules: []store.CustomRule{
-			{Type: "DOMAIN-SUFFIX", Value: "example.com", Action: ActionDirect},
-			{Type: "DOMAIN-SUFFIX", Value: "example.net", Action: ActionDirect},
-		},
+		Key:            "default",
+		Name:           "常用规则",
+		Description:    "国内服务直连，国际服务使用主代理，流媒体使用流媒体代理。",
+		Builtin:        true,
+		Rules:          rules,
 		FallbackAction: ActionProxy,
 		CatalogCommit:  value.Commit,
 	}
