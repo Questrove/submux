@@ -2,10 +2,15 @@ package source
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"submux/internal/store"
@@ -80,6 +85,97 @@ func TestFetchOneNetworkErrorDoesNotPersistSecretURL(t *testing.T) {
 	cache, _ := st.GetCache(id)
 	if err == nil || strings.Contains(err.Error(), "super-secret") || strings.Contains(cache.LastError, "super-secret") {
 		t.Fatalf("network error leaked source URL: err=%q cache=%q", err, cache.LastError)
+	}
+}
+
+func TestFetchOneFallsBackToConfiguredPlatformProxyAfterNetworkFailure(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "vless://00000000-0000-0000-0000-000000000001@node.example.com:443?encryption=none&type=tcp#HK")
+	}))
+	defer upstream.Close()
+
+	originalTransport := http.DefaultTransport
+	trustedTransport := originalTransport.(*http.Transport).Clone()
+	roots := x509.NewCertPool()
+	roots.AddCert(upstream.Certificate())
+	trustedTransport.TLSClientConfig = &tls.Config{RootCAs: roots}
+	http.DefaultTransport = trustedTransport
+	t.Cleanup(func() {
+		trustedTransport.CloseIdleConnections()
+		http.DefaultTransport = originalTransport
+	})
+
+	upstreamAddress := strings.TrimPrefix(upstream.URL, "https://")
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		if r.Method != http.MethodConnect {
+			http.Error(w, "CONNECT required", http.StatusMethodNotAllowed)
+			return
+		}
+		upstreamConn, err := net.Dial("tcp", upstreamAddress)
+		if err != nil {
+			http.Error(w, "upstream unavailable", http.StatusBadGateway)
+			return
+		}
+		clientConn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			upstreamConn.Close()
+			return
+		}
+		_, _ = io.WriteString(clientConn, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		go func() {
+			_, _ = io.Copy(upstreamConn, clientConn)
+			_ = upstreamConn.Close()
+		}()
+		_, _ = io.Copy(clientConn, upstreamConn)
+		_ = clientConn.Close()
+	}))
+	defer proxy.Close()
+
+	st := newTestStore(t)
+	if err := st.SetSetting("platform_resource_proxy_mode", "http"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSetting("platform_resource_proxy_url", proxy.URL); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := st.CreateSource(store.Source{
+		Name: "A", URL: "https://127.0.0.1:1/sub?token=secret", FetchMode: store.SourceFetchProxyBackup,
+	})
+	src, _ := st.GetSource(id)
+	if err := NewFetcher(st).FetchOne(context.Background(), src); err != nil {
+		t.Fatal(err)
+	}
+	cache, _ := st.GetCache(id)
+	if proxyHits.Load() != 1 || cache.LastSuccessRoute != "platform_proxy" || cache.LastDirectError == "" || cache.LastProxyError != "" {
+		t.Fatalf("fallback route was not recorded: hits=%d cache=%+v", proxyHits.Load(), cache)
+	}
+}
+
+func TestFetchOneDoesNotUsePlatformProxyForCertificateFailure(t *testing.T) {
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "unused")
+	}))
+	defer upstream.Close()
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyHits.Add(1)
+		http.Error(w, "unexpected", http.StatusBadGateway)
+	}))
+	defer proxy.Close()
+
+	st := newTestStore(t)
+	_ = st.SetSetting("platform_resource_proxy_mode", "http")
+	_ = st.SetSetting("platform_resource_proxy_url", proxy.URL)
+	id, _ := st.CreateSource(store.Source{Name: "A", URL: upstream.URL, FetchMode: store.SourceFetchProxyBackup})
+	src, _ := st.GetSource(id)
+	if err := NewFetcher(st).FetchOne(context.Background(), src); err == nil {
+		t.Fatal("certificate failure was accepted")
+	}
+	cache, _ := st.GetCache(id)
+	if proxyHits.Load() != 0 || cache.LastDirectError == "" || cache.LastProxyError != "" {
+		t.Fatalf("certificate failure unexpectedly used the proxy: hits=%d cache=%+v", proxyHits.Load(), cache)
 	}
 }
 

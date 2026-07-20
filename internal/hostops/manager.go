@@ -23,6 +23,29 @@ type CoreStatus struct {
 	State           string `json:"state"`
 }
 
+type CoreProgress struct {
+	Phase          string
+	BytesCompleted int64
+	BytesTotal     int64
+}
+
+type CoreProgressReporter func(CoreProgress)
+
+// ResourceProxyController is deliberately narrower than CoreManager. The
+// Agent may change only the transport used for built-in official resource
+// requests; it cannot supply a download URL.
+type ResourceProxyController interface {
+	SetResourceProxy(string) error
+	SetProgressReporter(CoreProgressReporter)
+}
+
+// CoreVersionLister exposes only versions available from the built-in
+// official Mihomo release source. The caller cannot provide a repository or
+// download URL.
+type CoreVersionLister interface {
+	ListCoreVersions(context.Context, string, int) ([]string, error)
+}
+
 func previousCoreVersion(root string) string {
 	metadata, err := readCoreMetadata(filepath.Join(root, "previous", "metadata.json"))
 	if err != nil {
@@ -215,6 +238,10 @@ type CoreManager interface {
 
 type ReleaseFetcher interface {
 	Fetch(ctx context.Context, channel, version, osName, arch string) (ReleaseBinary, error)
+}
+
+type ReleaseVersionSource interface {
+	ListVersions(ctx context.Context, channel, osName, arch string, limit int) ([]string, error)
 }
 
 type commandRunner interface {

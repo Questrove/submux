@@ -11,7 +11,6 @@ import (
 	"os"
 	"regexp"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,12 +19,8 @@ import (
 	"submux/internal/agentclient"
 	"submux/internal/agentlocal"
 	"submux/internal/agentproto"
-	"submux/internal/compiler"
-	"submux/internal/integration"
 	"submux/internal/store"
 )
-
-var exactCoreVersion = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?$`)
 
 func (s *Server) handleCreateAgentEnrollment(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -91,17 +86,14 @@ func (s *Server) handleAgentEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	requestID := randomHex(16)
-	s.audit(agentproto.ActorAgentReconcile, requestID, instance.ID, "agent.enroll", "", "succeeded", fmt.Sprintf("%s/%s device enrolled", instance.OS, instance.Arch))
+	s.audit(agentproto.ActorAgent, requestID, instance.ID, "agent.enroll", "", "succeeded", fmt.Sprintf("%s/%s device enrolled", instance.OS, instance.Arch))
 	writeJSON(w, map[string]any{"instance_id": instance.ID, "protocol_version": agentproto.Version, "request_id": requestID})
 }
 
 type runtimeInstanceView struct {
-	Instance    store.RuntimeInstance     `json:"instance"`
-	Local       bool                      `json:"local"`
-	Binding     *store.RuntimeBinding     `json:"binding,omitempty"`
-	Desired     store.RuntimeDesiredState `json:"desired"`
-	Observation store.RuntimeObservation  `json:"observation"`
-	Risk        *compiler.RuntimeAnalysis `json:"runtime_analysis,omitempty"`
+	Instance    store.RuntimeInstance    `json:"instance"`
+	Local       bool                     `json:"local"`
+	Observation store.RuntimeObservation `json:"observation"`
 }
 
 func (s *Server) runtimeView(id int64) (runtimeInstanceView, error) {
@@ -114,26 +106,11 @@ func (s *Server) runtimeView(id int64) (runtimeInstanceView, error) {
 			instance.Status = store.InstanceOffline
 		}
 	}
-	desired, err := s.store.GetRuntimeDesiredState(id)
-	if err != nil {
-		return runtimeInstanceView{}, err
-	}
 	observation, err := s.store.GetRuntimeObservation(id)
 	if err != nil {
 		return runtimeInstanceView{}, err
 	}
-	view := runtimeInstanceView{Instance: instance, Desired: desired, Observation: observation}
-	if binding, err := s.store.GetRuntimeBindingByInstance(id); err == nil {
-		view.Binding = &binding
-		if subscription, err := s.store.GetOutputSubscription(binding.OutputSubscriptionID); err == nil {
-			if version, err := s.store.GetTemplateVersion(subscription.TemplateVersionID); err == nil {
-				if analysis, err := compiler.AnalyzeMihomoRuntime(version.Content, version.RuntimeContract); err == nil {
-					view.Risk = &analysis
-				}
-			}
-		}
-	}
-	return view, nil
+	return runtimeInstanceView{Instance: instance, Observation: observation}, nil
 }
 
 func (s *Server) handleListRuntimeInstances(w http.ResponseWriter, _ *http.Request) {
@@ -170,9 +147,7 @@ func (s *Server) handleGetRuntimeInstance(w http.ResponseWriter, r *http.Request
 	view.Local = id == s.detectLocalAgent()
 	jobs, _ := s.store.ListAgentJobs(id)
 	audit, _ := s.store.ListAuditEvents(id, 100)
-	deployments, _ := s.store.ListDeployments(id, 50)
-	integrations, _ := s.store.ListIntegrationStates(id)
-	writeJSON(w, map[string]any{"runtime": view, "jobs": jobs, "deployments": deployments, "integrations": integrations, "audit": audit})
+	writeJSON(w, map[string]any{"runtime": view, "jobs": jobs, "audit": audit})
 }
 
 func (s *Server) detectLocalAgent() int64 {
@@ -230,248 +205,10 @@ func (s *Server) handleRevokeRuntimeInstance(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.updates.notify(id, "instance_revoked")
+	s.events.notify(id, "instance_revoked")
 	requestID := randomHex(16)
 	s.audit(agentproto.ActorAdminSession, requestID, id, "instance.revoke", "", "succeeded", "device access and pending work revoked")
 	writeJSON(w, map[string]any{"ok": true, "request_id": requestID})
-}
-
-func (s *Server) handlePutRuntimeBinding(w http.ResponseWriter, r *http.Request) {
-	instanceID, err := idParam(r)
-	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
-		return
-	}
-	instance, err := s.store.GetRuntimeInstance(instanceID)
-	if err != nil || instance.RevokedAt != "" {
-		http.Error(w, "runtime instance does not exist or is revoked", http.StatusNotFound)
-		return
-	}
-	var body struct {
-		OutputSubscriptionID int64 `json:"output_subscription_id"`
-		AutoUpdate           bool  `json:"auto_update"`
-		CheckIntervalSec     int   `json:"check_interval_sec"`
-	}
-	if err := decodeJSON(r, &body); err != nil {
-		http.Error(w, "invalid binding", http.StatusBadRequest)
-		return
-	}
-	subscription, err := s.store.GetOutputSubscription(body.OutputSubscriptionID)
-	if err != nil || !subscription.Enabled || subscription.Engine != compiler.EngineMihomo {
-		http.Error(w, "binding requires an enabled Mihomo output subscription", http.StatusBadRequest)
-		return
-	}
-	version, err := s.store.GetTemplateVersion(subscription.TemplateVersionID)
-	if err != nil || version.RuntimeContract != compiler.RuntimeContractMihomoAgentV1 {
-		http.Error(w, "template version does not publish mihomo-agent/v1", http.StatusBadRequest)
-		return
-	}
-	if _, err := s.compiler.Preview(subscription); err != nil {
-		http.Error(w, "bound output subscription is not currently valid: "+err.Error(), http.StatusConflict)
-		return
-	}
-	if body.CheckIntervalSec == 0 {
-		body.CheckIntervalSec = 300
-	}
-	binding, err := s.store.SaveRuntimeBinding(store.RuntimeBinding{
-		InstanceID: instanceID, OutputSubscriptionID: subscription.ID,
-		RuntimeContract: version.RuntimeContract, AutoUpdate: body.AutoUpdate, CheckIntervalSec: body.CheckIntervalSec,
-	})
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	s.updates.notify(instanceID, "binding_changed")
-	requestID := randomHex(16)
-	s.audit(agentproto.ActorAdminSession, requestID, instanceID, "binding.update", "", "succeeded", fmt.Sprintf("bound output subscription %d", subscription.ID))
-	analysis, _ := compiler.AnalyzeMihomoRuntime(version.Content, version.RuntimeContract)
-	writeJSON(w, map[string]any{"binding": binding, "runtime_analysis": analysis, "request_id": requestID})
-}
-
-func (s *Server) handleDeleteRuntimeBinding(w http.ResponseWriter, r *http.Request) {
-	instanceID, err := idParam(r)
-	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
-		return
-	}
-	if err := s.store.DeleteRuntimeBinding(instanceID); err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	s.updates.notify(instanceID, "binding_changed")
-	requestID := randomHex(16)
-	s.audit(agentproto.ActorAdminSession, requestID, instanceID, "binding.delete", "", "succeeded", "runtime binding removed")
-	writeJSON(w, map[string]any{"ok": true, "request_id": requestID})
-}
-
-func (s *Server) handlePutRuntimeDesiredState(w http.ResponseWriter, r *http.Request) {
-	instanceID, err := idParam(r)
-	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
-		return
-	}
-	instance, err := s.store.GetRuntimeInstance(instanceID)
-	if err != nil || instance.RevokedAt != "" {
-		http.Error(w, "runtime instance does not exist or is revoked", http.StatusNotFound)
-		return
-	}
-	var body struct {
-		ExpectedGeneration    int64                      `json:"expected_generation"`
-		CoreInstalled         bool                       `json:"desired_core_installed"`
-		CoreChannel           string                     `json:"core_channel"`
-		CoreVersionConstraint string                     `json:"core_version_constraint"`
-		CoreVersion           string                     `json:"desired_core_version"`
-		RuntimeState          string                     `json:"desired_runtime_state"`
-		Integrations          map[string]json.RawMessage `json:"desired_integrations"`
-	}
-	if err := decodeJSON(r, &body); err != nil {
-		http.Error(w, "invalid desired state", http.StatusBadRequest)
-		return
-	}
-	if body.RuntimeState != store.RuntimeRunning && body.RuntimeState != store.RuntimeStopped {
-		http.Error(w, "desired_runtime_state must be running or stopped", http.StatusBadRequest)
-		return
-	}
-	if body.CoreInstalled {
-		if !exactCoreVersion.MatchString(body.CoreVersion) {
-			http.Error(w, "desired_core_version must be an exact version", http.StatusBadRequest)
-			return
-		}
-		if body.CoreChannel != "stable" && body.CoreChannel != "alpha" {
-			http.Error(w, "core_channel must be stable or alpha", http.StatusBadRequest)
-			return
-		}
-		if body.CoreChannel == "stable" && regexp.MustCompile(`(?i)(alpha|beta|rc|pre)`).MatchString(body.CoreVersion) {
-			http.Error(w, "pre-release core versions require the alpha channel", http.StatusBadRequest)
-			return
-		}
-	} else if body.CoreVersion != "" || body.RuntimeState != store.RuntimeStopped {
-		http.Error(w, "an uninstalled core must have no version and remain stopped", http.StatusBadRequest)
-		return
-	}
-	if len(body.CoreVersionConstraint) > 128 {
-		http.Error(w, "core_version_constraint is too long", http.StatusBadRequest)
-		return
-	}
-	if err := validateDesiredIntegrations(body.Integrations); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := validateDesiredIntegrationCapabilities(body.Integrations, instance.Capabilities); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if enabled, proxyPort, err := desiredProxyIntegration(body.Integrations); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	} else if enabled {
-		observation, observationErr := s.store.GetRuntimeObservation(instanceID)
-		if !body.CoreInstalled || body.RuntimeState != store.RuntimeRunning || !currentProxyObservation(observation, observationErr, proxyPort, time.Now().UTC()) {
-			http.Error(w, "proxy integration requires the currently running Agent-managed HTTP or mixed listener", http.StatusConflict)
-			return
-		}
-	}
-	requestID := randomHex(16)
-	updated, err := s.store.UpdateRuntimeDesiredState(store.RuntimeDesiredState{
-		InstanceID: instanceID, CoreInstalled: body.CoreInstalled, CoreChannel: body.CoreChannel,
-		CoreVersionConstraint: body.CoreVersionConstraint, CoreVersion: body.CoreVersion,
-		RuntimeState: body.RuntimeState, Integrations: body.Integrations,
-		ActorType: agentproto.ActorAdminSession, RequestID: requestID,
-	}, body.ExpectedGeneration)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusConflict)
-		return
-	}
-	s.updates.notify(instanceID, "desired_state_changed")
-	s.audit(agentproto.ActorAdminSession, requestID, instanceID, "desired.update", strconv.FormatInt(updated.Generation, 10), "succeeded", "runtime desired state updated")
-	writeJSON(w, map[string]any{"desired": updated, "request_id": requestID})
-}
-
-func currentProxyObservation(observation store.RuntimeObservation, observationErr error, proxyPort int, now time.Time) bool {
-	if observationErr != nil || observation.CoreStatus != store.RuntimeRunning || !observation.ProxyListening || observation.ProxyPort != proxyPort || (observation.ProxyKind != "mixed" && observation.ProxyKind != "http") {
-		return false
-	}
-	observedAt, err := time.Parse(time.RFC3339, observation.ObservedAt)
-	return err == nil && !observedAt.After(now.Add(5*time.Second)) && now.Sub(observedAt) <= 90*time.Second
-}
-
-func validateDesiredIntegrations(values map[string]json.RawMessage) error {
-	for name, raw := range values {
-		switch name {
-		case integration.DockerDaemonType:
-			var config integration.DockerDaemonConfig
-			if err := decodeStrictIntegration(raw, &config); err != nil || config.Validate() != nil || config.Revision == "" {
-				return fmt.Errorf("invalid docker_daemon integration")
-			}
-			if config.Enabled && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(config.ExpectedOriginalHash) {
-				return fmt.Errorf("enabling docker_daemon requires the exact confirmed preview hash")
-			}
-		case integration.DockerDesktopType:
-			var config integration.DockerDesktopConfig
-			if err := decodeStrictIntegration(raw, &config); err != nil || config.Validate() != nil || config.Revision == "" {
-				return fmt.Errorf("invalid docker_desktop integration or missing Business prerequisite confirmation")
-			}
-			if config.Enabled && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(config.ExpectedOriginalHash) {
-				return fmt.Errorf("enabling docker_desktop requires the exact confirmed preview hash")
-			}
-		default:
-			return fmt.Errorf("unknown desired integration %q", name)
-		}
-	}
-	return nil
-}
-
-func validateDesiredIntegrationCapabilities(values map[string]json.RawMessage, capabilities []string) error {
-	required := map[string]string{
-		integration.DockerDaemonType:  "integration.docker_daemon",
-		integration.DockerDesktopType: "integration.docker_desktop",
-	}
-	for name := range values {
-		capability := required[name]
-		found := false
-		for _, value := range capabilities {
-			if value == capability {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("runtime instance does not advertise capability %q", capability)
-		}
-	}
-	return nil
-}
-
-func desiredProxyIntegration(values map[string]json.RawMessage) (bool, int, error) {
-	enabled, port := false, 0
-	for _, raw := range values {
-		var config struct {
-			Enabled   bool `json:"enabled"`
-			ProxyPort int  `json:"proxy_port"`
-		}
-		if err := json.Unmarshal(raw, &config); err != nil {
-			return false, 0, errors.New("invalid proxy integration")
-		}
-		if !config.Enabled {
-			continue
-		}
-		if enabled && port != config.ProxyPort {
-			return false, 0, errors.New("enabled proxy integrations must use the same Agent-managed listener")
-		}
-		enabled, port = true, config.ProxyPort
-	}
-	return enabled, port, nil
-}
-
-func decodeStrictIntegration(raw json.RawMessage, target any) error {
-	decoder := json.NewDecoder(strings.NewReader(string(raw)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return errors.New("integration contains trailing JSON")
-	}
-	return nil
 }
 
 func (s *Server) handleCreateRuntimeJob(w http.ResponseWriter, r *http.Request) {
@@ -513,11 +250,30 @@ func (s *Server) handleCreateRuntimeJob(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Expire queued or accepted work before deciding whether this instance is
+	// busy. Otherwise an offline Agent could leave a timed-out job blocking all
+	// later one-shot operations indefinitely.
+	if _, err := s.store.ListRunnableAgentJobs(instanceID, now); err != nil {
+		http.Error(w, "expire inactive jobs failed", http.StatusInternalServerError)
+		return
+	}
+	jobs, err := s.store.ListAgentJobs(instanceID)
+	if err != nil {
+		http.Error(w, "list active jobs failed", http.StatusInternalServerError)
+		return
+	}
+	for _, existing := range jobs {
+		if existing.Status == agentproto.JobQueued || existing.Status == agentproto.JobAccepted || existing.Status == agentproto.JobRunning {
+			http.Error(w, "the Agent is already executing another operation", http.StatusConflict)
+			return
+		}
+	}
 	if err := s.store.CreateAgentJob(job); err != nil {
 		http.Error(w, "create job failed", http.StatusInternalServerError)
 		return
 	}
 	s.updates.notify(instanceID, "job_queued")
+	s.events.notify(instanceID, "job_queued")
 	s.audit(agentproto.ActorAdminSession, job.RequestID, instanceID, "job."+job.Type+".create", job.ID, "queued", job.AuditReason)
 	writeJSON(w, job)
 }
@@ -552,21 +308,12 @@ func (s *Server) handleListRuntimeAudit(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleAgentState(w http.ResponseWriter, r *http.Request) {
 	instance := deviceInstance(r)
-	desired, err := s.store.GetRuntimeDesiredState(instance.ID)
-	if err != nil {
-		http.Error(w, "desired state unavailable", http.StatusInternalServerError)
-		return
-	}
 	jobs, err := s.store.ListRunnableAgentJobs(instance.ID, time.Now().UTC())
 	if err != nil {
 		http.Error(w, "jobs unavailable", http.StatusInternalServerError)
 		return
 	}
-	response := map[string]any{"protocol_version": agentproto.Version, "desired": desired, "jobs": jobs}
-	if binding, err := s.store.GetRuntimeBindingByInstance(instance.ID); err == nil {
-		response["binding"] = binding
-	}
-	writeJSON(w, response)
+	writeJSON(w, map[string]any{"protocol_version": agentproto.Version, "jobs": jobs})
 }
 
 func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -576,7 +323,6 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		Capabilities []string                 `json:"capabilities"`
 		Status       string                   `json:"status"`
 		Observation  store.RuntimeObservation `json:"observation"`
-		Deployment   *store.Deployment        `json:"deployment,omitempty"`
 	}
 	if err := decodeJSON(r, &body); err != nil || len(body.AgentVersion) > 128 || strings.ContainsAny(body.AgentVersion, "\r\n\x00") || agentproto.ValidateCapabilities(body.Capabilities) != nil {
 		http.Error(w, "invalid heartbeat", http.StatusBadRequest)
@@ -588,16 +334,14 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.Observation.RecentError = safeAgentError(body.Observation.RecentError)
-	desired, err := s.store.GetRuntimeDesiredState(instance.ID)
-	if err != nil {
-		http.Error(w, "desired state unavailable", http.StatusInternalServerError)
+	if body.Observation.Operation != nil {
+		body.Observation.Operation.Error = safeAgentError(body.Observation.Operation.Error)
+	}
+	if body.Observation.AgentUptimeSeconds < 0 {
+		http.Error(w, "invalid Agent uptime", http.StatusBadRequest)
 		return
 	}
-	if body.Observation.ObservedGeneration < 0 || body.Observation.ObservedGeneration > desired.Generation || body.Observation.AgentUptimeSeconds < 0 {
-		http.Error(w, "invalid observed generation or uptime", http.StatusBadRequest)
-		return
-	}
-	if len(body.Observation.SelectedProxies) > 256 || len(body.Observation.SelectionNotice) > 512 || len(body.Observation.Integrations) > 32 {
+	if len(body.Observation.SelectedProxies) > 256 || len(body.Observation.SelectionNotice) > 512 {
 		http.Error(w, "runtime observation exceeds its limits", http.StatusBadRequest)
 		return
 	}
@@ -605,7 +349,6 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	previousObservation, _ := s.store.GetRuntimeObservation(instance.ID)
 	if err := s.store.UpdateRuntimeHeartbeat(instance.ID, body.AgentVersion, body.Capabilities, body.Status, time.Now().UTC()); err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -614,34 +357,7 @@ func (s *Server) handleAgentHeartbeat(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save observation failed", http.StatusInternalServerError)
 		return
 	}
-	if err := s.saveIntegrationStates(instance.ID, desired, body.Observation); err != nil {
-		http.Error(w, "save integration state failed", http.StatusBadRequest)
-		return
-	}
-	if desired.RequestID != "" && body.Observation.ObservedGeneration == desired.Generation && previousObservation.ObservedGeneration < desired.Generation {
-		s.audit(agentproto.ActorAgentReconcile, desired.RequestID, instance.ID, "desired.reconciled", strconv.FormatInt(desired.Generation, 10), "succeeded", "runtime desired generation reconciled")
-	}
-	if body.Deployment != nil {
-		body.Deployment.InstanceID = instance.ID
-		body.Deployment.Error = safeAgentError(body.Deployment.Error)
-		if body.Deployment.ActorType == "" {
-			body.Deployment.ActorType = agentproto.ActorScheduler
-		}
-		if body.Deployment.RequestID == "" || !validAuditActor(body.Deployment.ActorType) {
-			http.Error(w, "deployment audit identity is invalid", http.StatusBadRequest)
-			return
-		}
-		if err := validateDeployment(*body.Deployment); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		deployment, err := s.store.AddDeployment(*body.Deployment)
-		if err != nil {
-			http.Error(w, "save deployment failed", http.StatusInternalServerError)
-			return
-		}
-		s.audit(agentproto.ActorAgentReconcile, deployment.RequestID, instance.ID, "deployment."+deployment.Status, deployment.RemoteRevision, deployment.Status, deployment.Error)
-	}
+	s.events.notify(instance.ID, "heartbeat")
 	s.handleAgentState(w, r)
 }
 
@@ -658,11 +374,53 @@ func validateRuntimeObservation(value store.RuntimeObservation) error {
 	if len(value.CoreVersion) > 128 || len(value.PreviousCoreVersion) > 128 || value.ProxyPort < 0 || value.ProxyPort > 65535 || value.ControllerPort < 0 || value.ControllerPort > 65535 {
 		return errors.New("runtime core or port observation is invalid")
 	}
+	if len(value.Subscriptions) > 32 {
+		return errors.New("runtime subscription observation exceeds its limits")
+	}
+	activeSeen := false
+	seenSubscriptions := make(map[string]bool, len(value.Subscriptions))
+	for _, subscription := range value.Subscriptions {
+		if err := agentproto.ValidateRuntimeSubscriptionSummary(subscription); err != nil {
+			return err
+		}
+		if seenSubscriptions[subscription.ID] {
+			return errors.New("runtime subscription observation contains duplicate IDs")
+		}
+		seenSubscriptions[subscription.ID] = true
+		if subscription.Active {
+			if activeSeen || subscription.ID != value.ActiveSubscriptionID {
+				return errors.New("runtime active subscription observation is invalid")
+			}
+			activeSeen = true
+		}
+	}
+	if (value.ActiveSubscriptionID != "") != activeSeen {
+		return errors.New("runtime active subscription observation is invalid")
+	}
 	if (value.ProxyPort == 0 && value.ProxyKind != "") || (value.ProxyPort > 0 && value.ProxyKind != "mixed" && value.ProxyKind != "http" && value.ProxyKind != "socks5") {
 		return errors.New("runtime proxy listener kind is invalid")
 	}
 	if value.CoreStatus != store.RuntimeNotInstalled && value.CoreStatus != store.RuntimeStopped && value.CoreStatus != store.RuntimeStarting && value.CoreStatus != store.RuntimeRunning && value.CoreStatus != store.RuntimeFailed {
 		return errors.New("runtime core status is invalid")
+	}
+	if value.ResourceProxyMode != "" && value.ResourceProxyMode != agentproto.ResourceProxyDirect && value.ResourceProxyMode != agentproto.ResourceProxyCustom {
+		return errors.New("runtime resource proxy observation is invalid")
+	}
+	if value.ResourceProxyMode == "" && value.ResourceProxyURL != "" {
+		return errors.New("runtime resource proxy observation is invalid")
+	}
+	if value.ResourceProxyMode != "" {
+		if err := agentproto.ValidateResourceProxy(agentproto.ResourceProxy{Mode: value.ResourceProxyMode, URL: value.ResourceProxyURL}); err != nil {
+			return errors.New("runtime resource proxy observation is invalid")
+		}
+	}
+	if value.Operation != nil {
+		operation := value.Operation
+		validStatus := operation.Status == "running" || operation.Status == "succeeded" || operation.Status == "failed"
+		validName := regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+		if !validStatus || !validName.MatchString(operation.Kind) || !validName.MatchString(operation.Phase) || operation.BytesCompleted < 0 || operation.BytesTotal < 0 || (operation.BytesTotal > 0 && operation.BytesCompleted > operation.BytesTotal) || len(operation.RequestID) > 128 || len(operation.JobID) > 128 || len(operation.Error) > 1024 {
+			return errors.New("runtime operation observation is invalid")
+		}
 	}
 	for group, proxy := range value.SelectedProxies {
 		if group == "" || proxy == "" || len(group) > 256 || len(proxy) > 256 || strings.ContainsAny(group+proxy, "\r\n\x00") {
@@ -670,77 +428,6 @@ func validateRuntimeObservation(value store.RuntimeObservation) error {
 		}
 	}
 	return nil
-}
-
-func validateDeployment(value store.Deployment) error {
-	validStatus := value.Status == "pending" || value.Status == "validating" || value.Status == "applying" || value.Status == "active" || value.Status == "rolled_back" || value.Status == "failed"
-	if !validStatus || len(value.RemoteRevision) > 256 || len(value.PreviousRevision) > 256 || len(value.MihomoVersion) > 128 || len(value.Validation) > 128 || len(value.Error) > 1024 {
-		return errors.New("deployment record is invalid")
-	}
-	for _, digest := range []string{value.ArtifactHash, value.EffectiveHash} {
-		if digest != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(digest) {
-			return errors.New("deployment digest is invalid")
-		}
-	}
-	return nil
-}
-
-func (s *Server) saveIntegrationStates(instanceID int64, desired store.RuntimeDesiredState, observation store.RuntimeObservation) error {
-	types := map[string]string{
-		integration.DockerDaemonType:  "system/rootful-docker-engine",
-		integration.DockerDesktopType: "system/docker-desktop-business",
-	}
-	for name := range observation.Integrations {
-		if _, ok := types[name]; !ok {
-			return fmt.Errorf("unknown observed integration %q", name)
-		}
-	}
-	for name, scope := range types {
-		desiredRaw, desiredExists := desired.Integrations[name]
-		observedRaw, observedExists := observation.Integrations[name]
-		if !desiredExists && !observedExists {
-			continue
-		}
-		desiredState, revision := "disabled", ""
-		if desiredExists {
-			var config struct {
-				Enabled  bool   `json:"enabled"`
-				Revision string `json:"revision"`
-			}
-			if err := json.Unmarshal(desiredRaw, &config); err != nil {
-				return err
-			}
-			if config.Enabled {
-				desiredState = "active"
-			}
-			revision = config.Revision
-		}
-		status := integration.DockerStatus{State: "disabled"}
-		if observedExists {
-			if err := decodeStrictIntegration(observedRaw, &status); err != nil {
-				return fmt.Errorf("invalid observed integration %q", name)
-			}
-		}
-		validation := "pending"
-		if status.State == desiredState {
-			validation = "verified"
-		} else if status.State == "failed" || status.State == "conflict" {
-			validation = "failed"
-		}
-		_, err := s.store.UpsertIntegrationState(store.IntegrationState{
-			InstanceID: instanceID, Type: name, Scope: scope,
-			DesiredState: desiredState, ObservedState: status.State, ConfigRevision: revision,
-			OriginalHash: status.OriginalHash, Conflict: safeAgentError(status.Conflict), Validation: validation,
-		})
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func validAuditActor(value string) bool {
-	return value == agentproto.ActorAdminSession || value == agentproto.ActorLocalCLI || value == agentproto.ActorAgentReconcile || value == agentproto.ActorScheduler
 }
 
 func (s *Server) handleAgentJobStatus(w http.ResponseWriter, r *http.Request) {
@@ -774,15 +461,14 @@ func (s *Server) handleAgentJobStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	s.audit(agentproto.ActorAgentReconcile, updated.RequestID, instance.ID, "job."+updated.Type+"."+updated.Status, updated.ID, updated.Status, safeAgentError(body.Error))
+	s.audit(agentproto.ActorAgent, updated.RequestID, instance.ID, "job."+updated.Type+"."+updated.Status, updated.ID, updated.Status, safeAgentError(body.Error))
+	s.events.notify(instance.ID, "job_status_changed")
 	writeJSON(w, updated)
 }
 
 var localAuditActions = map[string]bool{
 	"mihomo.install": true, "mihomo.restart": true, "mihomo.rollback": true,
-	"subscription.update": true, "subscription.rollback": true,
-	"integration.docker_daemon.enable": true, "integration.docker_daemon.disable": true,
-	"integration.docker_desktop.enable": true, "integration.docker_desktop.disable": true,
+	"subscription.rollback": true,
 }
 
 func (s *Server) handleAgentLocalAudit(w http.ResponseWriter, r *http.Request) {
@@ -811,51 +497,6 @@ func (s *Server) handleAgentRevokeSelf(w http.ResponseWriter, r *http.Request) {
 	}
 	s.updates.notify(instance.ID, "instance_revoked")
 	writeJSON(w, map[string]any{"ok": true, "request_id": requestID})
-}
-
-func (s *Server) handleAgentArtifact(w http.ResponseWriter, r *http.Request) {
-	instance := deviceInstance(r)
-	bindingID, err := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	if err != nil {
-		http.Error(w, "bad binding id", http.StatusBadRequest)
-		return
-	}
-	binding, err := s.store.GetRuntimeBinding(bindingID)
-	if err != nil || binding.InstanceID != instance.ID {
-		http.Error(w, "binding not found", http.StatusNotFound)
-		return
-	}
-	subscription, err := s.store.GetOutputSubscription(binding.OutputSubscriptionID)
-	if err != nil || !subscription.Enabled {
-		http.Error(w, "bound subscription unavailable", http.StatusGone)
-		return
-	}
-	version, err := s.store.GetTemplateVersion(subscription.TemplateVersionID)
-	if err != nil || version.RuntimeContract != binding.RuntimeContract || binding.RuntimeContract != compiler.RuntimeContractMihomoAgentV1 {
-		http.Error(w, "runtime contract mismatch", http.StatusConflict)
-		return
-	}
-	artifact, err := s.store.GetSubscriptionArtifact(subscription.ID)
-	if err != nil || len(artifact.Body) == 0 || artifact.BlockedReason != "" {
-		http.Error(w, "bound artifact unavailable", http.StatusServiceUnavailable)
-		return
-	}
-	etag := `"` + artifact.Revision + `"`
-	hash := sha256.Sum256(artifact.Body)
-	w.Header().Set("ETag", etag)
-	w.Header().Set("X-Submux-Revision", artifact.Revision)
-	w.Header().Set("X-Submux-SHA256", hex.EncodeToString(hash[:]))
-	w.Header().Set("Content-Type", artifact.ContentType)
-	w.Header().Set("Cache-Control", "private, no-store")
-	if r.Header.Get("If-None-Match") == etag {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-	if r.Method == http.MethodHead {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	_, _ = w.Write(artifact.Body)
 }
 
 func (s *Server) audit(actor, requestID string, instanceID int64, action, revision, result, summary string) {

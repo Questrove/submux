@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"submux/internal/compiler"
+	"submux/internal/rulecatalog"
 	"submux/internal/source"
 	"submux/internal/store"
 )
@@ -119,6 +121,88 @@ func TestSourceLifecycleAPI(t *testing.T) {
 	events.Body.Close()
 	if strings.TrimSpace(string(eventBody)) != "[]" {
 		t.Fatalf("empty lifecycle events must be a JSON array, got %s", eventBody)
+	}
+}
+
+func TestSourceFetchModeAndPlatformResourceProxySettings(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	invalid := mustPost(t, client, srv.URL+"/api/sources", `{"name":"Air","url":"http://provider.example/sub","fetch_mode":"direct_then_platform_proxy"}`)
+	invalid.Body.Close()
+	if invalid.StatusCode != http.StatusBadRequest {
+		t.Fatalf("HTTP source accepted automatic proxy fallback: %d", invalid.StatusCode)
+	}
+
+	created := mustPost(t, client, srv.URL+"/api/sources", `{"name":"Air","url":"http://provider.example/sub"}`)
+	var sourceResult struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.NewDecoder(created.Body).Decode(&sourceResult)
+	created.Body.Close()
+	update, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/sources/"+itoa(sourceResult.ID), strings.NewReader(`{"name":"Air","url":"https://provider.example/sub","enabled":true,"fetch_mode":"direct_then_platform_proxy"}`))
+	update.Header.Set("Content-Type", "application/json")
+	updated := mustDo(t, client, update)
+	updated.Body.Close()
+	if updated.StatusCode != http.StatusOK {
+		t.Fatalf("HTTPS source fallback update failed: %d", updated.StatusCode)
+	}
+
+	settings, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/settings", strings.NewReader(`{"base_url":"https://sub.example.com","fetch_interval_sec":1800,"platform_resource_proxy":{"mode":"http","url":"http://127.0.0.1:1080"}}`))
+	settings.Header.Set("Content-Type", "application/json")
+	settingsResponse := mustDo(t, client, settings)
+	settingsResponse.Body.Close()
+	if settingsResponse.StatusCode != http.StatusOK {
+		t.Fatalf("platform resource proxy settings failed: %d", settingsResponse.StatusCode)
+	}
+
+	sourcesResponse := mustGet(t, client, srv.URL+"/api/sources")
+	var sources []store.Source
+	_ = json.NewDecoder(sourcesResponse.Body).Decode(&sources)
+	sourcesResponse.Body.Close()
+	settingsView := mustGet(t, client, srv.URL+"/api/settings")
+	var settingsBody struct {
+		PlatformResourceProxy struct {
+			Mode string `json:"mode"`
+			URL  string `json:"url"`
+		} `json:"platform_resource_proxy"`
+	}
+	_ = json.NewDecoder(settingsView.Body).Decode(&settingsBody)
+	settingsView.Body.Close()
+	if len(sources) != 1 || sources[0].FetchMode != store.SourceFetchProxyBackup || settingsBody.PlatformResourceProxy.Mode != "http" || settingsBody.PlatformResourceProxy.URL != "http://127.0.0.1:1080" {
+		t.Fatalf("proxy settings were not returned: sources=%+v settings=%+v", sources, settingsBody)
+	}
+}
+
+func TestTemplateVersionAPIInfersNodeGroups(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	created := mustPost(t, client, srv.URL+"/api/templates", `{"name":"Custom Mihomo","engine":"mihomo","scenario":"server"}`)
+	var templateResult struct {
+		ID int64 `json:"id"`
+	}
+	_ = json.NewDecoder(created.Body).Decode(&templateResult)
+	created.Body.Close()
+	content := "proxy-groups:\n  - name: PROXY\n    type: select\n    proxies: []\n  - name: MEDIA\n    type: select\n    proxies: [PROXY]\n"
+	payload, _ := json.Marshal(map[string]string{"engine_version": "test", "content": content})
+	published := mustPost(t, client, srv.URL+"/api/templates/"+itoa(templateResult.ID)+"/versions", string(payload))
+	var version store.TemplateVersion
+	_ = json.NewDecoder(published.Body).Decode(&version)
+	published.Body.Close()
+	if published.StatusCode != http.StatusOK || len(version.Slots) != 2 || version.Slots[0].Target != "PROXY" || version.Slots[1].Target != "MEDIA" {
+		t.Fatalf("template node groups were not inferred: status=%d version=%+v", published.StatusCode, version)
+	}
+
+	legacyPayload, _ := json.Marshal(map[string]any{"engine_version": "test", "content": content, "slots": []any{}})
+	legacy := mustPost(t, client, srv.URL+"/api/templates/"+itoa(templateResult.ID)+"/versions", string(legacyPayload))
+	legacy.Body.Close()
+	if legacy.StatusCode != http.StatusBadRequest {
+		t.Fatalf("removed node slot JSON input was accepted: %d", legacy.StatusCode)
 	}
 }
 
@@ -398,23 +482,38 @@ func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 	templatesResponse := mustGet(t, c, srv.URL+"/api/templates")
 	var templates []struct {
 		ID               int64  `json:"id"`
+		Name             string `json:"name"`
 		Engine           string `json:"engine"`
 		CurrentVersionID int64  `json:"current_version_id"`
 	}
 	_ = json.NewDecoder(templatesResponse.Body).Decode(&templates)
 	templatesResponse.Body.Close()
-	if len(templates) != 6 {
-		t.Fatalf("want six platform templates, got %#v", templates)
+	if len(templates) != 2 || templates[0].Name != "Mihomo 桌面 TUN" || templates[1].Name != "Mihomo Linux 服务器" || templates[0].Engine != compiler.EngineMihomo || templates[1].Engine != compiler.EngineMihomo {
+		t.Fatalf("want desktop and Linux server platform templates, got %#v", templates)
 	}
 
+	customTemplateID, err := st.SaveTemplate(store.Template{
+		Name: "Test sing-box", Engine: compiler.EngineSingBox, Scenario: "test", Status: "draft",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	customVersion, err := st.PublishTemplateVersion(customTemplateID, "sing-box 1.14", `{
+  "outbounds": [
+    {"type": "selector", "tag": "PROXY", "outbounds": []},
+    {"type": "direct", "tag": "DIRECT"}
+  ],
+  "route": {"final": "PROXY"}
+}`, []store.TemplateSlot{{Key: "primary", Target: "PROXY", Mode: "replace", Required: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	versionByEngine := map[string]int64{
+		compiler.EngineMihomo:  templates[0].CurrentVersionID,
+		compiler.EngineSingBox: customVersion.ID,
+	}
 	for _, engine := range []string{"mihomo", "sing-box"} {
-		var versionID int64
-		for _, template := range templates {
-			if template.Engine == engine {
-				versionID = template.CurrentVersionID
-				break
-			}
-		}
+		versionID := versionByEngine[engine]
 		payload := `{"name":"` + engine + ` subscription","template_version_id":` + itoa(versionID) + `,"bindings":[{"slot":"primary","node_ids":[` + itoa(nodes[0].ID) + `]}]}`
 		created := mustPost(t, c, srv.URL+"/api/subscriptions", payload)
 		var subscriptionResult struct {
@@ -432,8 +531,107 @@ func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 		if sub.StatusCode != http.StatusOK || !strings.Contains(string(content), "node.example.com") {
 			t.Fatalf("compiled %s subscription wrong: %d %s", engine, sub.StatusCode, content)
 		}
+		if engine == "mihomo" && (!strings.Contains(string(content), "rule-providers:") || !strings.Contains(string(content), "DOMAIN-SUFFIX,example.com,DIRECT") || !strings.Contains(string(content), "name: MEDIA")) {
+			t.Fatalf("compiled Mihomo subscription is missing its default rule profile or MEDIA group: %s", content)
+		}
 		if engine == "sing-box" && !strings.Contains(sub.Header.Get("Content-Type"), "json") {
 			t.Fatalf("sing-box subscription has wrong content type: %q", sub.Header.Get("Content-Type"))
 		}
+	}
+}
+
+func TestRuleCatalogAndProfileAPI(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	catalogResponse := mustGet(t, client, srv.URL+"/api/rule-catalog")
+	var catalog struct {
+		Source  string `json:"source"`
+		Commit  string `json:"commit"`
+		Entries []struct {
+			Key string `json:"key"`
+		} `json:"entries"`
+	}
+	_ = json.NewDecoder(catalogResponse.Body).Decode(&catalog)
+	catalogResponse.Body.Close()
+	if catalogResponse.StatusCode != http.StatusOK || catalog.Source != "MetaCubeX/meta-rules-dat" || len(catalog.Commit) != 40 || len(catalog.Entries) < 2000 {
+		t.Fatalf("rule catalog response is incomplete: status=%d source=%q commit=%q count=%d", catalogResponse.StatusCode, catalog.Source, catalog.Commit, len(catalog.Entries))
+	}
+
+	profilesResponse := mustGet(t, client, srv.URL+"/api/rule-profiles")
+	var profiles []store.RuleProfile
+	_ = json.NewDecoder(profilesResponse.Body).Decode(&profiles)
+	profilesResponse.Body.Close()
+	if len(profiles) != 1 || profiles[0].Key != "default" || !profiles[0].Builtin {
+		t.Fatalf("default rule profile was not seeded: %+v", profiles)
+	}
+
+	created := mustPost(t, client, srv.URL+"/api/rule-profiles", `{
+      "name":"测试规则",
+      "description":"API test",
+      "fallback_action":"proxy",
+      "custom_rules":[{"type":"DOMAIN-SUFFIX","value":"example.com","action":"direct"}],
+      "rules":[{"key":"geosite/apple-cn","action":"direct"},{"key":"geosite/apple","action":"proxy"}]
+    }`)
+	var createResult struct {
+		ID int64 `json:"id"`
+	}
+	data, _ := io.ReadAll(created.Body)
+	created.Body.Close()
+	if created.StatusCode != http.StatusOK || json.Unmarshal(data, &createResult) != nil || createResult.ID == 0 {
+		t.Fatalf("create rule profile failed: %d %s", created.StatusCode, data)
+	}
+	createdProfile, err := st.GetRuleProfile(createResult.ID)
+	if err != nil || createdProfile.CatalogCommit != catalog.Commit {
+		t.Fatalf("new rule profile was not pinned to the active catalog: profile=%+v err=%v", createdProfile, err)
+	}
+
+	incompleteCommit := strings.Repeat("d", 40)
+	if err := rulecatalog.SaveActiveCatalog(st, rulecatalog.NewSnapshot(incompleteCommit, map[string][]string{"geosite": {"cn"}, "geoip": {"cn"}}, time.Now().UTC().Format(time.RFC3339))); err != nil {
+		t.Fatal(err)
+	}
+	conflict := mustPost(t, client, srv.URL+"/api/rule-profiles/"+itoa(createResult.ID)+"/catalog-version", `{}`)
+	conflict.Body.Close()
+	if conflict.StatusCode != http.StatusConflict || !strings.Contains(conflict.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("missing rules did not block catalog update with JSON details: %d %v", conflict.StatusCode, conflict.Header)
+	}
+	afterConflict, _ := st.GetRuleProfile(createResult.ID)
+	if afterConflict.CatalogCommit != catalog.Commit {
+		t.Fatalf("failed catalog update changed the profile: %+v", afterConflict)
+	}
+
+	updatedCommit := strings.Repeat("e", 40)
+	updatedCatalog := rulecatalog.Catalog()
+	updatedCatalog.Commit, updatedCatalog.Origin = updatedCommit, "github"
+	if err := rulecatalog.SaveActiveCatalog(st, updatedCatalog); err != nil {
+		t.Fatal(err)
+	}
+	updatedCatalogResponse := mustPost(t, client, srv.URL+"/api/rule-profiles/"+itoa(createResult.ID)+"/catalog-version", `{}`)
+	updatedCatalogResponse.Body.Close()
+	afterUpdate, _ := st.GetRuleProfile(createResult.ID)
+	if updatedCatalogResponse.StatusCode != http.StatusOK || afterUpdate.CatalogCommit != updatedCommit {
+		t.Fatalf("explicit catalog update failed: status=%d profile=%+v", updatedCatalogResponse.StatusCode, afterUpdate)
+	}
+
+	invalid := mustPost(t, client, srv.URL+"/api/rule-profiles", `{"name":"bad","fallback_action":"proxy","rules":[{"key":"geosite/not-a-real-rule","action":"direct"}]}`)
+	invalid.Body.Close()
+	if invalid.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown catalog rule was accepted: %d", invalid.StatusCode)
+	}
+
+	deleteBuiltin, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/rule-profiles/"+itoa(profiles[0].ID), nil)
+	deleteBuiltinResponse := mustDo(t, client, deleteBuiltin)
+	deleteBuiltinResponse.Body.Close()
+	if deleteBuiltinResponse.StatusCode != http.StatusConflict {
+		t.Fatalf("built-in rule profile was deleted: %d", deleteBuiltinResponse.StatusCode)
+	}
+
+	deleteCustom, _ := http.NewRequest(http.MethodDelete, srv.URL+"/api/rule-profiles/"+itoa(createResult.ID), nil)
+	deleteCustomResponse := mustDo(t, client, deleteCustom)
+	deleteCustomResponse.Body.Close()
+	if deleteCustomResponse.StatusCode != http.StatusOK {
+		t.Fatalf("delete custom rule profile failed: %d", deleteCustomResponse.StatusCode)
 	}
 }

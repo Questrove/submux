@@ -26,9 +26,11 @@ func (s *Store) CreateSource(src Source) (int64, error) {
 		src.Enabled = true // M1:新建源默认启用;停用走 SetSourceEnabled
 		if src.Kind == SourceKindSubscription {
 			src.UserAgent = defStr(src.UserAgent, "clash-verge/v2.0.0")
+			src.FetchMode = normalizeSourceFetchMode(src.FetchMode)
 		} else {
 			src.URL = ""
 			src.UserAgent = ""
+			src.FetchMode = ""
 		}
 		src.CreatedAt = now
 		src.UpdatedAt = now
@@ -188,14 +190,23 @@ func normalizeSourceLifecycle(src *Source) {
 		src.LifecyclePolicy = ""
 		src.WarnBeforeDays = 0
 		src.TrustNodeNotices = false
+		src.FetchMode = ""
 		return
 	}
+	src.FetchMode = normalizeSourceFetchMode(src.FetchMode)
 	if src.LifecyclePolicy != LifecycleStrict {
 		src.LifecyclePolicy = LifecycleContinuity
 	}
 	if src.WarnBeforeDays <= 0 {
 		src.WarnBeforeDays = 7
 	}
+}
+
+func normalizeSourceFetchMode(value string) string {
+	if value == SourceFetchProxyBackup {
+		return value
+	}
+	return SourceFetchDirectOnly
 }
 
 func (s *Store) SetSourceEnabled(id int64, enabled bool) error {

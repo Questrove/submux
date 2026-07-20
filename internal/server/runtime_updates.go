@@ -74,3 +74,39 @@ func (s *Server) handleAgentUpdates(w http.ResponseWriter, r *http.Request) {
 	}
 	server.ServeHTTP(w, r)
 }
+
+func (s *Server) handleBrowserRuntimeEvents(w http.ResponseWriter, r *http.Request) {
+	instanceID, err := idParam(r)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	instance, err := s.store.GetRuntimeInstance(instanceID)
+	if err != nil || instance.RevokedAt != "" {
+		http.Error(w, "runtime instance does not exist or is revoked", http.StatusNotFound)
+		return
+	}
+	websocket.Server{
+		Handshake: sameOriginWebSocket,
+		Handler: websocket.Handler(func(connection *websocket.Conn) {
+			updates, unsubscribe := s.events.subscribe(instanceID)
+			defer unsubscribe()
+			defer connection.Close()
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				message := map[string]any{"type": "keepalive"}
+				select {
+				case reason := <-updates:
+					message = map[string]any{"type": "runtime_changed", "reason": reason}
+				case <-ticker.C:
+				case <-r.Context().Done():
+					return
+				}
+				if err := websocket.JSON.Send(connection, message); err != nil {
+					return
+				}
+			}
+		}),
+	}.ServeHTTP(w, r)
+}

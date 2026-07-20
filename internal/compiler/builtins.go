@@ -8,259 +8,157 @@ import (
 )
 
 type builtinTemplate struct {
-	name, engine, scenario, description, engineVersion, runtimeContract, content string
-	slots                                                                        []store.TemplateSlot
+	name, engine, scenario, description, engineVersion, content string
+	slots                                                       []store.TemplateSlot
 }
 
-// EnsureBuiltinTemplates installs and upgrades the versioned starter catalog.
-// Templates remain ordinary records so administrators can publish newer
-// immutable versions without changing existing output subscriptions.
+const builtinTemplatesCatalogVersion = "builtin_templates_v11"
+
+var retiredBuiltinTemplateKeys = map[string]bool{
+	templateKey(EngineMihomo, "Mihomo 桌面"):              true,
+	templateKey(EngineMihomo, "Mihomo 桌面 TUN（推荐）"):      true,
+	templateKey(EngineMihomo, "Mihomo 网关"):              true,
+	templateKey(EngineMihomo, "Mihomo 服务器 Sidecar（推荐）"): true,
+	templateKey(EngineSingBox, "sing-box 桌面"):           true,
+	templateKey(EngineSingBox, "sing-box 服务器"):          true,
+}
+
+var builtinTemplateAliases = map[string]string{
+	templateKey(EngineMihomo, "Mihomo 桌面 TUN（推荐）"):      templateKey(EngineMihomo, "Mihomo 桌面 TUN"),
+	templateKey(EngineMihomo, "Mihomo 服务器 Sidecar（推荐）"): templateKey(EngineMihomo, "Mihomo Linux 服务器"),
+}
+
+func templateKey(engine, name string) string {
+	return engine + "\x00" + name
+}
+
+// EnsureBuiltinTemplates reconciles the pre-release starter catalog. Renamed
+// built-ins keep their IDs and current version IDs, user-created templates are
+// left untouched, and superseded built-ins are deleted unless an existing
+// output subscription still references one of their versions. Referenced
+// superseded templates remain hidden, retired compatibility records.
 func (s *Service) EnsureBuiltinTemplates() error {
-	seededV8, _ := s.store.GetSetting("builtin_templates_v8")
-	if seededV8 == "1" {
+	seeded, _ := s.store.GetSetting(builtinTemplatesCatalogVersion)
+	if seeded == "1" {
 		return nil
 	}
-	seededV7, _ := s.store.GetSetting("builtin_templates_v7")
-	if seededV7 == "1" {
-		return s.upgradeBuiltinTemplatesV8()
-	}
-	seededV6, _ := s.store.GetSetting("builtin_templates_v6")
-	if seededV6 == "1" {
-		return s.upgradeBuiltinTemplatesV7()
-	}
-	seededV5, _ := s.store.GetSetting("builtin_templates_v5")
-	if seededV5 == "1" {
-		return s.upgradeBuiltinTemplatesV6()
-	}
-	seededV4, _ := s.store.GetSetting("builtin_templates_v4")
-	if seededV4 == "1" {
-		if err := s.upgradeBuiltinTemplatesV5(); err != nil {
-			return err
-		}
-		return s.upgradeBuiltinTemplatesV6()
-	}
-	seededV3, _ := s.store.GetSetting("builtin_templates_v3")
-	if seededV3 == "1" {
-		if err := s.upgradeBuiltinTemplatesV5(); err != nil {
-			return err
-		}
-		return s.upgradeBuiltinTemplatesV6()
-	}
-	seededV2, _ := s.store.GetSetting("builtin_templates_v2")
 	items := builtinTemplates()
-	if seededV2 == "1" {
-		items = builtinTemplateUpgradesV3()
-	}
 	for _, item := range items {
 		if err := ValidateTemplate(item.engine, item.content, item.slots); err != nil {
 			return fmt.Errorf("builtin template %q: %w", item.name, err)
 		}
 	}
-	existing, err := s.store.ListTemplates()
-	if err != nil {
-		return err
-	}
-	byKey := make(map[string]store.Template, len(existing))
-	for _, item := range existing {
-		byKey[item.Engine+"\x00"+item.Name] = item
-	}
-	for _, item := range items {
-		key := item.engine + "\x00" + item.name
-		if template, ok := byKey[key]; ok {
-			if template.CurrentVersionID == 0 {
-				if _, err := s.store.PublishTemplateVersionWithContract(template.ID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
-					return err
-				}
-			}
-			continue
-		}
-		id, err := s.store.SaveTemplate(store.Template{
-			Name: item.name, Engine: item.engine, Scenario: item.scenario,
-			Description: item.description, Status: "draft",
-		})
-		if err != nil {
-			return err
-		}
-		if _, err := s.store.PublishTemplateVersionWithContract(id, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
-			return err
-		}
-		byKey[key] = store.Template{ID: id, Name: item.name, Engine: item.engine}
-	}
-	if err := s.store.SetSetting("builtin_templates_v2", "1"); err != nil {
-		return err
-	}
-	if err := s.store.SetSetting("builtin_templates_v3", "1"); err != nil {
-		return err
-	}
-	if err := s.store.SetSetting("builtin_templates_v4", "1"); err != nil {
-		return err
-	}
-	if err := s.store.SetSetting("builtin_templates_v5", "1"); err != nil {
-		return err
-	}
-	return s.upgradeBuiltinTemplatesV6()
-}
 
-func builtinTemplateUpgradesV3() []builtinTemplate {
-	return []builtinTemplate{mihomoDesktopTUNTemplate()}
-}
-
-// upgradeBuiltinTemplatesV5 is a pre-release catalog migration. During the
-// current development phase it intentionally rewrites the existing current
-// version in place so subscriptions pinned to that version receive the fix.
-func (s *Service) upgradeBuiltinTemplatesV5() error {
-	item := mihomoDesktopTUNTemplate()
-	if err := ValidateTemplate(item.engine, item.content, item.slots); err != nil {
-		return fmt.Errorf("builtin template %q: %w", item.name, err)
-	}
 	templates, err := s.store.ListTemplates()
 	if err != nil {
 		return err
 	}
-	var template store.Template
-	for _, candidate := range templates {
-		if candidate.Engine == item.engine && candidate.Name == item.name {
-			template = candidate
-			break
+	subscriptions, err := s.store.ListOutputSubscriptions()
+	if err != nil {
+		return err
+	}
+	referencedVersions := make(map[int64]bool, len(subscriptions))
+	for _, subscription := range subscriptions {
+		referencedVersions[subscription.TemplateVersionID] = true
+	}
+
+	catalogKeys := make(map[string]bool, len(items))
+	targets := make(map[string]store.Template, len(items))
+	selectedIDs := make(map[int64]bool, len(items))
+	for _, item := range items {
+		catalogKeys[templateKey(item.engine, item.name)] = true
+	}
+	// Exact current names take precedence when a partially migrated database
+	// contains both the old and new catalog entries.
+	for _, template := range templates {
+		key := templateKey(template.Engine, template.Name)
+		if catalogKeys[key] && targets[key].ID == 0 {
+			targets[key] = template
+			selectedIDs[template.ID] = true
 		}
 	}
-	if template.ID == 0 {
-		template.ID, err = s.store.SaveTemplate(store.Template{
-			Name: item.name, Engine: item.engine, Scenario: item.scenario,
-			Description: item.description, Status: "draft",
-		})
+	for _, template := range templates {
+		key := templateKey(template.Engine, template.Name)
+		targetKey := builtinTemplateAliases[key]
+		if targetKey == "" || targets[targetKey].ID != 0 {
+			continue
+		}
+		targets[targetKey] = template
+		selectedIDs[template.ID] = true
+	}
+
+	for _, template := range templates {
+		if selectedIDs[template.ID] {
+			continue
+		}
+		key := templateKey(template.Engine, template.Name)
+		if !retiredBuiltinTemplateKeys[key] && !catalogKeys[key] {
+			continue
+		}
+		versions, err := s.store.ListTemplateVersions(template.ID)
 		if err != nil {
 			return err
 		}
-	}
-	if template.CurrentVersionID == 0 {
-		if _, err := s.store.PublishTemplateVersionWithContract(template.ID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
-			return err
+		isReferenced := false
+		for _, version := range versions {
+			if referencedVersions[version.ID] {
+				isReferenced = true
+				break
+			}
 		}
-	} else {
-		current, getErr := s.store.GetTemplateVersion(template.CurrentVersionID)
-		if getErr != nil {
-			return getErr
-		}
-		if current.Content != item.content || current.EngineVersion != item.engineVersion {
-			if _, err := s.store.OverwriteTemplateVersionForDevelopmentWithContract(current.ID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
+		if isReferenced {
+			template.Status = "retired"
+			if _, err := s.store.SaveTemplate(template); err != nil {
 				return err
 			}
-			// Successful subscriptions receive refreshed artifacts. Failures keep
-			// their existing last-good artifact under the normal rebuild policy.
-			_ = s.RebuildAll()
-		}
-	}
-	if err := s.store.SetSetting("builtin_templates_v4", "1"); err != nil {
-		return err
-	}
-	return s.store.SetSetting("builtin_templates_v5", "1")
-}
-
-// upgradeBuiltinTemplatesV6 removes the redundant PROXY -> AUTO -> node
-// hierarchy from Mihomo templates. Selected nodes are injected directly into
-// the single PROXY group; full direct mode remains a core mode switch.
-func (s *Service) upgradeBuiltinTemplatesV6() error {
-	if err := s.upgradeMihomoBuiltinTemplates(); err != nil {
-		return err
-	}
-	if err := s.store.SetSetting("builtin_templates_v6", "1"); err != nil {
-		return err
-	}
-	return s.upgradeBuiltinTemplatesV7()
-}
-
-// upgradeBuiltinTemplatesV7 changes the single PROXY group from url-test to
-// select so latency tests never change the user's selected node.
-func (s *Service) upgradeBuiltinTemplatesV7() error {
-	if err := s.upgradeMihomoBuiltinTemplates(); err != nil {
-		return err
-	}
-	if err := s.store.SetSetting("builtin_templates_v7", "1"); err != nil {
-		return err
-	}
-	return s.upgradeBuiltinTemplatesV8()
-}
-
-// upgradeBuiltinTemplatesV8 adds the first Agent-compatible server template.
-// Existing template versions remain without a runtime contract until an owner
-// explicitly publishes one, so enabling the Agent never changes old behavior.
-func (s *Service) upgradeBuiltinTemplatesV8() error {
-	item := mihomoServerSidecarTemplate()
-	if err := ValidateTemplate(item.engine, item.content, item.slots); err != nil {
-		return fmt.Errorf("builtin template %q: %w", item.name, err)
-	}
-	templates, err := s.store.ListTemplates()
-	if err != nil {
-		return err
-	}
-	for _, template := range templates {
-		if template.Engine != item.engine || template.Name != item.name {
 			continue
 		}
-		if template.CurrentVersionID == 0 {
-			_, err = s.store.PublishTemplateVersionWithContract(template.ID, item.engineVersion, item.runtimeContract, item.content, item.slots)
-		} else {
-			current, getErr := s.store.GetTemplateVersion(template.CurrentVersionID)
-			if getErr != nil {
-				return getErr
-			}
-			if current.Content != item.content || current.EngineVersion != item.engineVersion || current.RuntimeContract != item.runtimeContract || !reflect.DeepEqual(current.Slots, item.slots) {
-				_, err = s.store.OverwriteTemplateVersionForDevelopmentWithContract(current.ID, item.engineVersion, item.runtimeContract, item.content, item.slots)
-			}
-		}
-		if err != nil {
+		if err := s.store.DeleteTemplate(template.ID); err != nil {
 			return err
 		}
-		return s.store.SetSetting("builtin_templates_v8", "1")
 	}
-	templateID, err := s.store.SaveTemplate(store.Template{
-		Name: item.name, Engine: item.engine, Scenario: item.scenario,
-		Description: item.description, Status: "draft",
-	})
-	if err != nil {
-		return err
-	}
-	if _, err := s.store.PublishTemplateVersionWithContract(templateID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
-		return err
-	}
-	return s.store.SetSetting("builtin_templates_v8", "1")
-}
 
-func (s *Service) upgradeMihomoBuiltinTemplates() error {
-	items := make([]builtinTemplate, 0, 3)
-	for _, item := range builtinTemplates() {
-		if item.engine == EngineMihomo {
-			items = append(items, item)
-		}
-	}
-	for _, item := range items {
-		if err := ValidateTemplate(item.engine, item.content, item.slots); err != nil {
-			return fmt.Errorf("builtin template %q: %w", item.name, err)
-		}
-	}
-	templates, err := s.store.ListTemplates()
-	if err != nil {
-		return err
-	}
-	byKey := make(map[string]store.Template, len(templates))
-	for _, template := range templates {
-		byKey[template.Engine+"\x00"+template.Name] = template
-	}
 	changed := false
 	for _, item := range items {
-		template, ok := byKey[item.engine+"\x00"+item.name]
-		if !ok || template.CurrentVersionID == 0 {
+		key := templateKey(item.engine, item.name)
+		target := targets[key]
+		if target.ID == 0 {
+			target.ID, err = s.store.SaveTemplate(store.Template{
+				Name: item.name, Engine: item.engine, Scenario: item.scenario,
+				Description: item.description, Status: "draft",
+			})
+			if err != nil {
+				return err
+			}
+		} else {
+			target.Name = item.name
+			target.Engine = item.engine
+			target.Scenario = item.scenario
+			target.Description = item.description
+			if target.CurrentVersionID == 0 {
+				target.Status = "draft"
+			} else {
+				target.Status = "published"
+			}
+			if _, err := s.store.SaveTemplate(target); err != nil {
+				return err
+			}
+		}
+
+		if target.CurrentVersionID == 0 {
+			if _, err := s.store.PublishTemplateVersion(target.ID, item.engineVersion, item.content, item.slots); err != nil {
+				return err
+			}
 			continue
 		}
-		current, err := s.store.GetTemplateVersion(template.CurrentVersionID)
+		current, err := s.store.GetTemplateVersion(target.CurrentVersionID)
 		if err != nil {
 			return err
 		}
-		if current.Content == item.content && current.EngineVersion == item.engineVersion && current.RuntimeContract == item.runtimeContract && reflect.DeepEqual(current.Slots, item.slots) {
+		if current.Content == item.content && current.EngineVersion == item.engineVersion && reflect.DeepEqual(current.Slots, item.slots) {
 			continue
 		}
-		if _, err := s.store.OverwriteTemplateVersionForDevelopmentWithContract(current.ID, item.engineVersion, item.runtimeContract, item.content, item.slots); err != nil {
+		if _, err := s.store.OverwriteTemplateVersionForDevelopment(current.ID, item.engineVersion, item.content, item.slots); err != nil {
 			return err
 		}
 		changed = true
@@ -270,10 +168,125 @@ func (s *Service) upgradeMihomoBuiltinTemplates() error {
 		// their last-good artifact under the normal rebuild policy.
 		_ = s.RebuildAll()
 	}
-	return nil
+	return s.store.SetSetting(builtinTemplatesCatalogVersion, "1")
+}
+
+// EnsureBuiltinTemplates reconciles the pre-release starter catalog to the
+// single template that has been verified in a real deployment. User-created
+// templates are left untouched. Superseded built-ins are deleted unless an
+// existing output subscription still references one of their versions; those
+// templates are retained as hidden, retired compatibility records.
+func (s *Service) ensureBuiltinTemplatesV9() error {
+	seeded, _ := s.store.GetSetting(builtinTemplatesCatalogVersion)
+	if seeded == "1" {
+		return nil
+	}
+	item := mihomoDesktopTUNTemplate()
+	if err := ValidateTemplate(item.engine, item.content, item.slots); err != nil {
+		return fmt.Errorf("builtin template %q: %w", item.name, err)
+	}
+
+	templates, err := s.store.ListTemplates()
+	if err != nil {
+		return err
+	}
+	subscriptions, err := s.store.ListOutputSubscriptions()
+	if err != nil {
+		return err
+	}
+	referencedVersions := make(map[int64]bool, len(subscriptions))
+	for _, subscription := range subscriptions {
+		referencedVersions[subscription.TemplateVersionID] = true
+	}
+
+	var target store.Template
+	for _, template := range templates {
+		key := templateKey(template.Engine, template.Name)
+		if key == templateKey(item.engine, item.name) && target.ID == 0 {
+			target = template
+			continue
+		}
+		if !retiredBuiltinTemplateKeys[key] {
+			continue
+		}
+		versions, listErr := s.store.ListTemplateVersions(template.ID)
+		if listErr != nil {
+			return listErr
+		}
+		isReferenced := false
+		for _, version := range versions {
+			if referencedVersions[version.ID] {
+				isReferenced = true
+				break
+			}
+		}
+		if isReferenced {
+			template.Status = "retired"
+			if _, err := s.store.SaveTemplate(template); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := s.store.DeleteTemplate(template.ID); err != nil {
+			return err
+		}
+	}
+
+	if target.ID == 0 {
+		target.ID, err = s.store.SaveTemplate(store.Template{
+			Name: item.name, Engine: item.engine, Scenario: item.scenario,
+			Description: item.description, Status: "draft",
+		})
+		if err != nil {
+			return err
+		}
+	} else {
+		target.Name = item.name
+		target.Engine = item.engine
+		target.Scenario = item.scenario
+		target.Description = item.description
+		if target.CurrentVersionID == 0 {
+			target.Status = "draft"
+		} else {
+			target.Status = "published"
+		}
+		if _, err := s.store.SaveTemplate(target); err != nil {
+			return err
+		}
+	}
+
+	changed := false
+	if target.CurrentVersionID == 0 {
+		if _, err := s.store.PublishTemplateVersion(target.ID, item.engineVersion, item.content, item.slots); err != nil {
+			return err
+		}
+	} else {
+		current, err := s.store.GetTemplateVersion(target.CurrentVersionID)
+		if err != nil {
+			return err
+		}
+		if current.Content != item.content || current.EngineVersion != item.engineVersion || !reflect.DeepEqual(current.Slots, item.slots) {
+			if _, err := s.store.OverwriteTemplateVersionForDevelopment(current.ID, item.engineVersion, item.content, item.slots); err != nil {
+				return err
+			}
+			changed = true
+		}
+	}
+	if changed {
+		// Successful subscriptions receive refreshed artifacts. Failures retain
+		// their last-good artifact under the normal rebuild policy.
+		_ = s.RebuildAll()
+	}
+	return s.store.SetSetting(builtinTemplatesCatalogVersion, "1")
 }
 
 func builtinTemplates() []builtinTemplate {
+	return []builtinTemplate{mihomoDesktopTUNTemplate(), mihomoLinuxServerTemplate()}
+}
+
+// legacyBuiltinTemplates documents the exact pre-v9 catalog. It is not seeded;
+// its names are kept here for migration tests and historical readability.
+func legacyBuiltinTemplates() []builtinTemplate {
 	slot := []store.TemplateSlot{{Key: "primary", Target: "PROXY", Mode: "replace", Required: true}}
 	return []builtinTemplate{
 		{
@@ -423,8 +436,7 @@ rules:
 func mihomoServerSidecarTemplate() builtinTemplate {
 	return builtinTemplate{
 		name: "Mihomo 服务器 Sidecar（推荐）", engine: EngineMihomo, scenario: "server", engineVersion: "mihomo 1.19+",
-		runtimeContract: RuntimeContractMihomoAgentV1,
-		description:     "仅监听回环地址、由 submux-agent 管理控制 API 的服务器 sidecar 配置。",
+		description: "仅监听回环地址、由 submux-agent 管理控制 API 的服务器 sidecar 配置。",
 		content: `mixed-port: 7890
 allow-lan: false
 bind-address: 127.0.0.1
@@ -455,9 +467,61 @@ rules:
 	}
 }
 
+func mihomoLinuxServerTemplate() builtinTemplate {
+	return builtinTemplate{
+		name:          "Mihomo Linux 服务器",
+		engine:        EngineMihomo,
+		scenario:      "server",
+		engineVersion: "mihomo 1.19+",
+		description:   "仅向本机应用提供 mixed 代理，不接管路由或系统配置；由 rootless submux-agent 管理 Mihomo。",
+		content: `mixed-port: 7890
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: warning
+ipv6: false
+find-process-mode: off
+unified-delay: true
+tcp-concurrent: true
+profile:
+  store-selected: true
+dns:
+  enable: true
+  cache-algorithm: arc
+  ipv6: false
+  enhanced-mode: redir-host
+  default-nameserver:
+    - tls://223.5.5.5
+    - tls://223.6.6.6
+  proxy-server-nameserver:
+    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query
+  direct-nameserver:
+    - https://doh.pub/dns-query
+    - https://dns.alidns.com/dns-query
+  nameserver:
+    - "https://1.1.1.1/dns-query#PROXY"
+    - "https://8.8.8.8/dns-query#PROXY"
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: []
+  - name: MEDIA
+    type: select
+    proxies:
+      - PROXY
+rules: []
+`,
+		slots: []store.TemplateSlot{
+			{Key: "primary", Target: "PROXY", Mode: "replace", Required: true},
+			{Key: "media", Target: "MEDIA", Mode: "append", Required: false},
+		},
+	}
+}
+
 func mihomoDesktopTUNTemplate() builtinTemplate {
 	return builtinTemplate{
-		name:          "Mihomo 桌面 TUN（推荐）",
+		name:          "Mihomo 桌面 TUN",
 		engine:        EngineMihomo,
 		scenario:      "desktop",
 		engineVersion: "mihomo 1.19+",
@@ -527,9 +591,6 @@ dns:
   nameserver-policy:
     "+.lan": system
     "+.local": system
-    "rule-set:cn_domain":
-      - https://doh.pub/dns-query
-      - https://dns.alidns.com/dns-query
   nameserver:
     - "https://1.1.1.1/dns-query#PROXY"
     - "https://8.8.8.8/dns-query#PROXY"
@@ -537,50 +598,15 @@ proxy-groups:
   - name: PROXY
     type: select
     proxies: []
-rule-providers:
-  private_domain:
-    type: http
-    behavior: domain
-    format: mrs
-    interval: 86400
-    proxy: PROXY
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/private.mrs"
-  cn_domain:
-    type: http
-    behavior: domain
-    format: mrs
-    interval: 86400
-    proxy: PROXY
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/cn.mrs"
-  geolocation_non_cn:
-    type: http
-    behavior: domain
-    format: mrs
-    interval: 86400
-    proxy: PROXY
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geosite/geolocation-!cn.mrs"
-  private_ip:
-    type: http
-    behavior: ipcidr
-    format: mrs
-    interval: 86400
-    proxy: PROXY
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/private.mrs"
-  cn_ip:
-    type: http
-    behavior: ipcidr
-    format: mrs
-    interval: 86400
-    proxy: PROXY
-    url: "https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/meta/geo/geoip/cn.mrs"
-rules:
-  - RULE-SET,private_domain,DIRECT
-  - RULE-SET,private_ip,DIRECT,no-resolve
-  - RULE-SET,cn_domain,DIRECT
-  - RULE-SET,geolocation_non_cn,PROXY
-  - RULE-SET,cn_ip,DIRECT,no-resolve
-  - MATCH,PROXY
+  - name: MEDIA
+    type: select
+    proxies:
+      - PROXY
+rules: []
 `,
-		slots: []store.TemplateSlot{{Key: "primary", Target: "PROXY", Mode: "replace", Required: true}},
+		slots: []store.TemplateSlot{
+			{Key: "primary", Target: "PROXY", Mode: "replace", Required: true},
+			{Key: "media", Target: "MEDIA", Mode: "append", Required: false},
+		},
 	}
 }

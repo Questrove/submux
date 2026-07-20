@@ -2,16 +2,21 @@ package source
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"syscall"
 	"time"
 
 	"submux/internal/lifecycle"
 	"submux/internal/node"
 	"submux/internal/parse"
+	"submux/internal/resourceproxy"
 	"submux/internal/store"
 )
 
@@ -19,7 +24,6 @@ const maxUpstreamBytes = 10 << 20
 
 type Fetcher struct {
 	store           *store.Store
-	client          *http.Client
 	intervalChanged chan struct{}
 	rebuilder       interface{ RebuildAll() error }
 }
@@ -29,7 +33,6 @@ func (f *Fetcher) SetRebuilder(rebuilder interface{ RebuildAll() error }) { f.re
 func NewFetcher(s *store.Store) *Fetcher {
 	return &Fetcher{
 		store:           s,
-		client:          &http.Client{Timeout: 30 * time.Second},
 		intervalChanged: make(chan struct{}, 1),
 	}
 }
@@ -39,11 +42,16 @@ func (f *Fetcher) FetchOne(ctx context.Context, src store.Source) error {
 	if src.Kind != "" && src.Kind != store.SourceKindSubscription {
 		return fmt.Errorf("source %d is not a subscription source", src.ID)
 	}
-	raw, userinfoHeader, err := f.download(ctx, src)
+	raw, userinfoHeader, route, directError, proxyError, err := f.download(ctx, src, false)
 	if err != nil {
 		_ = f.store.UpsertCacheError(src.ID, err.Error())
+		_ = f.store.SetCacheFetchResult(src.ID, "", directError, proxyError)
 		return err
 	}
+	return f.commitDownloaded(ctx, src, raw, userinfoHeader, route, directError, proxyError)
+}
+
+func (f *Fetcher) commitDownloaded(_ context.Context, src store.Source, raw, userinfoHeader, route, directError, proxyError string) error {
 	nodes, err := parse.ParseSubscription(raw)
 	if err != nil || len(nodes) == 0 {
 		if err == nil {
@@ -92,6 +100,7 @@ func (f *Fetcher) FetchOne(ctx context.Context, src store.Source) error {
 		_ = f.store.UpsertCacheError(src.ID, err.Error())
 		return err
 	}
+	_ = f.store.SetCacheFetchResult(src.ID, route, directError, proxyError)
 	status := lifecycle.Evaluate(src, store.Cache{LastSuccessAt: time.Now().UTC().Format(time.RFC3339), Metadata: metadata}, time.Now())
 	_, _ = f.store.RecordLifecycleState(src.ID, status.Entitlement)
 	if proxyCount == 0 {
@@ -108,61 +117,139 @@ func (f *Fetcher) FetchOne(ctx context.Context, src store.Source) error {
 	return nil
 }
 
-func (f *Fetcher) download(ctx context.Context, src store.Source) (raw, userinfoHeader string, err error) {
-	var last error
-	for attempt := 0; attempt < 3; attempt++ {
-		raw, userinfoHeader, err = f.downloadOnce(ctx, src)
-		if err == nil {
-			return raw, userinfoHeader, nil
+func (f *Fetcher) download(ctx context.Context, src store.Source, forceProxy bool) (raw, userinfoHeader, route, directError, proxyError string, err error) {
+	if forceProxy {
+		config, loadErr := resourceproxy.Load(f.store)
+		if loadErr != nil || config.Mode == resourceproxy.ModeDirect {
+			return "", "", "", "", "platform resource proxy is not configured", errors.New("platform resource proxy is not configured")
 		}
-		last = err
-		var upstream *upstreamError
-		if ctx.Err() != nil || !errors.As(err, &upstream) || !upstream.retryable || attempt == 2 {
-			break
+		client, clientErr := sourceClient(config, src.URL)
+		if clientErr != nil {
+			return "", "", "", "", "platform resource proxy is invalid", clientErr
 		}
-		timer := time.NewTimer(time.Duration(attempt+1) * 200 * time.Millisecond)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return "", "", fmt.Errorf("upstream request canceled or timed out")
-		case <-timer.C:
+		raw, userinfoHeader, err = f.downloadOnce(ctx, client, src)
+		if err != nil {
+			return "", "", "", "", err.Error(), err
 		}
+		return raw, userinfoHeader, "platform_proxy", "", "", nil
 	}
-	return "", "", last
+
+	directClient, clientErr := sourceClient(resourceproxy.Config{Mode: resourceproxy.ModeDirect}, src.URL)
+	if clientErr != nil {
+		return "", "", "", "invalid upstream URL", "", clientErr
+	}
+	raw, userinfoHeader, err = f.downloadOnce(ctx, directClient, src)
+	if err == nil {
+		return raw, userinfoHeader, "direct", "", "", nil
+	}
+	directError = err.Error()
+	var upstream *upstreamError
+	parsed, _ := url.Parse(src.URL)
+	if src.FetchMode != store.SourceFetchProxyBackup || parsed == nil || parsed.Scheme != "https" || !errors.As(err, &upstream) || !upstream.proxyFallback {
+		return "", "", "", directError, "", err
+	}
+	config, loadErr := resourceproxy.Load(f.store)
+	if loadErr != nil || config.Mode == resourceproxy.ModeDirect {
+		return "", "", "", directError, "platform resource proxy is not configured", err
+	}
+	proxyClient, clientErr := sourceClient(config, src.URL)
+	if clientErr != nil {
+		return "", "", "", directError, "platform resource proxy is invalid", err
+	}
+	raw, userinfoHeader, proxyErr := f.downloadOnce(ctx, proxyClient, src)
+	if proxyErr != nil {
+		proxyError = proxyErr.Error()
+		return "", "", "", directError, proxyError, fmt.Errorf("direct request failed; platform proxy request failed")
+	}
+	return raw, userinfoHeader, "platform_proxy", directError, "", nil
+}
+
+func (f *Fetcher) FetchOneViaPlatformProxy(ctx context.Context, src store.Source) error {
+	if src.Kind != store.SourceKindSubscription {
+		return errors.New("only subscription sources can be refreshed")
+	}
+	parsed, _ := url.Parse(src.URL)
+	if parsed == nil || parsed.Scheme != "https" {
+		return errors.New("platform proxy retry requires an HTTPS subscription URL")
+	}
+	originalMode := src.FetchMode
+	src.FetchMode = store.SourceFetchDirectOnly
+	raw, userinfo, route, directError, proxyError, err := f.download(ctx, src, true)
+	src.FetchMode = originalMode
+	if err != nil {
+		_ = f.store.UpsertCacheError(src.ID, err.Error())
+		_ = f.store.SetCacheFetchResult(src.ID, "", directError, proxyError)
+		return err
+	}
+	return f.commitDownloaded(ctx, src, raw, userinfo, route, directError, proxyError)
 }
 
 type upstreamError struct {
-	message   string
-	retryable bool
+	message       string
+	proxyFallback bool
 }
 
 func (e *upstreamError) Error() string { return e.message }
 
-func (f *Fetcher) downloadOnce(ctx context.Context, src store.Source) (raw, userinfoHeader string, err error) {
+func (f *Fetcher) downloadOnce(ctx context.Context, client *http.Client, src store.Source) (raw, userinfoHeader string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
 	if err != nil {
 		return "", "", &upstreamError{message: "invalid upstream URL"}
 	}
 	req.Header.Set("User-Agent", defUA(src.UserAgent))
-	resp, err := f.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		if ctx.Err() != nil {
 			return "", "", &upstreamError{message: "upstream request canceled or timed out"}
 		}
-		return "", "", &upstreamError{message: "upstream request failed", retryable: true}
+		return "", "", &upstreamError{message: "upstream request failed", proxyFallback: networkFallbackAllowed(err)}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", "", &upstreamError{message: fmt.Sprintf("upstream status %d", resp.StatusCode), retryable: resp.StatusCode >= 500}
+		return "", "", &upstreamError{message: fmt.Sprintf("upstream status %d", resp.StatusCode)}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBytes+1))
 	if err != nil {
-		return "", "", &upstreamError{message: "upstream body read failed", retryable: true}
+		return "", "", &upstreamError{message: "upstream body read failed", proxyFallback: networkFallbackAllowed(err) || errors.Is(err, io.ErrUnexpectedEOF)}
 	}
 	if len(body) > maxUpstreamBytes {
 		return "", "", &upstreamError{message: fmt.Sprintf("upstream body exceeds %d bytes", maxUpstreamBytes)}
 	}
 	return string(body), resp.Header.Get("Subscription-Userinfo"), nil
+}
+
+func sourceClient(config resourceproxy.Config, sourceURL string) (*http.Client, error) {
+	client, err := resourceproxy.NewClient(config, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := url.Parse(sourceURL)
+	if err != nil || parsed.Host == "" {
+		return nil, errors.New("invalid upstream URL")
+	}
+	if parsed.Scheme == "https" {
+		client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+			if req.URL.Scheme != "https" {
+				return errors.New("subscription redirect must remain HTTPS")
+			}
+			return nil
+		}
+	}
+	return client, nil
+}
+
+func networkFallbackAllowed(err error) bool {
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalidCertificate x509.CertificateInvalidError
+	if errors.As(err, &unknownAuthority) || errors.As(err, &hostname) || errors.As(err, &invalidCertificate) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
 }
 
 func defUA(ua string) string {

@@ -17,7 +17,7 @@ const (
 	runtimeStreamLifetime = 30 * time.Minute
 )
 
-var runtimeStreamKinds = map[string]bool{"proxies": true, "configs": true, "rules": true, "connections": true, "traffic": true, "memory": true, "logs": true, "docker_preview": true, "docker_desktop_preview": true}
+var runtimeStreamKinds = map[string]bool{"proxies": true, "configs": true, "rules": true, "connections": true, "traffic": true, "memory": true, "logs": true, "agent_logs": true}
 
 type runtimeStreamSession struct {
 	instanceID int64
@@ -90,15 +90,13 @@ func (s *Server) handleBrowserRuntimeStream(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "runtime instance does not exist or is revoked", http.StatusNotFound)
 		return
 	}
-	required := "mihomo.runtime.observe"
-	if kind == "docker_preview" {
-		required = "integration.docker_daemon"
-	} else if kind == "docker_desktop_preview" {
-		required = "integration.docker_desktop"
+	requiredCapability := "mihomo.runtime.observe"
+	if kind == "agent_logs" {
+		requiredCapability = "agent.runtime.observe"
 	}
 	capable := false
 	for _, capability := range instance.Capabilities {
-		if capability == required {
+		if capability == requiredCapability {
 			capable = true
 			break
 		}

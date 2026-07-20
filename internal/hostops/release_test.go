@@ -11,8 +11,36 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 )
+
+func TestOfficialReleaseSourceAllowsSlowBoundedDownloads(t *testing.T) {
+	if got := OfficialReleaseSource(nil).httpClient.Timeout; got != 10*time.Minute {
+		t.Fatalf("default release timeout = %s", got)
+	}
+}
+
+func TestOfficialReleaseHTTPClientSupportsExplicitHTTPAndSOCKS5Proxy(t *testing.T) {
+	httpClient, err := officialReleaseHTTPClient("http://127.0.0.1:18080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, _ := http.NewRequest(http.MethodGet, "https://api.github.com/", nil)
+	proxyURL, err := httpClient.Transport.(*http.Transport).Proxy(request)
+	if err != nil || proxyURL == nil || proxyURL.String() != "http://127.0.0.1:18080" {
+		t.Fatalf("HTTP proxy = %v, %v", proxyURL, err)
+	}
+	socksClient, err := officialReleaseHTTPClient("socks5://127.0.0.1:11080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := socksClient.Transport.(*http.Transport)
+	if transport.Proxy != nil || transport.DialContext == nil {
+		t.Fatal("SOCKS5 proxy did not replace the transport dialer")
+	}
+}
 
 func TestReleaseSourceUsesExactAssetAndDigest(t *testing.T) {
 	var compressed bytes.Buffer
@@ -32,10 +60,60 @@ func TestReleaseSourceUsesExactAssetAndDigest(t *testing.T) {
 	server = httptest.NewServer(mux)
 	defer server.Close()
 	parsed, _ := url.Parse(server.URL)
-	source := &releaseSource{apiBase: server.URL, httpClient: server.Client(), allowURL: func(value *url.URL) bool { return value.Host == parsed.Host }}
+	var phases []string
+	source := &releaseSource{apiBase: server.URL, httpClient: server.Client(), allowURL: func(value *url.URL) bool { return value.Host == parsed.Host }, progress: func(value CoreProgress) { phases = append(phases, value.Phase) }}
 	result, err := source.Fetch(context.Background(), "stable", "v1.19.28", "linux", "amd64")
 	if err != nil || string(result.Binary) != "mihomo-binary" {
 		t.Fatalf("fetch result=%#v err=%v", result, err)
+	}
+	for _, expected := range []string{"resolving_release", "downloading", "verifying_download", "unpacking"} {
+		found := false
+		for _, phase := range phases {
+			found = found || phase == expected
+		}
+		if !found {
+			t.Fatalf("release progress is missing %q: %v", expected, phases)
+		}
+	}
+}
+
+func TestReleaseSourceListsOnlyInstallableVersionsForAgentPlatform(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	var requestQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/releases" || r.Header.Get("X-GitHub-Api-Version") != "2022-11-28" || r.Header.Get("User-Agent") != "submux-agent" {
+			t.Errorf("unexpected release list request: %s %#v", r.URL.String(), r.Header)
+		}
+		requestQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode([]map[string]any{
+			{"tag_name": "Prerelease-Alpha", "draft": false, "prerelease": true, "assets": []map[string]any{
+				{"name": "mihomo-linux-amd64-alpha-e911985.gz", "state": "uploaded", "size": 123, "digest": digest},
+				{"name": "mihomo-windows-amd64-compatible-alpha-e911985.zip", "state": "uploaded", "size": 123, "digest": digest},
+			}},
+			{"tag_name": "v1.19.28", "draft": false, "prerelease": false, "assets": []map[string]any{
+				{"name": "mihomo-linux-amd64-v1.19.28.gz", "state": "uploaded", "size": 456, "digest": digest},
+			}},
+			{"tag_name": "v1.19.27", "draft": false, "prerelease": false, "assets": []map[string]any{
+				{"name": "mihomo-linux-amd64-v1.19.27.gz", "state": "uploaded", "size": 456},
+			}},
+		})
+	}))
+	defer server.Close()
+	var phases []string
+	source := &releaseSource{apiBase: server.URL, httpClient: server.Client(), progress: func(value CoreProgress) { phases = append(phases, value.Phase) }}
+	stable, err := source.ListVersions(context.Background(), "stable", "linux", "amd64", 30)
+	if err != nil || len(stable) != 1 || stable[0] != "v1.19.28" {
+		t.Fatalf("stable versions = %#v, %v", stable, err)
+	}
+	alpha, err := source.ListVersions(context.Background(), "alpha", "linux", "amd64", 30)
+	if err != nil || len(alpha) != 1 || alpha[0] != "alpha-e911985" {
+		t.Fatalf("alpha versions = %#v, %v", alpha, err)
+	}
+	if requestQuery != "per_page=31&page=1" {
+		t.Fatalf("release list query = %q", requestQuery)
+	}
+	if len(phases) != 2 || phases[0] != "listing_releases" || phases[1] != "listing_releases" {
+		t.Fatalf("release list phases = %#v", phases)
 	}
 }
 

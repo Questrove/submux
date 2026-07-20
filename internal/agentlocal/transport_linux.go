@@ -8,9 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -50,24 +48,7 @@ func Listen(socketPath string) (net.Listener, error) {
 	if err != nil || linked {
 		return nil, errors.New("local socket directory must not contain symbolic links")
 	}
-	allowedUIDs := map[uint32]bool{0: true}
-	mode := os.FileMode(0600)
-	socketGID := -1
-	if account, err := user.Lookup("submux"); err == nil {
-		uid, uidErr := strconv.ParseUint(account.Uid, 10, 32)
-		gid, gidErr := strconv.Atoi(account.Gid)
-		if uidErr == nil && gidErr == nil {
-			allowedUIDs[uint32(uid)] = true
-			if err := os.Chown(directory, 0, gid); err != nil {
-				return nil, err
-			}
-			if err := os.Chmod(directory, 0750); err != nil {
-				return nil, err
-			}
-			mode = 0660
-			socketGID = gid
-		}
-	}
+	allowedUIDs := map[uint32]bool{uint32(os.Geteuid()): true}
 	address, err := net.ResolveUnixAddr("unix", socketPath)
 	if err != nil {
 		return nil, err
@@ -76,13 +57,7 @@ func Listen(socketPath string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if socketGID >= 0 {
-		if err := os.Chown(socketPath, 0, socketGID); err != nil {
-			listener.Close()
-			return nil, err
-		}
-	}
-	if err := os.Chmod(socketPath, mode); err != nil {
+	if err := os.Chmod(socketPath, 0600); err != nil {
 		listener.Close()
 		return nil, err
 	}

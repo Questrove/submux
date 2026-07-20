@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"submux/internal/compiler"
+	"submux/internal/rulecatalog"
 	"submux/internal/store"
 )
 
@@ -128,8 +129,12 @@ func TestHandleSubAuthorizationExpiryAndPublication(t *testing.T) {
 
 func TestHandleSubMarksLastGoodAsDegraded(t *testing.T) {
 	st := newTestStore(t)
+	profileID, err := st.SaveRuleProfile(rulecatalog.DefaultProfile())
+	if err != nil {
+		t.Fatal(err)
+	}
 	savePublishedSubscription(t, st, store.OutputSubscription{
-		Name: "degraded", Engine: compiler.EngineMihomo, Token: "degraded-token", Enabled: true,
+		Name: "degraded", Engine: compiler.EngineMihomo, RuleProfileID: profileID, Token: "degraded-token", Enabled: true,
 	}, &store.SubscriptionArtifact{
 		Body: []byte("# last good\n"), ContentType: "text/yaml; charset=utf-8",
 		Revision: "old", LastError: "required slot empty\nretry failed",

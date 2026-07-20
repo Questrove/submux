@@ -18,13 +18,15 @@ type SubscriptionBinding struct {
 	NodeIDs []int64 `json:"node_ids"`
 }
 
-// OutputSubscription is a generated, shareable configuration. It owns both
-// the template choice and node selection; there is no separate NodeSet/Profile
+// OutputSubscription is a generated, shareable configuration. It owns the
+// template choice and ordered node selection, and Mihomo subscriptions refer
+// to a shared RuleProfile for routing behavior. There is no separate node-set
 // workflow in the product model.
 type OutputSubscription struct {
 	ID                int64                 `json:"id"`
 	Name              string                `json:"name"`
 	TemplateVersionID int64                 `json:"template_version_id"`
+	RuleProfileID     int64                 `json:"rule_profile_id,omitempty"`
 	Engine            string                `json:"engine"`
 	Bindings          []SubscriptionBinding `json:"bindings"`
 	Token             string                `json:"token"`

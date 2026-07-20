@@ -8,53 +8,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
+	"submux/internal/agentclient"
 	"submux/internal/agentproto"
 	"submux/internal/compiler"
-	"submux/internal/node"
 	"submux/internal/store"
 )
-
-func TestDockerDesiredStateRequiresConfirmedPreviewHash(t *testing.T) {
-	missingHash := map[string]json.RawMessage{"docker_daemon": json.RawMessage(`{"enabled":true,"proxy_port":7890,"revision":"web-1"}`)}
-	if err := validateDesiredIntegrations(missingHash); err == nil {
-		t.Fatal("Docker enable without a confirmed preview hash was accepted")
-	}
-	confirmed := map[string]json.RawMessage{"docker_daemon": json.RawMessage(`{"enabled":true,"proxy_port":7890,"revision":"web-1","expected_original_hash":"` + strings.Repeat("a", 64) + `"}`)}
-	if err := validateDesiredIntegrations(confirmed); err != nil {
-		t.Fatalf("valid confirmed Docker preview was rejected: %v", err)
-	}
-}
-
-func TestCurrentProxyObservationRejectsStaleOrNonListeningState(t *testing.T) {
-	now := time.Now().UTC()
-	valid := store.RuntimeObservation{
-		CoreStatus: store.RuntimeRunning, ProxyListening: true, ProxyPort: 7890, ProxyKind: "mixed",
-		ObservedAt: now.Format(time.RFC3339),
-	}
-	if !currentProxyObservation(valid, nil, 7890, now) {
-		t.Fatal("fresh running proxy observation was rejected")
-	}
-	for name, mutate := range map[string]func(*store.RuntimeObservation){
-		"stale": func(value *store.RuntimeObservation) {
-			value.ObservedAt = now.Add(-91 * time.Second).Format(time.RFC3339)
-		},
-		"not-listening": func(value *store.RuntimeObservation) { value.ProxyListening = false },
-		"wrong-port":    func(value *store.RuntimeObservation) { value.ProxyPort = 7891 },
-		"socks-only":    func(value *store.RuntimeObservation) { value.ProxyKind = "socks5" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			candidate := valid
-			mutate(&candidate)
-			if currentProxyObservation(candidate, nil, 7890, now) {
-				t.Fatal("unsafe proxy observation was accepted")
-			}
-		})
-	}
-}
 
 func signedDeviceRequest(t *testing.T, client *http.Client, method, url string, instanceID int64, key ed25519.PrivateKey, body []byte) *http.Response {
 	t.Helper()
@@ -73,7 +34,137 @@ func signedDeviceRequest(t *testing.T, client *http.Client, method, url string, 
 	return response
 }
 
-func TestRuntimeEnrollmentDesiredJobsArtifactAndRevocation(t *testing.T) {
+func TestRuntimeSubscriptionURLUsesOneTimeNonPersistentRelay(t *testing.T) {
+	st := newTestStore(t)
+	app := New(st, nil)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+	admin := initAndClient(t, srv)
+	publicKey, privateKey, err := agentproto.GenerateDeviceKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := st.CreateRuntimeInstance(store.RuntimeInstance{
+		Name: "edge-subscriptions", DeviceKey: agentproto.EncodePublicKey(publicKey), OS: "linux", Arch: "amd64",
+		Capabilities: []string{"subscription.manage"}, AgentVersion: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretURL := "https://provider.example/subscription?token=private-value"
+	staged := mustPost(t, admin, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(instance.ID, 10)+"/secrets", `{"kind":"subscription_url","value":"`+secretURL+`"}`)
+	if staged.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(staged.Body)
+		t.Fatalf("stage runtime secret status %d: %s", staged.StatusCode, message)
+	}
+	if staged.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("runtime secret staging is cacheable: %q", staged.Header.Get("Cache-Control"))
+	}
+	var stagedBody struct {
+		Ref string `json:"ref"`
+	}
+	if err := json.NewDecoder(staged.Body).Decode(&stagedBody); err != nil {
+		t.Fatal(err)
+	}
+	staged.Body.Close()
+	if len(stagedBody.Ref) != 48 {
+		t.Fatalf("runtime secret ref = %q", stagedBody.Ref)
+	}
+	jobResponse := mustPost(t, admin, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(instance.ID, 10)+"/jobs", `{"type":"add_runtime_subscription","params":{"name":"临时机场","secret_ref":"`+stagedBody.Ref+`"},"deadline_seconds":300}`)
+	if jobResponse.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(jobResponse.Body)
+		t.Fatalf("create runtime subscription job status %d: %s", jobResponse.StatusCode, message)
+	}
+	var job store.AgentJob
+	if err := json.NewDecoder(jobResponse.Body).Decode(&job); err != nil {
+		t.Fatal(err)
+	}
+	jobResponse.Body.Close()
+	persisted, err := st.GetAgentJob(job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	persistedJSON, _ := json.Marshal(persisted)
+	if bytes.Contains(persistedJSON, []byte(secretURL)) || bytes.Contains(persistedJSON, []byte("private-value")) {
+		t.Fatalf("runtime subscription URL was persisted in the control plane: %s", persistedJSON)
+	}
+
+	consumed := signedDeviceRequest(t, http.DefaultClient, http.MethodPost, srv.URL+"/api/agent/secrets/"+stagedBody.Ref, instance.ID, privateKey, []byte(`{}`))
+	if consumed.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(consumed.Body)
+		t.Fatalf("consume runtime secret status %d: %s", consumed.StatusCode, message)
+	}
+	if consumed.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("runtime secret response is cacheable: %q", consumed.Header.Get("Cache-Control"))
+	}
+	var secret agentclient.RuntimeSecret
+	if err := json.NewDecoder(consumed.Body).Decode(&secret); err != nil {
+		t.Fatal(err)
+	}
+	consumed.Body.Close()
+	if secret.Kind != runtimeSecretSubscriptionURL || secret.Value != secretURL {
+		t.Fatalf("consumed runtime secret = %#v", secret)
+	}
+	second := signedDeviceRequest(t, http.DefaultClient, http.MethodPost, srv.URL+"/api/agent/secrets/"+stagedBody.Ref, instance.ID, privateKey, []byte(`{}`))
+	second.Body.Close()
+	if second.StatusCode != http.StatusGone {
+		t.Fatalf("consumed runtime secret remained readable: %d", second.StatusCode)
+	}
+}
+
+func TestAgentFetchesPublishedMihomoPlatformSubscription(t *testing.T) {
+	st := newTestStore(t)
+	app := New(st, nil)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+	publicKey, privateKey, err := agentproto.GenerateDeviceKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance, err := st.CreateRuntimeInstance(store.RuntimeInstance{
+		Name: "platform-reader", DeviceKey: agentproto.EncodePublicKey(publicKey), OS: "linux", Arch: "amd64",
+		Capabilities: []string{"subscription.manage"}, AgentVersion: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("mixed-port: 7890\nproxies: []\nproxy-groups: []\nrules:\n  - MATCH,DIRECT\n")
+	subscription := savePublishedSubscription(t, st, store.OutputSubscription{
+		Name: "服务器配置", Engine: compiler.EngineMihomo, Token: "platform-agent-token", Enabled: true,
+	}, &store.SubscriptionArtifact{Body: body, ContentType: "text/yaml", Revision: "platform-revision"})
+	response := signedDeviceRequest(t, http.DefaultClient, http.MethodGet, srv.URL+"/api/agent/platform-subscriptions/"+strconv.FormatInt(subscription.ID, 10), instance.ID, privateKey, nil)
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		message, _ := io.ReadAll(response.Body)
+		t.Fatalf("fetch platform subscription status %d: %s", response.StatusCode, message)
+	}
+	got, _ := io.ReadAll(response.Body)
+	if !bytes.Equal(got, body) || response.Header.Get("X-Submux-Revision") != "platform-revision" || response.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("platform subscription response body=%q headers=%v", got, response.Header)
+	}
+	singBox := savePublishedSubscription(t, st, store.OutputSubscription{
+		Name: "sing-box 配置", Engine: compiler.EngineSingBox, Token: "sing-box-agent-token", Enabled: true,
+	}, &store.SubscriptionArtifact{Body: []byte(`{"outbounds":[]}`), ContentType: "application/json", Revision: "sing-box-revision"})
+	wrongEngine := signedDeviceRequest(t, http.DefaultClient, http.MethodGet, srv.URL+"/api/agent/platform-subscriptions/"+strconv.FormatInt(singBox.ID, 10), instance.ID, privateKey, nil)
+	wrongEngine.Body.Close()
+	if wrongEngine.StatusCode != http.StatusNotFound {
+		t.Fatalf("Agent fetched non-Mihomo platform subscription: %d", wrongEngine.StatusCode)
+	}
+	limitedPublic, limitedPrivate, _ := agentproto.GenerateDeviceKey()
+	limited, err := st.CreateRuntimeInstance(store.RuntimeInstance{
+		Name: "platform-reader-without-capability", DeviceKey: agentproto.EncodePublicKey(limitedPublic), OS: "linux", Arch: "amd64", AgentVersion: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	forbidden := signedDeviceRequest(t, http.DefaultClient, http.MethodGet, srv.URL+"/api/agent/platform-subscriptions/"+strconv.FormatInt(subscription.ID, 10), limited.ID, limitedPrivate, nil)
+	forbidden.Body.Close()
+	if forbidden.StatusCode != http.StatusForbidden {
+		t.Fatalf("Agent without subscription capability fetched platform subscription: %d", forbidden.StatusCode)
+	}
+}
+
+func TestRuntimeEnrollmentOneShotJobsObservationAndRevocation(t *testing.T) {
 	st := newTestStore(t)
 	app := New(st, nil)
 	srv := httptest.NewServer(app.Handler())
@@ -98,7 +189,7 @@ func TestRuntimeEnrollmentDesiredJobsArtifactAndRevocation(t *testing.T) {
 	enrollBody, _ := json.Marshal(map[string]any{
 		"code": enrollment.Code, "public_key": agentproto.EncodePublicKey(publicKey),
 		"os": "linux", "arch": "amd64", "agent_version": "test",
-		"capabilities": []string{"mihomo.restart", "subscription.update", "mihomo.runtime.observe", "integration.docker_daemon"},
+		"capabilities": []string{"mihomo.core.manage", "mihomo.restart", "subscription.manage", "mihomo.runtime.observe", "agent.resource.proxy"},
 	})
 	enrolled := mustPost(t, http.DefaultClient, srv.URL+"/api/agent/enroll", string(enrollBody))
 	if enrolled.StatusCode != http.StatusOK {
@@ -119,15 +210,21 @@ func TestRuntimeEnrollmentDesiredJobsArtifactAndRevocation(t *testing.T) {
 		t.Fatalf("pairing code reuse status %d", reused.StatusCode)
 	}
 
-	desiredBody := `{"expected_generation":1,"desired_core_installed":true,"core_channel":"stable","core_version_constraint":"1.19.x","desired_core_version":"v1.19.10","desired_runtime_state":"running","desired_integrations":{"docker_daemon":{"enabled":false,"proxy_port":7890,"revision":"docker-off-1"}}}`
-	desiredRequest, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(identity.InstanceID, 10)+"/desired", bytes.NewBufferString(desiredBody))
-	desiredRequest.Header.Set("Content-Type", "application/json")
-	desiredResponse := mustDo(t, admin, desiredRequest)
-	if desiredResponse.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(desiredResponse.Body)
-		t.Fatalf("desired status %d: %s", desiredResponse.StatusCode, message)
+	deprecatedRequest, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(identity.InstanceID, 10)+"/desired", bytes.NewBufferString(`{}`))
+	deprecatedRequest.Header.Set("Content-Type", "application/json")
+	deprecatedResponse := mustDo(t, admin, deprecatedRequest)
+	deprecatedResponse.Body.Close()
+	if deprecatedResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("removed desired endpoint status %d", deprecatedResponse.StatusCode)
 	}
-	desiredResponse.Body.Close()
+	expiredJob := store.AgentJob{Job: agentproto.Job{
+		ID: "expired-before-new-operation", ProtocolVersion: agentproto.Version, InstanceID: identity.InstanceID,
+		Type: agentproto.JobRestartCore, Params: json.RawMessage(`{}`), Status: agentproto.JobQueued,
+		ActorType: agentproto.ActorAdminSession, RequestID: "expired-request", Deadline: time.Now().Add(-time.Minute).UTC().Format(time.RFC3339),
+	}}
+	if err := st.CreateAgentJob(expiredJob); err != nil {
+		t.Fatal(err)
+	}
 
 	job := mustPost(t, admin, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(identity.InstanceID, 10)+"/jobs", `{"type":"restart_core","params":{},"deadline_seconds":120,"reason":"operator request"}`)
 	if job.StatusCode != http.StatusOK {
@@ -137,18 +234,21 @@ func TestRuntimeEnrollmentDesiredJobsArtifactAndRevocation(t *testing.T) {
 	var jobValue store.AgentJob
 	_ = json.NewDecoder(job.Body).Decode(&jobValue)
 	job.Body.Close()
+	if expired, err := st.GetAgentJob(expiredJob.ID); err != nil || expired.Status != agentproto.JobExpired {
+		t.Fatalf("expired job still blocked later work: %#v, %v", expired, err)
+	}
 
 	state := signedDeviceRequest(t, http.DefaultClient, http.MethodGet, srv.URL+"/api/agent/state", identity.InstanceID, privateKey, nil)
 	if state.StatusCode != http.StatusOK {
 		t.Fatalf("agent state status %d", state.StatusCode)
 	}
 	var stateBody struct {
-		Desired store.RuntimeDesiredState `json:"desired"`
-		Jobs    []store.AgentJob          `json:"jobs"`
+		ProtocolVersion int              `json:"protocol_version"`
+		Jobs            []store.AgentJob `json:"jobs"`
 	}
 	_ = json.NewDecoder(state.Body).Decode(&stateBody)
 	state.Body.Close()
-	if stateBody.Desired.Generation != 2 || len(stateBody.Jobs) != 1 || stateBody.Jobs[0].ID != jobValue.ID {
+	if stateBody.ProtocolVersion != agentproto.Version || len(stateBody.Jobs) != 1 || stateBody.Jobs[0].ID != jobValue.ID {
 		t.Fatalf("unexpected agent state: %#v", stateBody)
 	}
 
@@ -167,70 +267,34 @@ func TestRuntimeEnrollmentDesiredJobsArtifactAndRevocation(t *testing.T) {
 		response.Body.Close()
 	}
 
-	// Prepare a valid Agent-compatible output and bind it through the admin API.
-	sourceID, err := st.CreateSource(store.Source{Name: "manual", Kind: store.SourceKindManual})
-	if err != nil {
-		t.Fatal(err)
-	}
-	records, err := node.Import(sourceID, store.SourceKindManual, "trojan://password@example.com:443#Node")
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodeIDs, err := st.CreateManualNodes(records)
-	if err != nil {
-		t.Fatal(err)
-	}
-	templates, _ := st.ListTemplates()
-	var versionID int64
-	for _, template := range templates {
-		if template.Name == "Mihomo 服务器 Sidecar（推荐）" {
-			versionID = template.CurrentVersionID
-		}
-	}
-	subscriptionID, err := st.SaveOutputSubscription(store.OutputSubscription{
-		Name: "runtime", Engine: compiler.EngineMihomo, TemplateVersionID: versionID,
-		Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: nodeIDs}}, Token: "runtime-token", Enabled: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	compiled, err := app.compiler.CompileAndStore(subscriptionID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	bindingRequest, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(identity.InstanceID, 10)+"/binding", bytes.NewBufferString(`{"output_subscription_id":`+strconv.FormatInt(subscriptionID, 10)+`,"auto_update":false,"check_interval_sec":300}`))
+	bindingRequest, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(identity.InstanceID, 10)+"/binding", bytes.NewBufferString(`{}`))
 	bindingRequest.Header.Set("Content-Type", "application/json")
 	bindingResponse := mustDo(t, admin, bindingRequest)
-	if bindingResponse.StatusCode != http.StatusOK {
-		message, _ := io.ReadAll(bindingResponse.Body)
-		t.Fatalf("binding status %d: %s", bindingResponse.StatusCode, message)
-	}
-	var bindingBody struct {
-		Binding store.RuntimeBinding `json:"binding"`
-	}
-	_ = json.NewDecoder(bindingResponse.Body).Decode(&bindingBody)
 	bindingResponse.Body.Close()
-
-	artifact := signedDeviceRequest(t, http.DefaultClient, http.MethodGet, srv.URL+"/api/agent/bindings/"+strconv.FormatInt(bindingBody.Binding.ID, 10)+"/artifact", identity.InstanceID, privateKey, nil)
-	artifactBody, _ := io.ReadAll(artifact.Body)
+	if bindingResponse.StatusCode != http.StatusNotFound {
+		t.Fatalf("removed binding endpoint status %d", bindingResponse.StatusCode)
+	}
+	for _, removedType := range []string{"update_subscription", "collect_diagnostics"} {
+		response := mustPost(t, admin, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(identity.InstanceID, 10)+"/jobs", `{"type":"`+removedType+`","params":{},"deadline_seconds":120}`)
+		response.Body.Close()
+		if response.StatusCode != http.StatusBadRequest {
+			t.Fatalf("removed job type %s returned %d", removedType, response.StatusCode)
+		}
+	}
+	artifact := signedDeviceRequest(t, http.DefaultClient, http.MethodGet, srv.URL+"/api/agent/bindings/1/artifact", identity.InstanceID, privateKey, nil)
 	artifact.Body.Close()
-	if artifact.StatusCode != http.StatusOK || artifact.Header.Get("X-Submux-Revision") != compiled.Revision || !bytes.Equal(artifactBody, compiled.Body) {
-		t.Fatalf("unexpected internal artifact: status=%d revision=%q", artifact.StatusCode, artifact.Header.Get("X-Submux-Revision"))
+	if artifact.StatusCode != http.StatusNotFound {
+		t.Fatalf("removed artifact endpoint status %d", artifact.StatusCode)
 	}
 
 	heartbeatBody, _ := json.Marshal(map[string]any{
-		"agent_version": "test", "capabilities": []string{"mihomo.restart", "subscription.update", "mihomo.runtime.observe", "integration.docker_daemon"}, "status": "online",
+		"agent_version": "test", "capabilities": []string{"mihomo.core.manage", "mihomo.restart", "subscription.manage", "mihomo.runtime.observe", "agent.runtime.observe", "agent.resource.proxy"}, "status": "online",
 		"observation": map[string]any{
-			"observed_generation": 2, "remote_revision": compiled.Revision, "applied_revision": compiled.Revision,
+			"remote_revision": "revision", "applied_revision": "revision",
 			"core_version": "v1.19.10", "previous_core_version": "v1.19.9", "core_status": "running",
 			"agent_uptime_seconds": 61, "proxy_listening": true, "proxy_port": 7890, "proxy_kind": "mixed", "controller_port": 9090,
-			"selected_proxies": map[string]string{"PROXY": "Node"}, "last_good_revision": "previous",
-			"integrations": map[string]any{"docker_daemon": map[string]any{"state": "disabled"}},
-		},
-		"deployment": map[string]any{
-			"actor_type": "system_scheduler", "request_id": "deployment-request-1", "remote_revision": compiled.Revision,
-			"artifact_hash": strings.Repeat("a", 64), "effective_hash": strings.Repeat("b", 64),
-			"mihomo_version": "v1.19.10", "status": "active", "validation": "passed",
+			"selected_proxies": map[string]string{"PROXY": "Node"}, "last_good_revision": "previous", "resource_proxy_mode": "custom", "resource_proxy_url": "socks5://127.0.0.1:1080",
+			"operation": map[string]any{"request_id": jobValue.RequestID, "job_id": jobValue.ID, "kind": "restart_core", "phase": "completed", "status": "succeeded", "started_at": time.Now().UTC().Format(time.RFC3339), "updated_at": time.Now().UTC().Format(time.RFC3339), "finished_at": time.Now().UTC().Format(time.RFC3339)},
 		},
 	})
 	heartbeat := signedDeviceRequest(t, http.DefaultClient, http.MethodPost, srv.URL+"/api/agent/heartbeat", identity.InstanceID, privateKey, heartbeatBody)
@@ -248,23 +312,22 @@ func TestRuntimeEnrollmentDesiredJobsArtifactAndRevocation(t *testing.T) {
 	auditResponse.Body.Close()
 	detail := mustGet(t, admin, srv.URL+"/api/runtime/instances/"+strconv.FormatInt(identity.InstanceID, 10))
 	var detailBody struct {
-		Deployments  []store.Deployment       `json:"deployments"`
-		Integrations []store.IntegrationState `json:"integrations"`
-		Audit        []store.AuditEvent       `json:"audit"`
+		Runtime runtimeInstanceView `json:"runtime"`
+		Audit   []store.AuditEvent  `json:"audit"`
 	}
 	if err := json.NewDecoder(detail.Body).Decode(&detailBody); err != nil {
 		t.Fatal(err)
 	}
 	detail.Body.Close()
-	if len(detailBody.Deployments) != 1 || len(detailBody.Integrations) != 1 || detailBody.Integrations[0].Validation != "verified" {
+	if detailBody.Runtime.Observation.Operation == nil || detailBody.Runtime.Observation.Operation.JobID != jobValue.ID || detailBody.Runtime.Observation.ResourceProxyMode != "custom" || detailBody.Runtime.Observation.ResourceProxyURL != "socks5://127.0.0.1:1080" {
 		t.Fatalf("heartbeat records were not closed into the runtime view: %#v", detailBody)
 	}
-	foundLocal, foundReconcile := false, false
+	foundLocal, foundJobResult := false, false
 	for _, event := range detailBody.Audit {
 		foundLocal = foundLocal || event.ActorType == agentproto.ActorLocalCLI && event.RequestID == "local-audit-request-1"
-		foundReconcile = foundReconcile || event.Action == "desired.reconciled"
+		foundJobResult = foundJobResult || event.ActorType == agentproto.ActorAgent && event.Action == "job.restart_core.succeeded" && event.RequestID == jobValue.RequestID
 	}
-	if !foundLocal || !foundReconcile {
+	if !foundLocal || !foundJobResult {
 		t.Fatalf("audit chain is incomplete: %#v", detailBody.Audit)
 	}
 

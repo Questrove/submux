@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install, upgrade, roll back, or uninstall the optional root submux Agent.
+# Install, upgrade, roll back, or uninstall the unprivileged submux Agent.
 set -euo pipefail
 
 readonly REPO="Questrove/submux"
@@ -7,11 +7,15 @@ readonly BINARY="submux-agent"
 readonly UNIT="submux-agent.service"
 readonly UNIT_MARKER="# Managed by submux-agent installer; do not edit."
 
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 REQUESTED_VERSION="${VERSION:-}"
 CHANNEL="stable"
 WITH_SERVICE=0
 MODE="install"
+ENROLL_SERVER=""
+ENROLL_CODE=""
+LOCAL_BINARY=""
+LOCAL_SHA256=""
 
 usage() {
   cat <<'EOF'
@@ -19,13 +23,17 @@ Usage: install-agent.sh [options]
 
   --version VERSION   install an exact release
   --channel CHANNEL   stable (default) or alpha
-  --service           install the Linux systemd unit (enrollment starts it)
+  --service           install a systemd user unit (no root; enrollment starts it)
+  --server URL        enroll with this control-plane URL after installation
+  --code CODE         one-time pairing code used with --server
+  --local-binary PATH install a prebuilt development binary instead of downloading
+  --sha256 DIGEST     required SHA-256 for --local-binary
   --upgrade           require an existing Agent and upgrade it
   --rollback          restore the previous verified Agent binary
-  --uninstall         remove the binary and unit; preserve local Agent state
+  --uninstall         remove the binary and user unit; preserve Agent user data
   --help              show this help
 
-Environment: INSTALL_DIR, VERSION
+Environment: INSTALL_DIR, VERSION, XDG_CONFIG_HOME
 EOF
 }
 
@@ -37,6 +45,10 @@ while [ "$#" -gt 0 ]; do
     --version) [ "$#" -ge 2 ] || die "--version requires a value"; REQUESTED_VERSION="$2"; shift 2 ;;
     --channel) [ "$#" -ge 2 ] || die "--channel requires stable or alpha"; CHANNEL="$2"; shift 2 ;;
     --service) WITH_SERVICE=1; shift ;;
+    --server) [ "$#" -ge 2 ] || die "--server requires a URL"; ENROLL_SERVER="$2"; shift 2 ;;
+    --code) [ "$#" -ge 2 ] || die "--code requires a pairing code"; ENROLL_CODE="$2"; shift 2 ;;
+    --local-binary) [ "$#" -ge 2 ] || die "--local-binary requires a path"; LOCAL_BINARY="$2"; shift 2 ;;
+    --sha256) [ "$#" -ge 2 ] || die "--sha256 requires a digest"; LOCAL_SHA256="$2"; shift 2 ;;
     --upgrade) [ "$MODE" = install ] || die "choose only one operation"; MODE=upgrade; shift ;;
     --rollback) [ "$MODE" = install ] || die "choose only one operation"; MODE=rollback; shift ;;
     --uninstall) [ "$MODE" = install ] || die "choose only one operation"; MODE=uninstall; shift ;;
@@ -46,26 +58,35 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "$CHANNEL" in stable|alpha) ;; *) die "unsupported channel: $CHANNEL" ;; esac
-[ "$(uname -s)" = Linux ] || die "submux-agent v1 is supported only on Linux"
+[ "$(uname -s)" = Linux ] || die "submux-agent is currently packaged for Linux and Windows"
+[ "$(id -u)" -ne 0 ] || die "do not run the Agent installer as root; use bootstrap-agent.sh for a dedicated user"
+[ -n "${HOME:-}" ] && [ -d "$HOME" ] || die "a real user HOME directory is required"
 
-if [ "$(id -u)" -eq 0 ]; then
-  run_as_root() { "$@"; }
-elif command -v sudo >/dev/null 2>&1; then
-  run_as_root() { sudo "$@"; }
-else
-  run_as_root() { die "root privileges are required for: $*"; }
+if [ -n "$ENROLL_SERVER" ] || [ -n "$ENROLL_CODE" ]; then
+  [ -n "$ENROLL_SERVER" ] && [ -n "$ENROLL_CODE" ] || die "--server and --code must be supplied together"
+  [ "$MODE" = install ] || die "enrollment is supported only for a fresh install"
+  [ "$WITH_SERVICE" -eq 1 ] || die "one-command enrollment requires --service"
+fi
+if [ -n "$LOCAL_BINARY" ] || [ -n "$LOCAL_SHA256" ]; then
+  [ "$MODE" = install ] || die "--local-binary is supported only for a fresh install"
+  [ -n "$LOCAL_BINARY" ] && [ -n "$LOCAL_SHA256" ] || die "--local-binary and --sha256 must be supplied together"
+  [ -n "$REQUESTED_VERSION" ] || die "--local-binary requires --version"
+  printf '%s' "$LOCAL_SHA256" | grep -Eq '^[0-9a-fA-F]{64}$' || die "--sha256 must contain exactly 64 hexadecimal characters"
+  [ -f "$LOCAL_BINARY" ] && [ ! -L "$LOCAL_BINARY" ] || die "--local-binary must be a regular file and not a symbolic link"
 fi
 
 readonly TARGET="${INSTALL_DIR}/${BINARY}"
 readonly PREVIOUS="${INSTALL_DIR}/.${BINARY}.previous"
-readonly UNIT_PATH="/etc/systemd/system/${UNIT}"
+readonly USER_CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
+readonly UNIT_DIR="${USER_CONFIG_HOME}/systemd/user"
+readonly UNIT_PATH="${UNIT_DIR}/${UNIT}"
 
 service_exists() { [ -f "$UNIT_PATH" ] && command -v systemctl >/dev/null 2>&1; }
-service_active() { service_exists && systemctl is-active --quiet "$UNIT"; }
+service_active() { service_exists && systemctl --user is-active --quiet "$UNIT"; }
 
 assert_managed_unit_if_present() {
   if [ -e "$UNIT_PATH" ] || [ -L "$UNIT_PATH" ]; then
-    [ -f "$UNIT_PATH" ] && [ ! -L "$UNIT_PATH" ] || die "refusing to manage a non-regular systemd unit"
+    [ -f "$UNIT_PATH" ] && [ ! -L "$UNIT_PATH" ] || die "refusing to manage a non-regular systemd user unit"
     grep -Fqx "$UNIT_MARKER" "$UNIT_PATH" || die "refusing to take over an unmanaged $UNIT"
   fi
 }
@@ -79,12 +100,12 @@ assert_managed_binary_paths() {
 }
 
 restart_and_verify() {
-  run_as_root systemctl daemon-reload
-  run_as_root systemctl restart "$UNIT"
-  run_as_root systemctl is-active --quiet "$UNIT" || return 1
+  systemctl --user daemon-reload
+  systemctl --user restart "$UNIT"
+  systemctl --user is-active --quiet "$UNIT" || return 1
   attempts=0
   while [ "$attempts" -lt 20 ]; do
-    if run_as_root "$TARGET" status >/dev/null 2>&1; then return 0; fi
+    if "$TARGET" status >/dev/null 2>&1; then return 0; fi
     attempts=$((attempts + 1))
     sleep 1
   done
@@ -92,31 +113,31 @@ restart_and_verify() {
 }
 
 rollback_binary() {
-	assert_managed_unit_if_present
+  assert_managed_unit_if_present
   [ -f "$PREVIOUS" ] || die "no previous submux-agent binary is available"
   failed="${INSTALL_DIR}/.${BINARY}.failed.$$"
   was_active=0
   service_active && was_active=1
-  run_as_root mv -f "$TARGET" "$failed"
-  run_as_root mv -f "$PREVIOUS" "$TARGET"
+  mv -f "$TARGET" "$failed"
+  mv -f "$PREVIOUS" "$TARGET"
   if [ "$was_active" -eq 1 ] && ! restart_and_verify; then
-    run_as_root mv -f "$TARGET" "$PREVIOUS"
-    run_as_root mv -f "$failed" "$TARGET"
+    mv -f "$TARGET" "$PREVIOUS"
+    mv -f "$failed" "$TARGET"
     die "the previous Agent failed verification; the current binary was restored"
   fi
-  run_as_root rm -f "$failed"
+  rm -f "$failed"
   say "restored $("$TARGET" --version)"
 }
 
 uninstall() {
-	assert_managed_unit_if_present
+  assert_managed_unit_if_present
   if service_exists; then
-    run_as_root systemctl disable --now "$UNIT" >/dev/null 2>&1 || true
-    run_as_root rm -f "$UNIT_PATH"
-    run_as_root systemctl daemon-reload
+    systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+    rm -f "$UNIT_PATH"
+    systemctl --user daemon-reload || true
   fi
-  run_as_root rm -f "$TARGET" "$PREVIOUS"
-  say "submux-agent was uninstalled; /var/lib/submux-agent and managed Mihomo files were preserved for explicit recovery"
+  rm -f "$TARGET" "$PREVIOUS"
+  say "submux-agent was uninstalled; user-owned state and managed Mihomo files were preserved for explicit recovery"
 }
 
 assert_managed_binary_paths
@@ -126,7 +147,7 @@ case "$MODE" in
 esac
 
 [ "$MODE" != upgrade ] || [ -x "$TARGET" ] || die "--upgrade requires an existing $TARGET"
-command -v curl >/dev/null 2>&1 || die "curl is required"
+[ -n "$LOCAL_BINARY" ] || command -v curl >/dev/null 2>&1 || die "curl is required"
 arch="$(uname -m)"
 case "$arch" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported architecture: $arch" ;; esac
 asset="submux-agent-linux-${arch}"
@@ -157,114 +178,100 @@ fi
 tmpdir="$(mktemp -d)"
 cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT INT TERM
-base_url="https://github.com/${REPO}/releases/download/${version}"
-say "downloading submux-agent ${version} (linux/${arch})"
-curl -fsSL "${base_url}/${asset}" -o "${tmpdir}/${asset}"
-curl -fsSL "${base_url}/checksums.txt" -o "${tmpdir}/checksums.txt"
-expected="$(awk -v file="$asset" '$2==file || $2=="*"file {print $1}' "${tmpdir}/checksums.txt")"
-[ -n "$expected" ] || die "checksums.txt has no entry for $asset"
-printf '%s' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$' || die "checksums.txt has an invalid or duplicate digest for $asset"
-if command -v sha256sum >/dev/null 2>&1; then
-  actual="$(sha256sum "${tmpdir}/${asset}" | awk '{print $1}')"
+command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
+if [ -n "$LOCAL_BINARY" ]; then
+  say "installing local submux-agent ${version} (linux/${arch})"
+  cp "$LOCAL_BINARY" "${tmpdir}/${asset}"
+  expected="$(printf '%s' "$LOCAL_SHA256" | tr '[:upper:]' '[:lower:]')"
 else
-  die "sha256sum is required"
+  base_url="https://github.com/${REPO}/releases/download/${version}"
+  say "downloading submux-agent ${version} (linux/${arch})"
+  curl -fsSL "${base_url}/${asset}" -o "${tmpdir}/${asset}"
+  curl -fsSL "${base_url}/checksums.txt" -o "${tmpdir}/checksums.txt"
+  expected="$(awk -v file="$asset" '$2==file || $2=="*"file {print $1}' "${tmpdir}/checksums.txt")"
+  [ -n "$expected" ] || die "checksums.txt has no entry for $asset"
+  printf '%s' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$' || die "checksums.txt has an invalid or duplicate digest for $asset"
+  expected="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
 fi
+actual="$(sha256sum "${tmpdir}/${asset}" | awk '{print $1}')"
 [ "$actual" = "$expected" ] || die "checksum verification failed for $asset"
 chmod 0755 "${tmpdir}/${asset}"
 reported="$("${tmpdir}/${asset}" --version)"
 printf '%s' "$reported" | grep -F " ${version} (" >/dev/null || die "binary version does not match $version: $reported"
 
-[ ! -L "$UNIT_PATH" ] || die "refusing to replace a symbolic-link systemd unit"
-run_as_root mkdir -p "$INSTALL_DIR"
+mkdir -p "$INSTALL_DIR"
+chmod 0755 "$INSTALL_DIR"
 assert_managed_unit_if_present
-if [ "$WITH_SERVICE" -eq 1 ]; then
-  [ ! -L /var/lib/submux-agent ] || die "/var/lib/submux-agent must not be a symbolic link"
-  run_as_root mkdir -p /var/lib/submux-agent
-  run_as_root chmod 0700 /var/lib/submux-agent
-  if ! id submux-mihomo >/dev/null 2>&1; then
-    command -v useradd >/dev/null 2>&1 || die "useradd is required to create the low-privilege Mihomo service account"
-    run_as_root useradd --system --home-dir /var/lib/submux-agent/mihomo-runtime --shell /usr/sbin/nologin submux-mihomo
-  fi
-fi
 was_active=0
 service_active && was_active=1
 unit_had_previous=0
 if [ -f "$UNIT_PATH" ]; then
   unit_had_previous=1
-  run_as_root cp -p "$UNIT_PATH" "${tmpdir}/${UNIT}.previous"
+  cp -p "$UNIT_PATH" "${tmpdir}/${UNIT}.previous"
 fi
 staged="${INSTALL_DIR}/.${BINARY}.staging.$$"
-run_as_root install -m 0755 "${tmpdir}/${asset}" "$staged"
+install -m 0755 "${tmpdir}/${asset}" "$staged"
 had_previous=0
 if [ -e "$TARGET" ]; then
   had_previous=1
-  run_as_root rm -f "$PREVIOUS"
-  run_as_root mv "$TARGET" "$PREVIOUS" || die "could not preserve the current Agent binary"
+  rm -f "$PREVIOUS"
+  mv "$TARGET" "$PREVIOUS" || die "could not preserve the current Agent binary"
 fi
-if ! run_as_root mv "$staged" "$TARGET"; then
-  if [ "$had_previous" -eq 1 ]; then run_as_root mv "$PREVIOUS" "$TARGET" || true; fi
+if ! mv "$staged" "$TARGET"; then
+  if [ "$had_previous" -eq 1 ]; then mv "$PREVIOUS" "$TARGET" || true; fi
   die "could not atomically activate the verified Agent binary"
 fi
 
 install_service() {
   command -v systemctl >/dev/null 2>&1 || die "systemd is required for --service"
+  mkdir -p "$UNIT_DIR"
+  [ ! -L "$UNIT_DIR" ] || die "systemd user unit directory must not be a symbolic link"
   unit_tmp="${tmpdir}/${UNIT}"
   printf '%s\n' \
     "$UNIT_MARKER" \
     '[Unit]' \
-    'Description=submux host runtime Agent' \
+    'Description=submux user runtime Agent' \
     'After=network-online.target' \
     'Wants=network-online.target' \
     '' \
     '[Service]' \
     'Type=simple' \
     "ExecStart=${TARGET} serve" \
-    'User=root' \
-    'Group=root' \
-    'StateDirectory=submux-agent' \
-    'StateDirectoryMode=0700' \
-    'RuntimeDirectory=submux-agent' \
-    'RuntimeDirectoryMode=0750' \
     'UMask=0077' \
     'NoNewPrivileges=true' \
     'PrivateTmp=true' \
-    'ProtectSystem=strict' \
-    'ProtectHome=true' \
     'ProtectKernelTunables=true' \
-    'ProtectKernelModules=true' \
-    'ProtectKernelLogs=true' \
     'RestrictSUIDSGID=true' \
     'RestrictRealtime=true' \
     'LockPersonality=true' \
-    'ReadWritePaths=/var/lib/submux-agent /run/submux-agent /etc/docker /etc/systemd/system' \
     'RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6' \
     'Restart=on-failure' \
     'RestartSec=5s' \
     '' \
     '[Install]' \
-    'WantedBy=multi-user.target' >"$unit_tmp"
-  run_as_root install -m 0644 "$unit_tmp" "$UNIT_PATH"
-  run_as_root systemctl daemon-reload
+    'WantedBy=default.target' >"$unit_tmp"
+  install -m 0644 "$unit_tmp" "$UNIT_PATH"
+  systemctl --user daemon-reload
 }
 
 restore_installation() {
-  if service_exists; then run_as_root systemctl stop "$UNIT" >/dev/null 2>&1 || true; fi
-  run_as_root rm -f "$TARGET"
-  if [ "$had_previous" -eq 1 ] && [ -f "$PREVIOUS" ]; then run_as_root mv "$PREVIOUS" "$TARGET"; fi
+  if service_exists; then systemctl --user stop "$UNIT" >/dev/null 2>&1 || true; fi
+  rm -f "$TARGET"
+  if [ "$had_previous" -eq 1 ] && [ -f "$PREVIOUS" ]; then mv "$PREVIOUS" "$TARGET"; fi
   if [ "$WITH_SERVICE" -eq 1 ]; then
     if [ "$unit_had_previous" -eq 1 ]; then
-      run_as_root cp -p "${tmpdir}/${UNIT}.previous" "$UNIT_PATH"
+      cp -p "${tmpdir}/${UNIT}.previous" "$UNIT_PATH"
     else
-      run_as_root rm -f "$UNIT_PATH"
+      rm -f "$UNIT_PATH"
     fi
-    run_as_root systemctl daemon-reload || true
+    systemctl --user daemon-reload || true
   fi
   if [ "$was_active" -eq 1 ] && [ "$had_previous" -eq 1 ]; then restart_and_verify || true; fi
 }
 
 if [ "$WITH_SERVICE" -eq 1 ] && ! install_service; then
   restore_installation
-  die "Agent service installation failed; the previous installation was restored"
+  die "Agent user service installation failed; the previous installation was restored"
 fi
 if [ "$was_active" -eq 1 ] && ! restart_and_verify; then
   say "new Agent failed verification; restoring the previous binary" >&2
@@ -274,5 +281,16 @@ fi
 
 say "installed $("$TARGET" --version) at $TARGET"
 if [ "$WITH_SERVICE" -eq 1 ] && [ "$was_active" -eq 0 ]; then
-  say "service unit installed but not started; run 'submux-agent enroll --server https://…' to enroll and start it"
+  say "systemd user unit installed but not started; enroll this user to start it"
+  say "for unattended servers, your administrator may need to enable lingering for this user"
+fi
+if [ -n "$ENROLL_SERVER" ]; then
+  "$TARGET" enroll --server "$ENROLL_SERVER" --code "$ENROLL_CODE"
+  attempts=0
+  until "$TARGET" status >/dev/null 2>&1; do
+    attempts=$((attempts + 1))
+    [ "$attempts" -lt 20 ] || die "Agent enrolled but its local Socket did not become ready"
+    sleep 1
+  done
+  say "Agent enrolled and running as $(id -un)"
 fi

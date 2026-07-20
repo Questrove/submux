@@ -270,30 +270,19 @@ func (s *Server) handlePublishTemplateVersion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var body struct {
-		EngineVersion   string               `json:"engine_version"`
-		RuntimeContract string               `json:"runtime_contract"`
-		Content         string               `json:"content"`
-		Slots           []store.TemplateSlot `json:"slots"`
+		EngineVersion string `json:"engine_version"`
+		Content       string `json:"content"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	for index := range body.Slots {
-		body.Slots[index].Key = strings.TrimSpace(body.Slots[index].Key)
-		body.Slots[index].Target = strings.TrimSpace(body.Slots[index].Target)
-		body.Slots[index].Mode = strings.TrimSpace(body.Slots[index].Mode)
-	}
-	if err := compiler.ValidateTemplate(template.Engine, body.Content, body.Slots); err != nil {
+	slots, err := compiler.InferTemplateSlots(template.Engine, body.Content)
+	if err != nil {
 		http.Error(w, "invalid template: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	body.RuntimeContract = strings.TrimSpace(body.RuntimeContract)
-	if err := compiler.ValidateRuntimeContract(template.Engine, body.RuntimeContract); err != nil {
-		http.Error(w, "invalid runtime contract: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	version, err := s.store.PublishTemplateVersionWithContract(id, strings.TrimSpace(body.EngineVersion), body.RuntimeContract, body.Content, body.Slots)
+	version, err := s.store.PublishTemplateVersion(id, strings.TrimSpace(body.EngineVersion), body.Content, slots)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -370,6 +359,30 @@ func (s *Server) handleSaveOutputSubscription(w http.ResponseWriter, r *http.Req
 		return
 	}
 	value.Engine = template.Engine
+	if value.Engine == compiler.EngineMihomo {
+		if value.RuleProfileID == 0 && value.ID != 0 {
+			if old, oldErr := s.store.GetOutputSubscription(value.ID); oldErr == nil {
+				value.RuleProfileID = old.RuleProfileID
+			}
+		}
+		if value.RuleProfileID == 0 {
+			if defaultProfile, defaultErr := s.store.GetRuleProfileByKey("default"); defaultErr == nil {
+				value.RuleProfileID = defaultProfile.ID
+			}
+		}
+		profile, profileErr := s.store.GetRuleProfile(value.RuleProfileID)
+		if profileErr != nil {
+			http.Error(w, "a valid rule profile is required for mihomo subscriptions", http.StatusBadRequest)
+			return
+		}
+		if err := s.compiler.ValidateRuleProfile(profile); err != nil {
+			http.Error(w, "invalid rule profile: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+	} else if value.RuleProfileID != 0 {
+		http.Error(w, "rule profiles are only supported by mihomo subscriptions", http.StatusBadRequest)
+		return
+	}
 	seenSlots := map[string]bool{}
 	for index := range value.Bindings {
 		value.Bindings[index].Slot = strings.TrimSpace(value.Bindings[index].Slot)

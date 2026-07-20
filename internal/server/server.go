@@ -24,13 +24,15 @@ type Server struct {
 	nonceMu  sync.Mutex
 	nonces   map[string]time.Time
 	updates  *runtimeUpdateHub
+	events   *runtimeUpdateHub
 	streams  *runtimeStreamHub
+	secrets  *runtimeSecretVault
 }
 
 func New(st *store.Store, f *source.Fetcher) *Server {
 	srv, err := NewChecked(st, f)
 	if err != nil {
-		return &Server{store: st, fetcher: f, compiler: compiler.New(st), initErr: err, nonces: make(map[string]time.Time), updates: newRuntimeUpdateHub(), streams: newRuntimeStreamHub()}
+		return &Server{store: st, fetcher: f, compiler: compiler.New(st), initErr: err, nonces: make(map[string]time.Time), updates: newRuntimeUpdateHub(), events: newRuntimeUpdateHub(), streams: newRuntimeStreamHub(), secrets: newRuntimeSecretVault()}
 	}
 	return srv
 }
@@ -42,10 +44,13 @@ func NewChecked(st *store.Store, f *source.Fetcher) (*Server, error) {
 	if err := service.EnsureBuiltinTemplates(); err != nil {
 		return nil, fmt.Errorf("initialize built-in templates: %w", err)
 	}
+	if err := service.EnsureBuiltinRuleProfiles(); err != nil {
+		return nil, fmt.Errorf("initialize built-in rule profiles: %w", err)
+	}
 	if f != nil {
 		f.SetRebuilder(service)
 	}
-	return &Server{store: st, fetcher: f, compiler: service, nonces: make(map[string]time.Time), updates: newRuntimeUpdateHub(), streams: newRuntimeStreamHub()}, nil
+	return &Server{store: st, fetcher: f, compiler: service, nonces: make(map[string]time.Time), updates: newRuntimeUpdateHub(), events: newRuntimeUpdateHub(), streams: newRuntimeStreamHub(), secrets: newRuntimeSecretVault()}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -74,8 +79,8 @@ func (s *Server) Handler() http.Handler {
 		ar.Post("/api/agent/local-audit", s.handleAgentLocalAudit)
 		ar.Post("/api/agent/revoke-self", s.handleAgentRevokeSelf)
 		ar.Post("/api/agent/jobs/{jobID}/status", s.handleAgentJobStatus)
-		ar.Head("/api/agent/bindings/{id}/artifact", s.handleAgentArtifact)
-		ar.Get("/api/agent/bindings/{id}/artifact", s.handleAgentArtifact)
+		ar.Post("/api/agent/secrets/{ref}", s.handleAgentRuntimeSecret)
+		ar.Get("/api/agent/platform-subscriptions/{id}", s.handleAgentPlatformSubscription)
 	})
 
 	// 受 session 保护的资源接口
@@ -87,8 +92,10 @@ func (s *Server) Handler() http.Handler {
 		pr.Put("/api/sources/{id}", s.handleUpdateSource)
 		pr.Delete("/api/sources/{id}", s.handleDeleteSource)
 		pr.Post("/api/sources/{id}/refresh", s.handleRefreshSource)
+		pr.Post("/api/sources/{id}/refresh-via-platform-proxy", s.handleRefreshSourceViaPlatformProxy)
 		pr.Get("/api/settings", s.handleGetSettings)
 		pr.Put("/api/settings", s.handlePutSettings)
+		pr.Post("/api/settings/platform-resource-proxy/test", s.handleTestPlatformResourceProxy)
 		pr.Get("/api/nodes", s.handleListNodes)
 		pr.Post("/api/nodes/import", s.handleImportNodes)
 		pr.Put("/api/nodes/{id}", s.handleUpdateNode)
@@ -99,6 +106,13 @@ func (s *Server) Handler() http.Handler {
 		pr.Delete("/api/templates/{id}", s.handleDeleteTemplate)
 		pr.Get("/api/templates/{id}/versions", s.handleListTemplateVersions)
 		pr.Post("/api/templates/{id}/versions", s.handlePublishTemplateVersion)
+		pr.Get("/api/rule-catalog", s.handleRuleCatalog)
+		pr.Post("/api/rule-catalog/refresh", s.handleRefreshRuleCatalog)
+		pr.Get("/api/rule-profiles", s.handleListRuleProfiles)
+		pr.Post("/api/rule-profiles", s.handleSaveRuleProfile)
+		pr.Put("/api/rule-profiles/{id}", s.handleSaveRuleProfile)
+		pr.Post("/api/rule-profiles/{id}/catalog-version", s.handleUpdateRuleProfileCatalog)
+		pr.Delete("/api/rule-profiles/{id}", s.handleDeleteRuleProfile)
 		pr.Get("/api/subscriptions", s.handleListOutputSubscriptions)
 		pr.Post("/api/subscriptions", s.handleSaveOutputSubscription)
 		pr.Put("/api/subscriptions/{id}", s.handleSaveOutputSubscription)
@@ -111,12 +125,11 @@ func (s *Server) Handler() http.Handler {
 		pr.Get("/api/runtime/instances", s.handleListRuntimeInstances)
 		pr.Get("/api/runtime/instances/{id}", s.handleGetRuntimeInstance)
 		pr.Post("/api/runtime/instances/{id}/revoke", s.handleRevokeRuntimeInstance)
-		pr.Put("/api/runtime/instances/{id}/binding", s.handlePutRuntimeBinding)
-		pr.Delete("/api/runtime/instances/{id}/binding", s.handleDeleteRuntimeBinding)
-		pr.Put("/api/runtime/instances/{id}/desired", s.handlePutRuntimeDesiredState)
 		pr.Get("/api/runtime/instances/{id}/jobs", s.handleListRuntimeJobs)
 		pr.Post("/api/runtime/instances/{id}/jobs", s.handleCreateRuntimeJob)
+		pr.Post("/api/runtime/instances/{id}/secrets", s.handleCreateRuntimeSecret)
 		pr.Get("/api/runtime/instances/{id}/audit", s.handleListRuntimeAudit)
+		pr.Get("/api/runtime/instances/{id}/events", s.handleBrowserRuntimeEvents)
 		pr.Get("/api/runtime/instances/{id}/stream/{kind}", s.handleBrowserRuntimeStream)
 	})
 
@@ -164,6 +177,46 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	} else if len(artifact.Warnings) > 0 {
 		w.Header().Set("X-Submux-Degraded", "upstream lifecycle warning")
 	}
+	_, _ = w.Write(artifact.Body)
+}
+
+func (s *Server) handleAgentPlatformSubscription(w http.ResponseWriter, r *http.Request) {
+	instance := deviceInstance(r)
+	allowed := false
+	for _, capability := range instance.Capabilities {
+		if capability == "subscription.manage" {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		http.Error(w, "device cannot manage subscriptions", http.StatusForbidden)
+		return
+	}
+	id, err := idParam(r)
+	if err != nil {
+		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	subscription, err := s.store.GetOutputSubscription(id)
+	if err != nil || !subscription.Enabled || subscription.Engine != compiler.EngineMihomo {
+		http.Error(w, "platform subscription is unavailable", http.StatusNotFound)
+		return
+	}
+	if subscription.ExpiresAt != "" {
+		if expiry, parseErr := time.Parse(time.RFC3339, subscription.ExpiresAt); parseErr != nil || !time.Now().Before(expiry) {
+			http.Error(w, "platform subscription expired", http.StatusGone)
+			return
+		}
+	}
+	artifact, err := s.store.GetSubscriptionArtifact(subscription.ID)
+	if err != nil || len(artifact.Body) == 0 || artifact.BlockedReason != "" {
+		http.Error(w, "platform subscription has no available published artifact", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", artifact.ContentType)
+	w.Header().Set("X-Submux-Revision", artifact.Revision)
 	_, _ = w.Write(artifact.Body)
 }
 
