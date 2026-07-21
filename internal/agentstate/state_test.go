@@ -152,6 +152,42 @@ func TestOpenRenamesLocalResourceProxyState(t *testing.T) {
 	}
 }
 
+func TestRuntimeMigratesLegacyRunningCoreToAutoStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := bolt.Open(path, 0600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketConfig).Put(keyRuntime, []byte(`{"core_status":"running","applied_revision":"verified-revision"}`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	runtimeState, err := st.Runtime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeState.CoreAutoStart {
+		t.Fatalf("legacy running core did not enable startup recovery: %#v", runtimeState)
+	}
+}
+
 func TestInterruptedAndDuplicateJobsAreNeverReplayed(t *testing.T) {
 	st := testStore(t)
 	job := agentproto.Job{ID: "job", ProtocolVersion: 1, InstanceID: 1, Type: agentproto.JobRestartCore, Status: agentproto.JobQueued, ActorType: agentproto.ActorAdminSession, RequestID: "request", Deadline: time.Now().Add(time.Minute).Format(time.RFC3339), Params: json.RawMessage(`{}`)}

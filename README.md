@@ -52,16 +52,16 @@ SUBMUX_DB=submux.db ./submux
 
 默认监听 `127.0.0.1:8080`。首次打开 <http://127.0.0.1:8080> 设置管理员密码，然后按“来源 → 节点库 → 模板 → 规则 → 输出订阅”流程创建链接。
 
-当前正式版本为 [`v1.0.0`](https://github.com/Questrove/submux/releases/tag/v1.0.0)。安装器固定准确版本并验证 Release 的 SHA-256 清单：
+当前正式版本为 [`v1.0.1`](https://github.com/Questrove/submux/releases/tag/v1.0.1)。安装器固定准确版本并验证 Release 的 SHA-256 清单：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.0
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.1
 ```
 
 安装 systemd 服务：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.0 --service
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.1 --service
 ```
 
 ## 可选 Mihomo Agent
@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/insta
 Linux amd64/arm64：
 
 ```sh
-AGENT_VERSION='v1.0.0'
+AGENT_VERSION='v1.0.1'
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.sh | bash -s -- --version "$AGENT_VERSION" --service
 ~/.local/bin/submux-agent enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
 ```
@@ -89,12 +89,12 @@ Windows amd64/arm64（普通 PowerShell）：
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.ps1 -OutFile .\install-agent.ps1
-$AgentVersion = 'v1.0.0'
+$AgentVersion = 'v1.0.1'
 .\install-agent.ps1 -Version $AgentVersion -Service
 & "$env:LOCALAPPDATA\Programs\Submux\submux-agent.exe" enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
 ```
 
-`v0.2.0` 的 Agent 使用旧的 root/Administrator 模型，不能直接原地升级到 `v1.0.0`。升级前请按 [Agent 迁移步骤](docs/AGENT.md#从-v020-迁移) 停止并卸载旧服务，再以普通用户安装和配对新 Agent。
+`v0.2.0` 的 Agent 使用旧的 root/Administrator 模型，不能直接原地升级到 `v1.0.1`。升级前请按 [Agent 迁移步骤](docs/AGENT.md#从-v020-迁移) 停止并卸载旧服务，再以普通用户安装和配对新 Agent。
 
 常用本机恢复入口：
 
@@ -106,7 +106,7 @@ submux-agent subscription status|rollback
 submux-agent unenroll [--force-local] [--yes]
 ```
 
-这些本机管理命令不需要 Linux root 或 Windows 管理员权限。控制台只显示 Agent 上报的实际状态，安装、启停、回滚、管理配置订阅和修改 Agent 资源代理都作为一次性任务执行，不会在 Agent 重新连接后按旧表单内容自动操作。每个 Agent 可以保存并切换多个 Mihomo 配置订阅：既可以直接选择平台已经发布的 Mihomo 订阅，也可以填写独立的 HTTPS 地址。外部订阅地址只保存在 Agent 本机；平台订阅通过设备认证接口读取。Linux 的 `--service` 安装 systemd user unit；无人值守服务器若需要用户退出后继续运行，应由主机管理员明确决定是否为该用户启用 lingering。
+这些本机管理命令不需要 Linux root 或 Windows 管理员权限。控制台只显示 Agent 上报的实际状态，安装、启停、回滚、管理配置订阅和修改 Agent 资源代理都作为一次性任务执行，不会在 Agent 重新连接后按旧表单内容持续对账。显式启动或重启 Mihomo 成功后，Agent 会在本地记录下次启动时恢复运行；显式停止或卸载会清除该记录。恢复失败时按 2、4、8、16 秒退避，最多尝试五次。每个 Agent 可以保存并切换多个 Mihomo 配置订阅：既可以直接选择平台已经发布的 Mihomo 订阅，也可以填写独立的 HTTPS 地址。外部订阅地址只保存在 Agent 本机；平台订阅通过设备认证接口读取。Linux 的 `--service` 安装 systemd user unit；无人值守服务器若需要用户退出后继续运行，应由主机管理员明确决定是否为该用户启用 lingering。
 
 Agent 接入后，可以在运行实例的“配置”页设置独立的 HTTP 或 SOCKS5 Agent 资源代理，例如 SSH 转发到本机的 `socks5://127.0.0.1:1080`。该地址只用于读取 Mihomo 官方版本并下载核心，不会代理 Agent 与控制面的连接，也不会修改系统或其他软件的代理设置。页面会实时显示 Agent 接收、下载、校验、部署、启动和验证进度；日志页可在 Agent 日志和 Mihomo 日志之间切换。
 
