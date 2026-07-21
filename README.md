@@ -52,16 +52,16 @@ SUBMUX_DB=submux.db ./submux
 
 默认监听 `127.0.0.1:8080`。首次打开 <http://127.0.0.1:8080> 设置管理员密码，然后按“来源 → 节点库 → 模板 → 规则 → 输出订阅”流程创建链接。
 
-当前正式版本为 [`v1.0.1`](https://github.com/Questrove/submux/releases/tag/v1.0.1)。安装器固定准确版本并验证 Release 的 SHA-256 清单：
+当前正式版本为 [`v1.0.2`](https://github.com/Questrove/submux/releases/tag/v1.0.2)。安装器固定准确版本并验证 Release 的 SHA-256 清单：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.1
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.2
 ```
 
 安装 systemd 服务：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.1 --service
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.2 --service
 ```
 
 ## 可选 Mihomo Agent
@@ -71,7 +71,7 @@ curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/insta
 Linux amd64/arm64：
 
 ```sh
-AGENT_VERSION='v1.0.1'
+AGENT_VERSION='v1.0.2'
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.sh | bash -s -- --version "$AGENT_VERSION" --service
 ~/.local/bin/submux-agent enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
 ```
@@ -83,18 +83,25 @@ curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/boots
   --version "$AGENT_VERSION" --server https://submux.example.com --code '<一次性配对码>'
 ```
 
-引导脚本的 root 权限只用于创建无 sudo 权限的 `submuxagent` 专用用户并启用 systemd user lingering；安装、配对、Agent 和 Mihomo 进程均以该普通用户运行。源码开发版还可使用 root 所有的本地二进制包，避免从 Release 下载不存在的版本。
+已通过一键接入安装的服务器可以由 root 原地升级 Agent，不需要新的配对码：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/bootstrap-agent.sh | sudo bash -s -- \
+  --upgrade --version "$AGENT_VERSION"
+```
+
+升级模式要求既有 `submuxagent` 用户、用户服务管理器和 Agent 服务均处于运行状态，只调用普通用户安装器完成校验、原子替换、重启和失败恢复；不会创建用户、修改 lingering、重新配对或读取本地开发 bundle。引导脚本的 root 权限只用于首次接入时创建无 sudo 权限的专用用户，以及升级时进入该用户环境；安装、配对、Agent 和 Mihomo 进程均以该普通用户运行。源码开发版首次接入还可使用 root 所有且摘要固定的本地二进制包，避免从 Release 下载不存在的版本。
 
 Windows amd64/arm64（普通 PowerShell）：
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.ps1 -OutFile .\install-agent.ps1
-$AgentVersion = 'v1.0.1'
+$AgentVersion = 'v1.0.2'
 .\install-agent.ps1 -Version $AgentVersion -Service
 & "$env:LOCALAPPDATA\Programs\Submux\submux-agent.exe" enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
 ```
 
-`v0.2.0` 的 Agent 使用旧的 root/Administrator 模型，不能直接原地升级到 `v1.0.1`。升级前请按 [Agent 迁移步骤](docs/AGENT.md#从-v020-迁移) 停止并卸载旧服务，再以普通用户安装和配对新 Agent。
+`v0.2.0` 的 Agent 使用旧的 root/Administrator 模型，不能直接原地升级到 `v1.0.2`。升级前请按 [Agent 迁移步骤](docs/AGENT.md#从-v020-迁移) 停止并卸载旧服务，再以普通用户安装和配对新 Agent。
 
 常用本机恢复入口：
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision a dedicated unprivileged Linux user and enroll submux-agent in one command.
+# Provision or upgrade submux-agent under a dedicated unprivileged Linux user.
 set -euo pipefail
 
 readonly REPO="Questrove/submux"
@@ -14,24 +14,27 @@ INSTALLER_PATH=""
 LOCAL_BINARY=""
 LOCAL_SHA256=""
 REQUIRE_BUNDLE=0
+MODE="install"
 
 usage() {
   cat <<'EOF'
-Usage: bootstrap-agent.sh --server URL --code CODE [options]
+Usage: bootstrap-agent.sh (--server URL --code CODE | --upgrade) [options]
 
   --server URL          submux control-plane URL
   --code CODE           short-lived one-time pairing code
   --user USER           dedicated account to create or reuse (default: submuxagent)
   --version VERSION     exact Agent release; latest stable when omitted
   --channel CHANNEL     stable (default) or alpha
+  --upgrade             upgrade an existing active Agent without re-enrolling
   --installer PATH      use a local install-agent.sh instead of downloading it
   --local-binary PATH   install a prebuilt development Agent binary
   --sha256 DIGEST       required SHA-256 for --local-binary
   --require-bundle      fail unless a root-owned local development bundle exists
   --help                show this help
 
-The bootstrap itself requires root only to provision the account and lingering
-user service. submux-agent and Mihomo always run as the dedicated user.
+Install mode requires root to provision the account and lingering user service.
+Upgrade mode only enters the existing account and never re-enrolls the Agent.
+submux-agent and Mihomo always run as the dedicated user.
 EOF
 }
 
@@ -45,6 +48,7 @@ while [ "$#" -gt 0 ]; do
     --user) [ "$#" -ge 2 ] || die "--user requires an account name"; AGENT_USER="$2"; shift 2 ;;
     --version) [ "$#" -ge 2 ] || die "--version requires a value"; REQUESTED_VERSION="$2"; shift 2 ;;
     --channel) [ "$#" -ge 2 ] || die "--channel requires stable or alpha"; CHANNEL="$2"; shift 2 ;;
+    --upgrade) [ "$MODE" = install ] || die "choose only one operation"; MODE=upgrade; shift ;;
     --installer) [ "$#" -ge 2 ] || die "--installer requires a path"; INSTALLER_PATH="$2"; shift 2 ;;
     --local-binary) [ "$#" -ge 2 ] || die "--local-binary requires a path"; LOCAL_BINARY="$2"; shift 2 ;;
     --sha256) [ "$#" -ge 2 ] || die "--sha256 requires a digest"; LOCAL_SHA256="$2"; shift 2 ;;
@@ -56,15 +60,25 @@ done
 
 [ "$(uname -s)" = Linux ] || die "server bootstrap is supported only on Linux"
 [ "$(id -u)" -eq 0 ] || die "bootstrap-agent.sh must run as root"
-[ -n "$SERVER_URL" ] && [ -n "$PAIRING_CODE" ] || die "--server and --code are required"
 case "$CHANNEL" in stable|alpha) ;; *) die "unsupported channel: $CHANNEL" ;; esac
 printf '%s' "$AGENT_USER" | grep -Eq '^[a-z_][a-z0-9_-]{0,31}$' || die "invalid dedicated user name"
-for command_name in getent loginctl runuser systemctl useradd; do
+if [ -n "$REQUESTED_VERSION" ]; then
+  printf '%s' "$REQUESTED_VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || die "invalid exact release version: $REQUESTED_VERSION"
+fi
+if [ "$MODE" = upgrade ]; then
+  [ -z "$SERVER_URL" ] && [ -z "$PAIRING_CODE" ] || die "--server and --code are not accepted with --upgrade"
+  [ -z "$LOCAL_BINARY" ] && [ -z "$LOCAL_SHA256" ] && [ "$REQUIRE_BUNDLE" -eq 0 ] || die "local development bundles are not accepted with --upgrade"
+else
+  [ -n "$SERVER_URL" ] && [ -n "$PAIRING_CODE" ] || die "--server and --code are required"
+fi
+required_commands=(getent runuser systemctl stat)
+if [ "$MODE" = install ]; then required_commands+=(loginctl useradd); fi
+for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null 2>&1 || die "$command_name is required"
 done
 
 bundle_dir="${SUBMUX_AGENT_BUNDLE_DIR:-/usr/local/lib/submux-agent-bootstrap}"
-if [ -z "$LOCAL_BINARY" ] && [ -f "${bundle_dir}/submux-agent" ] && [ -f "${bundle_dir}/version" ] && [ -f "${bundle_dir}/sha256" ]; then
+if [ "$MODE" = install ] && [ -z "$LOCAL_BINARY" ] && [ -f "${bundle_dir}/submux-agent" ] && [ -f "${bundle_dir}/version" ] && [ -f "${bundle_dir}/sha256" ]; then
   for bundle_file in "${bundle_dir}/submux-agent" "${bundle_dir}/version" "${bundle_dir}/sha256"; do
     [ ! -L "$bundle_file" ] && [ "$(stat -c %U "$bundle_file")" = root ] || die "local development bundle must contain root-owned regular files"
   done
@@ -97,12 +111,17 @@ if [ -z "$installer" ]; then
   command -v curl >/dev/null 2>&1 || die "curl is required"
   installer="${work}/install-agent.sh"
   say "downloading the unprivileged Agent installer"
-  curl -fsSL "$DEFAULT_INSTALLER_URL" -o "$installer"
+  installer_url="$DEFAULT_INSTALLER_URL"
+  if [ -n "$REQUESTED_VERSION" ] && [ -z "$LOCAL_BINARY" ]; then
+    installer_url="https://raw.githubusercontent.com/${REPO}/${REQUESTED_VERSION}/scripts/install-agent.sh"
+  fi
+  curl -fsSL "$installer_url" -o "$installer"
 fi
 bash -n "$installer" || die "Agent installer has invalid shell syntax"
 
 entry="$(getent passwd "$AGENT_USER" || true)"
 if [ -z "$entry" ]; then
+  [ "$MODE" = install ] || die "dedicated user ${AGENT_USER} does not exist; use enrollment mode for the first installation"
   say "creating dedicated user ${AGENT_USER}"
   useradd --create-home --user-group --shell /bin/bash "$AGENT_USER"
   entry="$(getent passwd "$AGENT_USER")"
@@ -114,16 +133,20 @@ IFS=: read -r account _ uid _ _ agent_home _ <<<"$entry"
 [ -d "$agent_home" ] && [ ! -L "$agent_home" ] || die "dedicated user home must be a real directory"
 [ "$(stat -c %U "$agent_home")" = "$AGENT_USER" ] || die "dedicated user does not own its home directory"
 
-say "enabling the user service manager for ${AGENT_USER}"
-loginctl enable-linger "$AGENT_USER"
-systemctl start "user@${uid}.service"
 runtime_dir="/run/user/${uid}"
-attempts=0
-while [ ! -S "${runtime_dir}/bus" ] && [ "$attempts" -lt 20 ]; do
-  attempts=$((attempts + 1))
-  sleep 1
-done
-[ -S "${runtime_dir}/bus" ] || die "dedicated user service manager did not become ready"
+if [ "$MODE" = install ]; then
+  say "enabling the user service manager for ${AGENT_USER}"
+  loginctl enable-linger "$AGENT_USER"
+  systemctl start "user@${uid}.service"
+  attempts=0
+  while [ ! -S "${runtime_dir}/bus" ] && [ "$attempts" -lt 20 ]; do
+    attempts=$((attempts + 1))
+    sleep 1
+  done
+  [ -S "${runtime_dir}/bus" ] || die "dedicated user service manager did not become ready"
+else
+  systemctl is-active --quiet "user@${uid}.service" || die "dedicated user service manager is not active"
+fi
 
 run_as_agent=(
   runuser -u "$AGENT_USER" -- env
@@ -133,15 +156,30 @@ run_as_agent=(
   "XDG_RUNTIME_DIR=${runtime_dir}"
   "DBUS_SESSION_BUS_ADDRESS=unix:path=${runtime_dir}/bus"
 )
+for proxy_variable in http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY; do
+  proxy_value="${!proxy_variable:-}"
+  if [ -n "$proxy_value" ]; then run_as_agent+=("${proxy_variable}=${proxy_value}"); fi
+done
 
-installer_args=(--channel "$CHANNEL" --service --server "$SERVER_URL" --code "$PAIRING_CODE")
+installer_args=(--channel "$CHANNEL" --service)
+if [ "$MODE" = upgrade ]; then
+  "${run_as_agent[@]}" test -x "${agent_home}/.local/bin/submux-agent" || die "existing Agent binary is unavailable"
+  "${run_as_agent[@]}" systemctl --user is-active --quiet submux-agent.service || die "Agent user service must be active before --upgrade"
+  installer_args+=(--upgrade)
+else
+  installer_args+=(--server "$SERVER_URL" --code "$PAIRING_CODE")
+fi
 if [ -n "$REQUESTED_VERSION" ]; then installer_args+=(--version "$REQUESTED_VERSION"); fi
 if [ -n "$LOCAL_BINARY" ]; then
   "${run_as_agent[@]}" test -r "$LOCAL_BINARY" || die "dedicated user cannot read --local-binary"
   installer_args+=(--local-binary "$LOCAL_BINARY" --sha256 "$LOCAL_SHA256")
 fi
 
-say "installing and enrolling Agent as ${AGENT_USER}"
+if [ "$MODE" = upgrade ]; then
+  say "upgrading Agent as ${AGENT_USER}"
+else
+  say "installing and enrolling Agent as ${AGENT_USER}"
+fi
 (
   cd "$agent_home"
   "${run_as_agent[@]}" bash -s -- "${installer_args[@]}" <"$installer"
@@ -150,5 +188,9 @@ say "installing and enrolling Agent as ${AGENT_USER}"
 "${run_as_agent[@]}" systemctl --user is-active --quiet submux-agent.service || die "Agent user service is not active"
 "${run_as_agent[@]}" "${agent_home}/.local/bin/submux-agent" status >/dev/null || die "Agent local status check failed"
 
-say "submux-agent is enrolled, active, and running as ${AGENT_USER} (uid ${uid})"
+if [ "$MODE" = upgrade ]; then
+  say "submux-agent is upgraded, active, and running as ${AGENT_USER} (uid ${uid})"
+else
+  say "submux-agent is enrolled, active, and running as ${AGENT_USER} (uid ${uid})"
+fi
 say "root privileges are not retained by the Agent or Mihomo"
