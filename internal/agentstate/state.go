@@ -49,6 +49,7 @@ type Runtime struct {
 	CoreVersion          string            `json:"core_version,omitempty"`
 	PreviousCoreVersion  string            `json:"previous_core_version,omitempty"`
 	CoreStatus           string            `json:"core_status"`
+	CoreAutoStart        bool              `json:"core_auto_start"`
 	MihomoSecret         string            `json:"mihomo_secret,omitempty"`
 	ProxyPort            int               `json:"proxy_port,omitempty"`
 	ProxyKind            string            `json:"proxy_kind,omitempty"`
@@ -402,16 +403,20 @@ func decodeRuntime(raw []byte, value *Runtime) error {
 	if err := json.Unmarshal(raw, value); err != nil {
 		return err
 	}
-	var proxyFields struct {
-		ResourceMode *string `json:"resource_proxy_mode"`
-		LegacyMode   *string `json:"download_proxy_mode"`
-		LegacyURL    string  `json:"download_proxy_url"`
+	var runtimeFields struct {
+		ResourceMode  *string `json:"resource_proxy_mode"`
+		LegacyMode    *string `json:"download_proxy_mode"`
+		LegacyURL     string  `json:"download_proxy_url"`
+		CoreAutoStart *bool   `json:"core_auto_start"`
 	}
-	if err := json.Unmarshal(raw, &proxyFields); err != nil {
+	if err := json.Unmarshal(raw, &runtimeFields); err != nil {
 		return err
 	}
-	if proxyFields.ResourceMode == nil && proxyFields.LegacyMode != nil {
-		value.ResourceProxyMode, value.ResourceProxyURL = *proxyFields.LegacyMode, proxyFields.LegacyURL
+	if runtimeFields.ResourceMode == nil && runtimeFields.LegacyMode != nil {
+		value.ResourceProxyMode, value.ResourceProxyURL = *runtimeFields.LegacyMode, runtimeFields.LegacyURL
+	}
+	if runtimeFields.CoreAutoStart == nil && value.CoreStatus == "running" {
+		value.CoreAutoStart = true
 	}
 	if value.ResourceProxyMode == "" {
 		value.ResourceProxyMode = agentproto.ResourceProxyDirect

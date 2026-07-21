@@ -136,6 +136,16 @@ func (d *Daemon) Run(ctx context.Context) error {
 	ticker := time.NewTicker(d.PollInterval)
 	defer ticker.Stop()
 	notify("startup")
+	var startupRecovery sync.WaitGroup
+	startupRecovery.Add(1)
+	defer startupRecovery.Wait()
+	go func() {
+		defer startupRecovery.Done()
+		if err := d.restoreCoreOnStartup(ctx, coreAutoStartRetryDelays()); err != nil && ctx.Err() == nil {
+			d.writeRuntimeLog("automatic Mihomo startup stopped: %v", err)
+		}
+		notify("core_auto_start")
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -423,8 +433,16 @@ func (d *Daemon) InstallCoreNow(ctx context.Context, channel, version string) er
 func (d *Daemon) RestartCoreNow(ctx context.Context) error {
 	d.mutationMu.Lock()
 	defer d.mutationMu.Unlock()
-	operationErr := d.Core.Restart(ctx)
-	return errors.Join(operationErr, d.refreshCoreStatus(ctx))
+	runtimeState, err := d.State.Runtime()
+	if err != nil {
+		return err
+	}
+	operationErr := d.restartCoreAndVerify(ctx, runtimeState.ProxyPort)
+	var stateErr error
+	if operationErr == nil {
+		stateErr = d.setCoreAutoStart(true)
+	}
+	return errors.Join(operationErr, stateErr, d.refreshCoreStatus(ctx))
 }
 
 func (d *Daemon) RollbackCoreNow(ctx context.Context) error {
@@ -746,6 +764,9 @@ func (d *Daemon) executeJob(ctx context.Context, job agentproto.Job) (json.RawMe
 		if err := d.Core.Uninstall(ctx); err != nil {
 			return nil, err
 		}
+		if err := d.setCoreAutoStart(false); err != nil {
+			return nil, err
+		}
 		return d.coreOperationResult(ctx)
 	case agentproto.JobStartCore:
 		runtimeState, err := d.State.Runtime()
@@ -756,19 +777,19 @@ func (d *Daemon) executeJob(ctx context.Context, job agentproto.Job) (json.RawMe
 			return nil, errors.New("cannot start Mihomo without a locally verified applied configuration")
 		}
 		d.setOperationPhase("starting_core", 0, 0)
-		if err := d.Core.Start(ctx); err != nil {
+		if err := d.startCoreAndVerify(ctx, runtimeState.ProxyPort); err != nil {
 			return nil, err
 		}
-		if d.VerifyRuntime != nil {
-			d.setOperationPhase("verifying_runtime", 0, 0)
-			if err := d.VerifyRuntime(ctx, runtimeState.ProxyPort); err != nil {
-				return nil, err
-			}
+		if err := d.setCoreAutoStart(true); err != nil {
+			return nil, err
 		}
 		return d.coreOperationResult(ctx)
 	case agentproto.JobStopCore:
 		d.setOperationPhase("stopping_core", 0, 0)
 		if err := d.Core.Stop(ctx); err != nil {
+			return nil, err
+		}
+		if err := d.setCoreAutoStart(false); err != nil {
 			return nil, err
 		}
 		return d.coreOperationResult(ctx)
@@ -779,8 +800,15 @@ func (d *Daemon) executeJob(ctx context.Context, job agentproto.Job) (json.RawMe
 		}
 		return d.coreOperationResult(ctx)
 	case agentproto.JobRestartCore:
+		runtimeState, err := d.State.Runtime()
+		if err != nil {
+			return nil, err
+		}
 		d.setOperationPhase("restarting_core", 0, 0)
-		if err := d.Core.Restart(ctx); err != nil {
+		if err := d.restartCoreAndVerify(ctx, runtimeState.ProxyPort); err != nil {
+			return nil, err
+		}
+		if err := d.setCoreAutoStart(true); err != nil {
 			return nil, err
 		}
 		status, err := d.Core.Status(ctx)

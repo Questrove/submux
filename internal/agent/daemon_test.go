@@ -120,6 +120,7 @@ type fakeCore struct {
 	status                       hostops.CoreStatus
 	installs, uninstalls, starts int
 	stops, restarts, validations int
+	startSignal                  chan struct{}
 }
 
 type proxyFakeCore struct {
@@ -151,8 +152,15 @@ func (c *fakeCore) RollbackCore(context.Context) error {
 	return nil
 }
 func (c *fakeCore) Status(context.Context) (hostops.CoreStatus, error) { return c.status, nil }
-func (c *fakeCore) Start(context.Context) error                        { c.starts++; c.status.State = "running"; return nil }
-func (c *fakeCore) Stop(context.Context) error                         { c.stops++; c.status.State = "stopped"; return nil }
+func (c *fakeCore) Start(context.Context) error {
+	c.starts++
+	c.status.State = "running"
+	if c.startSignal != nil && c.starts == 1 {
+		close(c.startSignal)
+	}
+	return nil
+}
+func (c *fakeCore) Stop(context.Context) error { c.stops++; c.status.State = "stopped"; return nil }
 func (c *fakeCore) Restart(context.Context) error {
 	c.restarts++
 	c.status.State = "running"
@@ -212,14 +220,14 @@ func TestLocalCoreOperationsImmediatelyRefreshObservedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtimeState, _ = local.Runtime()
-	if runtimeState.CoreStatus != "running" {
+	if runtimeState.CoreStatus != "running" || !runtimeState.CoreAutoStart {
 		t.Fatalf("restart status was not refreshed: %#v", runtimeState)
 	}
 	if err := daemon.RollbackCoreNow(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	runtimeState, _ = local.Runtime()
-	if runtimeState.CoreVersion != "v1.0.0" || runtimeState.PreviousCoreVersion != "v1.1.0" || runtimeState.CoreStatus != "running" {
+	if runtimeState.CoreVersion != "v1.0.0" || runtimeState.PreviousCoreVersion != "v1.1.0" || runtimeState.CoreStatus != "running" || !runtimeState.CoreAutoStart {
 		t.Fatalf("rollback status was not refreshed: %#v", runtimeState)
 	}
 }
@@ -242,6 +250,233 @@ func TestSyncOnlyObservesWhenThereIsNoOneShotJob(t *testing.T) {
 	}
 	if len(control.heartbeats) != 1 || control.heartbeats[0].Observation.Operation != nil {
 		t.Fatalf("unexpected observation heartbeat: %#v", control.heartbeats)
+	}
+}
+
+func TestCoreAutoStartRetryScheduleIsBounded(t *testing.T) {
+	want := []time.Duration{0, 2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
+	got := coreAutoStartRetryDelays()
+	if len(got) != len(want) {
+		t.Fatalf("retry delays = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("retry delays = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestStartupRecoveryRetriesFiveTimesAndSucceeds(t *testing.T) {
+	local := daemonStateStore(t)
+	if _, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+		runtime.AppliedRevision = "verified-revision"
+		runtime.CoreAutoStart = true
+		runtime.ProxyPort = 7890
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}}
+	verifyCalls := 0
+	daemon := &Daemon{State: local, Core: core, Logf: func(string, ...any) {}, VerifyRuntime: func(context.Context, int) error {
+		verifyCalls++
+		if verifyCalls < 5 {
+			return errors.New("Mihomo API is not ready")
+		}
+		return nil
+	}}
+	if err := daemon.restoreCoreOnStartup(context.Background(), []time.Duration{0, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if core.starts != 5 || core.stops != 4 || verifyCalls != 5 {
+		t.Fatalf("startup retries: starts=%d stops=%d verifies=%d", core.starts, core.stops, verifyCalls)
+	}
+	runtimeState, err := local.Runtime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeState.CoreAutoStart || runtimeState.CoreStatus != "running" || runtimeState.RecentError != "" {
+		t.Fatalf("runtime after recovery = %#v", runtimeState)
+	}
+}
+
+func TestStartupRecoveryStopsAfterFiveFailures(t *testing.T) {
+	local := daemonStateStore(t)
+	if _, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+		runtime.AppliedRevision = "verified-revision"
+		runtime.CoreAutoStart = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}}
+	daemon := &Daemon{State: local, Core: core, Logf: func(string, ...any) {}, VerifyRuntime: func(context.Context, int) error {
+		return errors.New("Mihomo API is not ready")
+	}}
+	err := daemon.restoreCoreOnStartup(context.Background(), []time.Duration{0, 0, 0, 0, 0})
+	if err == nil || !strings.Contains(err.Error(), "after 5 attempts") {
+		t.Fatalf("startup recovery error = %v", err)
+	}
+	if core.starts != 5 || core.stops != 5 {
+		t.Fatalf("bounded retries: starts=%d stops=%d", core.starts, core.stops)
+	}
+	runtimeState, stateErr := local.Runtime()
+	if stateErr != nil {
+		t.Fatal(stateErr)
+	}
+	if !runtimeState.CoreAutoStart || runtimeState.CoreStatus != "stopped" || !strings.Contains(runtimeState.RecentError, "after 5 attempts") {
+		t.Fatalf("runtime after exhausted recovery = %#v", runtimeState)
+	}
+}
+
+func TestStartupRecoveryDoesNothingWhenAutoStartIsDisabled(t *testing.T) {
+	local := daemonStateStore(t)
+	if _, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+		runtime.AppliedRevision = "verified-revision"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}}
+	daemon := &Daemon{State: local, Core: core, Logf: func(string, ...any) {}}
+	if err := daemon.restoreCoreOnStartup(context.Background(), []time.Duration{0, 0, 0, 0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if core.starts != 0 {
+		t.Fatalf("disabled automatic startup started Mihomo %d times", core.starts)
+	}
+}
+
+func TestStartupRecoveryStopsQuietlyWhenIntentIsClearedDuringBackoff(t *testing.T) {
+	local := daemonStateStore(t)
+	if _, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+		runtime.AppliedRevision = "verified-revision"
+		runtime.CoreAutoStart = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}}
+	logs := make([]string, 0)
+	daemon := &Daemon{State: local, Core: core, Logf: func(format string, args ...any) {
+		logs = append(logs, fmt.Sprintf(format, args...))
+	}, VerifyRuntime: func(context.Context, int) error {
+		_, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+			runtime.CoreAutoStart = false
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return errors.New("Mihomo API is not ready")
+	}}
+	if err := daemon.restoreCoreOnStartup(context.Background(), []time.Duration{0, 0}); err != nil {
+		t.Fatal(err)
+	}
+	if core.starts != 1 {
+		t.Fatalf("Mihomo was started %d times after intent was cleared", core.starts)
+	}
+	for _, entry := range logs {
+		if strings.Contains(entry, "startup succeeded") {
+			t.Fatalf("cancelled startup was reported as success: %q", entry)
+		}
+	}
+}
+
+func TestRunRestoresCoreWhenAutoStartIsEnabled(t *testing.T) {
+	local := daemonStateStore(t)
+	if _, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+		runtime.AppliedRevision = "verified-revision"
+		runtime.CoreAutoStart = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}, startSignal: started}
+	daemon := &Daemon{State: local, Control: &fakeControl{state: agentclient.State{ProtocolVersion: 1}}, Core: core, Deployer: &fakeDeployer{}, Mihomo: fakeMihomo{}, AgentVersion: "test", PollInterval: time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- daemon.Run(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("Mihomo was not restored when Agent started")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		runtimeState, err := local.Runtime()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtimeState.CoreStatus == "running" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("runtime status was not refreshed: %#v", runtimeState)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestExplicitCoreJobsPersistAutoStartIntent(t *testing.T) {
+	local := daemonStateStore(t)
+	if _, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+		runtime.AppliedRevision = "verified-revision"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}}
+	daemon := &Daemon{State: local, Core: core, Deployer: &fakeDeployer{}, Mihomo: fakeMihomo{}}
+	for _, test := range []struct {
+		jobType string
+		want    bool
+	}{
+		{agentproto.JobStartCore, true},
+		{agentproto.JobStopCore, false},
+		{agentproto.JobRestartCore, true},
+		{agentproto.JobUninstallCore, false},
+	} {
+		if _, err := daemon.executeJob(context.Background(), agentproto.Job{Type: test.jobType}); err != nil {
+			t.Fatalf("%s: %v", test.jobType, err)
+		}
+		runtimeState, err := local.Runtime()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if runtimeState.CoreAutoStart != test.want {
+			t.Fatalf("%s CoreAutoStart = %v, want %v", test.jobType, runtimeState.CoreAutoStart, test.want)
+		}
+	}
+}
+
+func TestFailedExplicitStartStopsCoreWithoutEnablingAutoStart(t *testing.T) {
+	local := daemonStateStore(t)
+	if _, err := local.UpdateRuntime(func(runtime *agentstate.Runtime) error {
+		runtime.AppliedRevision = "verified-revision"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	core := &fakeCore{status: hostops.CoreStatus{Installed: true, Version: "v1.19.28", State: "stopped"}}
+	daemon := &Daemon{State: local, Core: core, VerifyRuntime: func(context.Context, int) error {
+		return errors.New("Mihomo API is not ready")
+	}}
+	if _, err := daemon.executeJob(context.Background(), agentproto.Job{Type: agentproto.JobStartCore}); err == nil {
+		t.Fatal("failed runtime verification was accepted")
+	}
+	runtimeState, err := local.Runtime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if core.starts != 1 || core.stops != 1 || runtimeState.CoreAutoStart {
+		t.Fatalf("failed start state: core=%#v runtime=%#v", core, runtimeState)
 	}
 }
 

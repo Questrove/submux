@@ -90,6 +90,34 @@ func TestRuntimeInstanceConsoleUsesTypedControlPlaneAPIs(t *testing.T) {
 	}
 }
 
+func TestRuntimeSubscriptionNameIsDerivedFromSource(t *testing.T) {
+	content, err := FS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(content)
+	for _, required := range []string{
+		`function runtimeSubscriptionName(`,
+		`if(value?.name?.trim())return value.name.trim()`,
+		`Number(current?.platform_subscription_id||0)===platformID`,
+		`return parsedURL.hostname.slice(0,80)`,
+		`const name=runtimeSubscriptionName(source,platformID,parsedURL,current)`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("runtime subscription name derivation is missing %q", required)
+		}
+	}
+	for _, removed := range []string{
+		`id="runtime-subscription-name"`,
+		`请填写订阅名称`,
+		`runtimePlatformSubscriptionChanged`,
+	} {
+		if strings.Contains(html, removed) {
+			t.Fatalf("runtime subscription still asks the user for a name: %q", removed)
+		}
+	}
+}
+
 func TestNavigationStateSurvivesPageReload(t *testing.T) {
 	content, err := FS.ReadFile("index.html")
 	if err != nil {
