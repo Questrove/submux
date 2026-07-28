@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"submux/internal/compiler"
+	"submux/internal/fakeip"
 
 	"submux/internal/lifecycle"
 	"submux/internal/resourceproxy"
@@ -386,10 +388,20 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		proxy = resourceproxy.Config{Mode: resourceproxy.ModeDirect}
 	}
+	rawSharedFakeIP, err := s.store.GetSetting(fakeip.SettingKey)
+	if err != nil {
+		http.Error(w, "load shared fake-ip-filter failed", http.StatusInternalServerError)
+		return
+	}
+	sharedFakeIP, err := fakeip.Parse(rawSharedFakeIP)
+	if err != nil {
+		sharedFakeIP = fakeip.Default()
+	}
 	writeJSON(w, map[string]any{
 		"base_url":                base,
 		"fetch_interval_sec":      interval,
 		"platform_resource_proxy": proxy,
+		"shared_fake_ip_filter":   sharedFakeIP,
 	})
 }
 
@@ -398,6 +410,7 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		BaseURL               string               `json:"base_url"`
 		FetchIntervalSec      int                  `json:"fetch_interval_sec"`
 		PlatformResourceProxy resourceproxy.Config `json:"platform_resource_proxy"`
+		SharedFakeIPFilter    *fakeip.Config       `json:"shared_fake_ip_filter,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -416,6 +429,15 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	var sharedFakeIPRaw string
+	if body.SharedFakeIPFilter != nil {
+		var err error
+		sharedFakeIPRaw, _, err = fakeip.Marshal(*body.SharedFakeIPFilter)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	if err := s.store.SetSetting("base_url", body.BaseURL); err != nil {
 		http.Error(w, "save failed", http.StatusInternalServerError)
 		return
@@ -433,7 +455,53 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save platform resource proxy failed", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	var rebuildErr error
+	if body.SharedFakeIPFilter != nil {
+		if err := s.store.SetSetting(fakeip.SettingKey, sharedFakeIPRaw); err != nil {
+			http.Error(w, "save shared fake-ip-filter failed", http.StatusInternalServerError)
+			return
+		}
+		rebuildErr = s.compiler.RebuildAll()
+	}
+	result := map[string]any{"ok": rebuildErr == nil}
+	if rebuildErr != nil {
+		result["rebuild_error"] = rebuildErr.Error()
+	}
+	writeJSON(w, result)
+}
+
+func (s *Server) handlePreviewSharedFakeIPFilter(w http.ResponseWriter, r *http.Request) {
+	versionID, err := strconv.ParseInt(r.URL.Query().Get("template_version_id"), 10, 64)
+	if err != nil || versionID <= 0 {
+		http.Error(w, "template_version_id is required", http.StatusBadRequest)
+		return
+	}
+	version, err := s.store.GetTemplateVersion(versionID)
+	if err != nil {
+		http.Error(w, "template version does not exist", http.StatusNotFound)
+		return
+	}
+	template, err := s.store.GetTemplate(version.TemplateID)
+	if err != nil || template.Engine != compiler.EngineMihomo {
+		http.Error(w, "preview supports only Mihomo templates", http.StatusBadRequest)
+		return
+	}
+	rawShared, err := s.store.GetSetting(fakeip.SettingKey)
+	if err != nil {
+		http.Error(w, "load shared fake-ip-filter failed", http.StatusInternalServerError)
+		return
+	}
+	shared, err := fakeip.Parse(rawShared)
+	if err != nil {
+		http.Error(w, "shared fake-ip-filter is invalid", http.StatusInternalServerError)
+		return
+	}
+	preview, err := compiler.PreviewSharedFakeIPFilter(version.Content, shared)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, preview)
 }
 
 func (s *Server) handleTestPlatformResourceProxy(w http.ResponseWriter, r *http.Request) {

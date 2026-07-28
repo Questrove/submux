@@ -31,90 +31,27 @@ func TestNodeMetadataUsesOneDialogWithoutAlias(t *testing.T) {
 	}
 }
 
-func TestRuntimeInstanceConsoleUsesTypedControlPlaneAPIs(t *testing.T) {
+func TestSubscriptionTemplateAndVersionUseSeparateSelectors(t *testing.T) {
 	content, err := FS.ReadFile("index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	html := string(content)
 	for _, required := range []string{
-		`data-page="runtime"`,
-		`id="page-runtime"`,
-		`/api/runtime/enrollments`,
-		`/api/runtime/instances/${id}`,
-		`id="runtime-reconnect"`,
-		`function reconnectActiveRuntime()`,
-		`button.textContent='连接中…'`,
-		`notify('已重新连接')`,
-		`id="runtime-agent-card"`,
-		`id="runtime-mihomo-card"`,
-		`id="runtime-agent-resource-proxy-current"`,
-		`id="runtime-mihomo-last-good-current"`,
-		`function saveRuntimeSubscription(`,
-		`function activateRuntimeSubscription(`,
-		`id="runtime-subscription-source"`,
-		`id="runtime-subscription-platform"`,
-		`platform_subscription_id:platformID`,
-		`availablePlatformRuntimeSubscriptions()`,
-		`/secrets`,
-		`function configureRuntimeResourceProxy(`,
-		`function installRuntimeCore(`,
-		`function createRuntimeJob(`,
-		`function revokeRuntimeInstance(`,
-		`完整 Mihomo YAML`,
+		`id="subscription-template"`,
+		`id="subscription-template-version"`,
+		`onchange="subscriptionTemplateVersionChanged()"`,
+		`function renderSubscriptionTemplateVersionOptions(`,
+		`version.id===template?.current_version_id?'（最新）'`,
+		`renderSubscriptionTemplateVersionOptions(subscription.template_version_id)`,
+		`template_version_id:versionID`,
 	} {
 		if !strings.Contains(html, required) {
-			t.Fatalf("runtime instance console is missing %q", required)
+			t.Fatalf("separate subscription template/version picker is missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"runtime exec", "runtime shell", "arbitrary command", "function saveRuntimeBinding(", "function saveRuntimeDesired(", "desired_integrations:{}", "runtime-binding-subscription", "function applyRuntimeSubscription("} {
-		if strings.Contains(strings.ToLower(html), forbidden) {
-			t.Fatalf("runtime console exposes a generic execution concept: %q", forbidden)
-		}
-	}
-	if strings.Contains(html, "collect_diagnostics") || strings.Contains(html, "update_subscription") || !strings.Contains(html, `class="danger runtime-danger"`) {
-		t.Fatal("runtime header still exposes diagnostics or lacks the solid revoke button")
-	}
-	for _, numbered := range []string{`>5. 运行实例</button>`, `>6. 代理设置指南</button>`} {
-		if strings.Contains(html, numbered) {
-			t.Fatalf("top navigation still presents a non-sequential page as a numbered step: %q", numbered)
-		}
-	}
-	for _, redundant := range []string{`<h3>当前运行信息</h3>`, `<h3>资源状态</h3>`, `<h3>最近部署</h3>`, `id="runtime-observation"`, `id="runtime-memory-bar"`, `id="runtime-deployment-rows"`} {
-		if strings.Contains(html, redundant) {
-			t.Fatalf("runtime overview still contains a redundant status panel: %q", redundant)
-		}
-	}
-	if strings.Contains(html, `function refreshActiveRuntime()`) || strings.Contains(html, `>刷新状态</button>`) {
-		t.Fatal("runtime header still exposes the old no-feedback status refresh")
-	}
-}
-
-func TestRuntimeSubscriptionNameIsDerivedFromSource(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`function runtimeSubscriptionName(`,
-		`if(value?.name?.trim())return value.name.trim()`,
-		`Number(current?.platform_subscription_id||0)===platformID`,
-		`return parsedURL.hostname.slice(0,80)`,
-		`const name=runtimeSubscriptionName(source,platformID,parsedURL,current)`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("runtime subscription name derivation is missing %q", required)
-		}
-	}
-	for _, removed := range []string{
-		`id="runtime-subscription-name"`,
-		`请填写订阅名称`,
-		`runtimePlatformSubscriptionChanged`,
-	} {
-		if strings.Contains(html, removed) {
-			t.Fatalf("runtime subscription still asks the user for a name: %q", removed)
-		}
+	if strings.Contains(html, `template_version_id:Number($('#subscription-template').value)`) {
+		t.Fatal("subscription save still treats the template selector as a template version")
 	}
 }
 
@@ -131,10 +68,6 @@ func TestNavigationStateSurvivesPageReload(t *testing.T) {
 		`function activatePage(page,persist=true)`,
 		`async function restoreNavigationState()`,
 		`await loadAll();await restoreNavigationState();`,
-		`async function openRuntimeInstance(id,view='overview',persist=true)`,
-		`function showRuntimeView(view,persist=true)`,
-		`runtimeInstanceID`,
-		`RUNTIME_VIEW_NAMES.has(state.runtimeView)`,
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("navigation reload state is missing %q", required)
@@ -166,234 +99,6 @@ func TestProxyGuideIsInstructionOnlyAndCoversCommonSoftware(t *testing.T) {
 		if strings.Contains(html, forbidden) {
 			t.Fatalf("proxy guide retains an automatic configuration path: %q", forbidden)
 		}
-	}
-}
-
-func TestRuntimePanelUsesOnDemandStreamsAndExplicitProxyJobs(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`function openRuntimeStream(kind)`,
-		`function startRuntimeOverviewStreams()`,
-		`function showRuntimeView(view,persist=true)`,
-		`/stream/${kind}`,
-		`createRuntimeJob('test_proxy_delay'`,
-		`createRuntimeJob('select_proxy'`,
-		`createRuntimeJob('close_connection'`,
-		`state.frames.length>300`,
-		`agent_logs`,
-		`/events`,
-		`function renderRuntimeOperation()`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("runtime observation panel is missing %q", required)
-		}
-	}
-	if strings.Contains(html, "setInterval(()=>testRuntimeProxy") {
-		t.Fatal("runtime panel performs background proxy delay tests")
-	}
-}
-
-func TestRuntimeAgentLogsIgnoreReplayedFrames(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`stream_id`,
-		`state.seen.has(logID)`,
-		`state.seenOrder.length>600`,
-		`RUNTIME_LOG_STATES=createRuntimeLogStates()`,
-		`function clearRuntimeLogs(){const state=runtimeLogState();if(state)state.frames=[]`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("runtime log resume protection is missing %q", required)
-		}
-	}
-}
-
-func TestRuntimePanelConfiguresAgentResourceProxyAndTracksAsyncActions(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`id="runtime-resource-proxy-mode"`,
-		`id="runtime-resource-proxy-url"`,
-		`<select id="runtime-core-version"`,
-		`function loadRuntimeCoreVersions()`,
-		`createRuntimeJob('list_core_versions',{channel})`,
-		`job.type==='list_core_versions'&&job.params?.channel===channel`,
-		`http://127.0.0.1:1080`,
-		`socks5://127.0.0.1:1080`,
-		`createRuntimeJob('configure_resource_proxy',{resource_proxy:{mode,url}})`,
-		`createRuntimeJob('install_core',{channel,version})`,
-		`runRuntimeCoreAction('start_core')`,
-		`runRuntimeCoreAction('stop_core')`,
-		`runRuntimeCoreAction('rollback_core')`,
-		`runRuntimeCoreAction('uninstall_core')`,
-		`function openRuntimeEvents()`,
-		`function scheduleRuntimeEventRefresh(instanceID)`,
-		`id="runtime-operation"`,
-		`id="runtime-log-source-agent"`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("runtime asynchronous control is missing %q", required)
-		}
-	}
-	for _, removed := range []string{"use_mihomo_after_install", "current_mihomo", "expected_generation", "observed_generation"} {
-		if strings.Contains(html, removed) {
-			t.Fatalf("Agent resource proxy retains automatic switching mode %q", removed)
-		}
-	}
-	if strings.Contains(html, `<input id="runtime-core-version"`) {
-		t.Fatal("Mihomo version remains a free-form input")
-	}
-}
-
-func TestRuntimeWorkspaceUsesTaskOrientedDashboardLayout(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`class="runtime-layout"`,
-		`id="runtime-instance-list"`,
-		`class="runtime-stat-grid"`,
-		`data-runtime-view="overview"`,
-		`data-runtime-view="proxies"`,
-		`data-runtime-view="connections"`,
-		`data-runtime-view="logs"`,
-		`data-runtime-view="config"`,
-		`data-runtime-view="activity"`,
-		`id="runtime-traffic-chart"`,
-		`.runtime-overview-grid>div{display:flex}`,
-		`id="runtime-proxy-filter"`,
-		`id="runtime-connection-filter"`,
-		`id="runtime-log-filter"`,
-		`function renderRuntimeProxyGroups()`,
-		`function renderRuntimeConnections()`,
-		`font-variant-numeric:tabular-nums`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("task-oriented runtime workspace is missing %q", required)
-		}
-	}
-	for _, removed := range []string{`id="runtime-rows"`, `id="runtime-proxy-rows"`, `id="runtime-traffic"`, `id="runtime-memory"`} {
-		if strings.Contains(html, removed) {
-			t.Fatalf("legacy flat runtime panel remains: %q", removed)
-		}
-	}
-}
-
-func TestRuntimeTrafficChartIncludesSpeedAndTimeAxes(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`.runtime-chart-axis`,
-		`.runtime-chart-grid`,
-		`RUNTIME_TRAFFIC_HISTORY.push({up,down,at:Date.now()})`,
-		`function formatRuntimeTrafficTime(value)`,
-		`function runtimeTrafficScale(value)`,
-		`formatBytes(level*max)`,
-		`formatRuntimeTrafficTime(values[index].at)`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("runtime traffic chart is missing coordinate support %q", required)
-		}
-	}
-}
-
-func TestRuntimeProxyGroupsSeparateBuiltinsGroupsAndNodes(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`class="runtime-toolbar-actions"`,
-		`.runtime-proxy-grid{grid-template-columns:repeat(auto-fit`,
-		`const RUNTIME_PROXY_GROUP_TYPES=`,
-		`function runtimeProxyKind(name)`,
-		`function runtimeProxySelectionPath(name)`,
-		`String(proxy.name||'').toUpperCase()!=='GLOBAL'`,
-		`kind==='node'?runtimeLatencyHTML(delay)`,
-		"kind==='node'?`<button class=\"runtime-node-test",
-		`查看策略组`,
-		`data-runtime-proxy-group=`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("runtime proxy view does not separate proxy kinds: missing %q", required)
-		}
-	}
-	if strings.Contains(html, `filter(proxy=>proxy.type==='Selector')`) {
-		t.Fatal("runtime proxy view still renders Mihomo's GLOBAL selector without filtering")
-	}
-}
-
-func TestRuntimeCopyDescribesFeaturesWithoutProtocolCommentary(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`查看 Agent、Mihomo、流量、连接和任务状态。`,
-		`查看 Mihomo 当前加载的配置。`,
-		`查看 Mihomo 当前加载的规则。`,
-		`供当前 Agent 读取版本和下载 Mihomo 核心，其他请求不使用这里的设置。`,
-		`},'任务已提交');`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("runtime feature copy is missing %q", required)
-		}
-	}
-	for _, removed := range []string{
-		`一次性操作已提交，页面会持续显示进度和结果`,
-		`应用下载代理`,
-		`只读展示，不反向写入模板。`,
-		`敏感键在 Agent 侧移除。`,
-		`每个按钮只执行一次，完成后以 Agent 上报状态为准。`,
-		`不保存期望状态`,
-	} {
-		if strings.Contains(html, removed) {
-			t.Fatalf("runtime page retains implementation-oriented copy %q", removed)
-		}
-	}
-}
-
-func TestRuntimeEnrollmentOffersSafeOneCommandBootstrap(t *testing.T) {
-	content, err := FS.ReadFile("index.html")
-	if err != nil {
-		t.Fatal(err)
-	}
-	html := string(content)
-	for _, required := range []string{
-		`id="runtime-enrollment-server"`,
-		`id="runtime-enrollment-version"`,
-		`id="runtime-bootstrap-command"`,
-		`function runtimeBootstrapCommand()`,
-		`function copyRuntimeBootstrapCommand()`,
-		`scripts/bootstrap-agent.sh`,
-		`--require-bundle`,
-		`overflow-wrap:anywhere`,
-		`word-break:break-all`,
-	} {
-		if !strings.Contains(html, required) {
-			t.Fatalf("runtime one-command enrollment is missing %q", required)
-		}
-	}
-	if strings.Contains(html, `id="runtime-enrollment-code" style=`) {
-		t.Fatal("pairing code retains an unbounded inline layout")
 	}
 }
 
@@ -492,7 +197,7 @@ func TestTemplateEditorDoesNotExposeLegacyRuntimeContract(t *testing.T) {
 	html := string(content)
 	for _, removed := range []string{`id="template-runtime-contract"`, `运行契约（可空）`, `version?.runtime_contract`, `runtime_contract:$('#template-runtime-contract')`} {
 		if strings.Contains(html, removed) {
-			t.Fatalf("template editor still exposes legacy Agent binding metadata: %q", removed)
+			t.Fatalf("template editor still exposes legacy remote-runtime metadata: %q", removed)
 		}
 	}
 }
@@ -528,7 +233,7 @@ func TestRetiredTemplatesAreHiddenFromCatalogAndNewSubscriptions(t *testing.T) {
 	html := string(content)
 	for _, required := range []string{
 		"TEMPLATES.filter(template=>template.status!=='retired').map(template=>",
-		"TEMPLATES.filter(template=>template.status!=='retired'&&template.current_version_id)",
+		"TEMPLATES.filter(template=>template.status!=='retired'&&template.current_version_id&&VERSIONS.has(template.current_version_id))",
 	} {
 		if !strings.Contains(html, required) {
 			t.Fatalf("retired template compatibility records remain selectable: missing %q", required)
@@ -579,7 +284,7 @@ func TestRuleProfilesUseFullCatalogAndOrderedSelections(t *testing.T) {
 	}
 }
 
-func TestPlatformAndAgentResourceProxiesHaveSeparateScopes(t *testing.T) {
+func TestPlatformResourceProxyHasExplicitScope(t *testing.T) {
 	content, err := FS.ReadFile("index.html")
 	if err != nil {
 		t.Fatal(err)
@@ -589,17 +294,48 @@ func TestPlatformAndAgentResourceProxiesHaveSeparateScopes(t *testing.T) {
 		`id="setting-platform-proxy-mode"`, `id="setting-platform-proxy-url"`,
 		`/api/settings/platform-resource-proxy/test`, `platform_resource_proxy:{mode,url}`,
 		`id="source-fetch-mode"`, `direct_then_platform_proxy`, `/refresh-via-platform-proxy`,
-		`id="runtime-resource-proxy-mode"`, `id="runtime-resource-proxy-url"`,
-		`configure_resource_proxy`, `resource_proxy:{mode,url}`,
-		`供当前 Agent 读取版本和下载 Mihomo 核心`,
 	} {
 		if !strings.Contains(html, required) {
-			t.Fatalf("separate resource proxy UI is missing %q", required)
+			t.Fatalf("platform resource proxy UI is missing %q", required)
 		}
 	}
-	for _, removed := range []string{`id="runtime-download-proxy-mode"`, `configure_download_proxy`, `download_proxy:{`} {
+}
+
+func TestRemoteRuntimeControlSurfaceIsAbsent(t *testing.T) {
+	content, err := FS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(content)
+	for _, removed := range []string{
+		`data-page="runtime"`, `id="page-runtime"`, `/api/runtime/`, `/api/agent/`,
+		`runtime-enrollment`, `runtime-instance`, `RUNTIME_`, `bootstrap-agent`,
+		`install-gateway-agent`, `Agent 资源代理`, `一次性配对码`,
+	} {
 		if strings.Contains(html, removed) {
-			t.Fatalf("legacy Mihomo download proxy UI remains: %q", removed)
+			t.Fatalf("remote runtime control surface remains: %q", removed)
+		}
+	}
+}
+
+func TestSharedFakeIPFilterHasOneEditorAndTemplatePreview(t *testing.T) {
+	content, err := FS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(content)
+	for _, required := range []string{
+		`id="setting-fake-ip-mode"`,
+		`id="setting-fake-ip-entries"`,
+		`id="setting-fake-ip-template"`,
+		`id="setting-fake-ip-preview"`,
+		`/api/settings/shared-fake-ip-filter/preview?template_version_id=${version}`,
+		`shared_fake_ip_filter:{mode:$('#setting-fake-ip-mode').value,entries}`,
+		`共享条目排在模板专用条目前并按首次出现去重`,
+		`redir-host 模板不使用这份列表`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("shared fake-IP editor is missing %q", required)
 		}
 	}
 }

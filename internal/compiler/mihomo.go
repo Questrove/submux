@@ -6,6 +6,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"submux/internal/fakeip"
 	"submux/internal/node"
 	"submux/internal/store"
 )
@@ -41,6 +42,9 @@ func validateMihomoTemplate(content string, slots []store.TemplateSlot) error {
 func compileMihomo(value resolvedSubscription) ([]byte, error) {
 	root, err := parseYAMLMap(value.Template.Content)
 	if err != nil {
+		return nil, err
+	}
+	if err := applySharedFakeIPFilter(root, value.SharedFakeIP); err != nil {
 		return nil, err
 	}
 	existing, err := optionalObjectList(root["proxies"], "proxies")
@@ -98,6 +102,72 @@ func compileMihomo(value resolvedSubscription) ([]byte, error) {
 		return nil, err
 	}
 	return yaml.Marshal(root)
+}
+
+func applySharedFakeIPFilter(root map[string]any, shared fakeip.Config) error {
+	if len(shared.Entries) == 0 {
+		return nil
+	}
+	dns, ok := root["dns"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	if stringValue(dns["enhanced-mode"]) != "fake-ip" {
+		return nil
+	}
+	templateMode := stringValue(dns["fake-ip-filter-mode"])
+	if templateMode == "" {
+		templateMode = fakeip.ModeBlacklist
+	}
+	if templateMode != shared.Mode {
+		return fmt.Errorf("shared fake-ip-filter mode %q is incompatible with template mode %q", shared.Mode, templateMode)
+	}
+	templateEntries, err := optionalStringList(dns["fake-ip-filter"], "dns.fake-ip-filter")
+	if err != nil {
+		return err
+	}
+	dns["fake-ip-filter-mode"] = shared.Mode
+	dns["fake-ip-filter"] = uniqueStrings(append(append([]string(nil), shared.Entries...), templateEntries...))
+	return nil
+}
+
+type FakeIPFilterPreview struct {
+	Applicable      bool     `json:"applicable"`
+	EnhancedMode    string   `json:"enhanced_mode,omitempty"`
+	FilterMode      string   `json:"filter_mode,omitempty"`
+	SharedEntries   []string `json:"shared_entries"`
+	TemplateEntries []string `json:"template_entries"`
+	Effective       []string `json:"effective"`
+}
+
+func PreviewSharedFakeIPFilter(content string, shared fakeip.Config) (FakeIPFilterPreview, error) {
+	root, err := parseYAMLMap(content)
+	if err != nil {
+		return FakeIPFilterPreview{}, err
+	}
+	result := FakeIPFilterPreview{SharedEntries: append([]string(nil), shared.Entries...)}
+	dns, ok := root["dns"].(map[string]any)
+	if !ok {
+		return result, nil
+	}
+	result.EnhancedMode = stringValue(dns["enhanced-mode"])
+	if result.EnhancedMode != "fake-ip" {
+		return result, nil
+	}
+	result.Applicable = true
+	result.FilterMode = stringValue(dns["fake-ip-filter-mode"])
+	if result.FilterMode == "" {
+		result.FilterMode = fakeip.ModeBlacklist
+	}
+	result.TemplateEntries, err = optionalStringList(dns["fake-ip-filter"], "dns.fake-ip-filter")
+	if err != nil {
+		return FakeIPFilterPreview{}, err
+	}
+	if len(shared.Entries) > 0 && result.FilterMode != shared.Mode {
+		return FakeIPFilterPreview{}, fmt.Errorf("shared fake-ip-filter mode %q is incompatible with template mode %q", shared.Mode, result.FilterMode)
+	}
+	result.Effective = uniqueStrings(append(append([]string(nil), shared.Entries...), result.TemplateEntries...))
+	return result, nil
 }
 
 func validateMihomoReferences(root map[string]any, proxies, groups map[string]bool) error {

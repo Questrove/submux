@@ -1,0 +1,73 @@
+# submux
+
+submux 生成并交付可用的代理配置。Submux Runtime 独立管理本机的 Mihomo 与配置来源。
+
+## Language
+
+**输出订阅**:
+由 submux 生成、可供设备读取的代理配置。它是平台发布的结果，不是机场提供的订阅地址。
+_Avoid_: 订阅
+
+**最近可用产物**:
+输出订阅最近一次成功编译并发布的内容，普通重编译失败时继续交付它。
+_Avoid_: last-good、缓存订阅
+
+**机场来源**:
+向 submux 提供代理节点的上游服务及其订阅地址。
+_Avoid_: 机场订阅、订阅
+
+**Submux Runtime**:
+安装在本机、负责管理一个 Mihomo 与多个 Runtime 配置来源的程序，任意时刻只有一个来源正在使用。一台机器或一个网络命名空间只运行一个 Submux Runtime。它不接入 submux，也不接受 submux 的远程管理。
+_Avoid_: 远程运行端、运行实例、设备
+
+**Runtime 配置来源**:
+由用户在本机添加、向 Submux Runtime 提供完整 Mihomo 配置的来源，可以是 submux 输出订阅、外部 HTTP(S) 地址或本机导入副本。
+_Avoid_: 订阅、配置订阅
+
+**当前来源**:
+Submux Runtime 当前选用的 Runtime 配置来源。来源可以有多个，但任意时刻只有一个当前来源，刷新失败不会自动切换到其他来源。
+_Avoid_: 当前订阅、活动订阅
+
+**本机运行设置**:
+由 Submux Runtime 保存、会影响本机监听范围、网络接管方式或系统权限的设置；应用 Runtime 配置来源时，这些设置优先于来源配置中的同名字段。
+_Avoid_: 本地覆盖、本地配置
+
+**本机高级覆盖**:
+由用户在本机保存、应用于 Runtime 配置来源之上的可选 Mihomo 配置修改。它不改变来源原文，也不能修改 Submux Runtime 保留的运行字段。
+_Avoid_: 本地补丁、直接修改
+
+**托管资源**:
+由 Runtime 操作员明确导入、保存在 Submux Runtime 状态目录中并可供 Mihomo 配置安全引用的文件。配置来源和本机高级覆盖不能引用托管资源以外的本机文件。
+_Avoid_: 本机文件、外部文件
+
+**候选配置**:
+由当前来源、本机高级覆盖和本机运行设置合成，正在校验或应用、尚未被确认为可用的 Mihomo 配置。
+_Avoid_: staging 配置、临时配置
+
+**最近可用配置**:
+最近一次成功应用并通过本机健康检查的候选配置，新的候选配置失败时由 Submux Runtime 恢复。
+_Avoid_: last-good、当前配置
+
+**运行方式**:
+Submux Runtime 接入流量的方式，只能是显式代理、TUN 或 Linux 网关，任意时刻只使用一种。
+_Avoid_: 模式、档位、profile
+
+**Runtime 操作员**:
+经本机管理员明确授权、可以通过本机 IPC 管理 Submux Runtime 的操作系统用户。操作员不能绕过 Runtime 直接调用特权网络进程。
+_Avoid_: Runtime 用户、普通用户
+
+**特权网络进程**:
+随 Submux Runtime 安装、只负责 TUN、路由、DNS 和 Linux 网关等系统网络操作的受限进程。它不接受配置地址、任意文件路径、任意命令或来自 GUI、TUI、CLI 的直接请求；平台确有需要时，可以按固定规则启动经过验证的 Mihomo。
+_Avoid_: root Runtime、特权 Runtime、网络脚本
+
+**故障放行**:
+当 Mihomo、Submux Runtime 或特权网络进程异常退出时，撤销由 Runtime 创建的网络设置并恢复系统原有的直连网络。
+_Avoid_: kill switch、故障阻断
+
+**运行操作**:
+Runtime 操作员通过本机 IPC 发起的一次持久化状态修改，可以在客户端退出后继续执行并由其他本机客户端观察。
+_Avoid_: Job、远程任务、命令
+
+**官方 Mihomo 核心**:
+由 `MetaCubeX/mihomo` 官方 Release 发布、版本和目标系统明确且保持原样的 Mihomo 可执行程序。
+_Avoid_: 自定义核心、第三方核心、内置核心

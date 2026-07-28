@@ -5,7 +5,7 @@
 1. 连接语义以协议项目和目标内核官方文档为准，不根据某个机场返回样本反推字段。
 2. Mihomo 与 sing-box 是两个独立目标，不假设同名字段语义相同。
 3. Mihomo 模板直接接收规范化的 Mihomo 节点对象；sing-box 必须经过显式字段转换。
-4. sing-box 转换遇到未知协议、未知字段、未知传输或语义不等价字段时，整个输出订阅编译失败并保留 last-good。
+4. sing-box 转换遇到未知协议、未知字段、未知传输或语义不等价字段时，整个输出订阅编译失败并保留最近可用产物。
 5. 协议支持表示“当前列出的连接字段可以保持语义”，不表示任意客户端私有扩展都受支持。
 
 ## 输入
@@ -28,7 +28,7 @@
 
 TUIC 等未列出的分享链接会被拒绝。Mihomo YAML 中的其他节点类型仍可进入节点库并用于 Mihomo 输出订阅，但进入 sing-box 输出订阅会严格失败。
 
-订阅中的高置信度流量/到期信息条目会标为 notice，不作为代理节点送入任一编译器。识别格式、可信度与执法语义见 [LIFECYCLE.md](LIFECYCLE.md)。
+来源内容中的高置信度流量/到期信息条目会标为 notice，不作为代理节点送入任一编译器。识别格式、可信度与执法语义见 [LIFECYCLE.md](LIFECYCLE.md)。
 
 ## Mihomo 编译器
 
@@ -66,7 +66,7 @@ TUIC 等未列出的分享链接会被拒绝。Mihomo YAML 中的其他节点类
 - VLESS `encryption` 非空且非 `none`。
 - 未列出的协议或任何节点未知字段。
 - `udp` 非布尔值；缺失或 `false` 会显式转换为 sing-box `network: tcp`，避免其默认同时开启 TCP/UDP。
-- 非默认 `ip-version`，因为它需要订阅模板级 DNS resolver 策略，不能安全地局部猜测。
+- 非默认 `ip-version`，因为它需要配置模板级 DNS resolver 策略，不能安全地局部猜测。
 - Mihomo `dialer-proxy` 和未显式转换的 smux 扩展。
 - REALITY 缺少 public key，或包含 sing-box 当前客户端 schema 无等价字段的扩展。
 - Hysteria2 URI `pinSHA256`。

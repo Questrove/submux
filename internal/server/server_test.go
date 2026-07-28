@@ -59,6 +59,25 @@ func TestServerInitializationFailureIsSurfaced(t *testing.T) {
 	}
 }
 
+func TestRemoteRuntimeRoutesAreNotRegistered(t *testing.T) {
+	handler := New(newTestStore(t), nil).Handler()
+	for _, test := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/agent/enroll"},
+		{http.MethodPost, "/api/agent/heartbeat"},
+		{http.MethodGet, "/api/runtime/instances"},
+		{http.MethodPost, "/api/runtime/enrollments"},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(test.method, test.path, nil))
+		if recorder.Code != http.StatusNotFound && recorder.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s %s remains registered: status %d", test.method, test.path, recorder.Code)
+		}
+	}
+}
+
 func TestHandleSubServesFixedMihomoArtifactRegardlessOfUA(t *testing.T) {
 	st := newTestStore(t)
 	body := []byte("proxies:\n  - {name: fixed}\n")

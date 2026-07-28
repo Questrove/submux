@@ -488,7 +488,11 @@ func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 	}
 	_ = json.NewDecoder(templatesResponse.Body).Decode(&templates)
 	templatesResponse.Body.Close()
-	if len(templates) != 2 || templates[0].Name != "Mihomo 桌面 TUN" || templates[1].Name != "Mihomo Linux 服务器" || templates[0].Engine != compiler.EngineMihomo || templates[1].Engine != compiler.EngineMihomo {
+	if len(templates) != 2 ||
+		templates[0].Name != "Mihomo 桌面 TUN" ||
+		templates[1].Name != "Mihomo Linux 服务器" ||
+		templates[0].Engine != compiler.EngineMihomo ||
+		templates[1].Engine != compiler.EngineMihomo {
 		t.Fatalf("want desktop and Linux server platform templates, got %#v", templates)
 	}
 
@@ -636,5 +640,90 @@ func TestRuleCatalogAndProfileAPI(t *testing.T) {
 	deleteCustomResponse.Body.Close()
 	if deleteCustomResponse.StatusCode != http.StatusOK {
 		t.Fatalf("delete custom rule profile failed: %d", deleteCustomResponse.StatusCode)
+	}
+}
+
+func TestSharedFakeIPSettingsValidatePreviewAndPreserveLastGoodOnRebuildFailure(t *testing.T) {
+	st := newTestStore(t)
+	app := New(st, nil)
+	srv := httptest.NewServer(app.Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	templates, err := st.ListTemplates()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var desktop store.Template
+	for _, template := range templates {
+		if template.Scenario == "desktop" {
+			desktop = template
+			break
+		}
+	}
+	if desktop.ID == 0 {
+		t.Fatal("desktop fake-IP template is missing")
+	}
+
+	validBody := `{"base_url":"","fetch_interval_sec":10800,"platform_resource_proxy":{"mode":"direct"},"shared_fake_ip_filter":{"mode":"blacklist","entries":["+.lan","printer.lan","+.lan"]}}`
+	update, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/settings", strings.NewReader(validBody))
+	update.Header.Set("Content-Type", "application/json")
+	updated := mustDo(t, client, update)
+	var updateResult map[string]any
+	_ = json.NewDecoder(updated.Body).Decode(&updateResult)
+	updated.Body.Close()
+	if updated.StatusCode != http.StatusOK || updateResult["ok"] != true {
+		t.Fatalf("valid shared fake-IP setting failed: status=%d result=%#v", updated.StatusCode, updateResult)
+	}
+
+	preview := mustGet(t, client, srv.URL+"/api/settings/shared-fake-ip-filter/preview?template_version_id="+itoa(desktop.CurrentVersionID))
+	var previewBody struct {
+		Applicable bool     `json:"applicable"`
+		Effective  []string `json:"effective"`
+	}
+	_ = json.NewDecoder(preview.Body).Decode(&previewBody)
+	preview.Body.Close()
+	if preview.StatusCode != http.StatusOK || !previewBody.Applicable || len(previewBody.Effective) < 2 ||
+		previewBody.Effective[0] != "+.lan" || previewBody.Effective[1] != "printer.lan" {
+		t.Fatalf("shared fake-IP preview = status %d %#v", preview.StatusCode, previewBody)
+	}
+
+	invalid, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/settings", strings.NewReader(
+		`{"platform_resource_proxy":{"mode":"direct"},"shared_fake_ip_filter":{"mode":"blacklist","entries":["example.com; flush ruleset"]}}`,
+	))
+	invalid.Header.Set("Content-Type", "application/json")
+	invalidResponse := mustDo(t, client, invalid)
+	invalidResponse.Body.Close()
+	if invalidResponse.StatusCode != http.StatusBadRequest {
+		t.Fatalf("invalid shared fake-IP entry status = %d", invalidResponse.StatusCode)
+	}
+
+	profile, err := st.GetRuleProfileByKey("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscription := savePublishedSubscription(t, st, store.OutputSubscription{
+		Name: "last-good", Engine: compiler.EngineMihomo, TemplateVersionID: desktop.CurrentVersionID,
+		RuleProfileID: profile.ID, Token: "last-good-fake-ip", Enabled: true,
+	}, &store.SubscriptionArtifact{
+		Body: []byte("# known good\n"), ContentType: "text/yaml", Revision: "known-good",
+	})
+	rebuild, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/settings", strings.NewReader(
+		`{"platform_resource_proxy":{"mode":"direct"},"shared_fake_ip_filter":{"mode":"blacklist","entries":["+.local"]}}`,
+	))
+	rebuild.Header.Set("Content-Type", "application/json")
+	rebuildResponse := mustDo(t, client, rebuild)
+	var rebuildResult map[string]any
+	_ = json.NewDecoder(rebuildResponse.Body).Decode(&rebuildResult)
+	rebuildResponse.Body.Close()
+	if rebuildResponse.StatusCode != http.StatusOK || rebuildResult["ok"] != false || rebuildResult["rebuild_error"] == nil {
+		t.Fatalf("failed rebuild was not reported: status=%d result=%#v", rebuildResponse.StatusCode, rebuildResult)
+	}
+	artifact, err := st.GetSubscriptionArtifact(subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(artifact.Body) != "# known good\n" || artifact.Revision != "known-good" || artifact.LastError == "" {
+		t.Fatalf("failed shared fake-IP rebuild replaced last-good: %#v", artifact)
 	}
 }

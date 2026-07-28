@@ -12,12 +12,13 @@ type builtinTemplate struct {
 	slots                                                       []store.TemplateSlot
 }
 
-const builtinTemplatesCatalogVersion = "builtin_templates_v12"
+const builtinTemplatesCatalogVersion = "builtin_templates_v14"
 
 var retiredBuiltinTemplateKeys = map[string]bool{
 	templateKey(EngineMihomo, "Mihomo 桌面"):              true,
 	templateKey(EngineMihomo, "Mihomo 桌面 TUN（推荐）"):      true,
 	templateKey(EngineMihomo, "Mihomo 网关"):              true,
+	templateKey(EngineMihomo, "Mihomo Linux 网关 Redir"):  true,
 	templateKey(EngineMihomo, "Mihomo 服务器 Sidecar（推荐）"): true,
 	templateKey(EngineSingBox, "sing-box 桌面"):           true,
 	templateKey(EngineSingBox, "sing-box 服务器"):          true,
@@ -436,7 +437,7 @@ rules:
 func mihomoServerSidecarTemplate() builtinTemplate {
 	return builtinTemplate{
 		name: "Mihomo 服务器 Sidecar（推荐）", engine: EngineMihomo, scenario: "server", engineVersion: "mihomo 1.19+",
-		description: "仅监听回环地址、由 submux-agent 管理控制 API 的服务器 sidecar 配置。",
+		description: "仅监听回环地址的服务器 sidecar 配置，适合本机应用通过 mixed 代理出站。",
 		content: `mixed-port: 7890
 allow-lan: false
 bind-address: 127.0.0.1
@@ -473,7 +474,7 @@ func mihomoLinuxServerTemplate() builtinTemplate {
 		engine:        EngineMihomo,
 		scenario:      "server",
 		engineVersion: "mihomo 1.19+",
-		description:   "仅向本机应用提供 mixed 代理，不接管路由或系统配置；由 rootless submux-agent 管理 Mihomo。",
+		description:   "仅向本机应用提供 mixed 代理，不接管路由或系统配置。",
 		content: `mixed-port: 7890
 allow-lan: false
 bind-address: 127.0.0.1

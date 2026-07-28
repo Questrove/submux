@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,18 +20,12 @@ type Server struct {
 	fetcher  *source.Fetcher
 	compiler *compiler.Service
 	initErr  error
-	nonceMu  sync.Mutex
-	nonces   map[string]time.Time
-	updates  *runtimeUpdateHub
-	events   *runtimeUpdateHub
-	streams  *runtimeStreamHub
-	secrets  *runtimeSecretVault
 }
 
 func New(st *store.Store, f *source.Fetcher) *Server {
 	srv, err := NewChecked(st, f)
 	if err != nil {
-		return &Server{store: st, fetcher: f, compiler: compiler.New(st), initErr: err, nonces: make(map[string]time.Time), updates: newRuntimeUpdateHub(), events: newRuntimeUpdateHub(), streams: newRuntimeStreamHub(), secrets: newRuntimeSecretVault()}
+		return &Server{store: st, fetcher: f, compiler: compiler.New(st), initErr: err}
 	}
 	return srv
 }
@@ -50,7 +43,7 @@ func NewChecked(st *store.Store, f *source.Fetcher) (*Server, error) {
 	if f != nil {
 		f.SetRebuilder(service)
 	}
-	return &Server{store: st, fetcher: f, compiler: service, nonces: make(map[string]time.Time), updates: newRuntimeUpdateHub(), events: newRuntimeUpdateHub(), streams: newRuntimeStreamHub(), secrets: newRuntimeSecretVault()}, nil
+	return &Server{store: st, fetcher: f, compiler: service}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -68,20 +61,6 @@ func (s *Server) Handler() http.Handler {
 	r.Post("/api/init", s.handleInit)
 	r.Post("/api/login", s.handleLogin)
 	r.Post("/api/logout", s.handleLogout)
-	r.Post("/api/agent/enroll", s.handleAgentEnroll)
-
-	r.Group(func(ar chi.Router) {
-		ar.Use(s.requireDevice)
-		ar.Get("/api/agent/state", s.handleAgentState)
-		ar.Get("/api/agent/updates", s.handleAgentUpdates)
-		ar.Get("/api/agent/runtime-stream/{session}", s.handleAgentRuntimeStream)
-		ar.Post("/api/agent/heartbeat", s.handleAgentHeartbeat)
-		ar.Post("/api/agent/local-audit", s.handleAgentLocalAudit)
-		ar.Post("/api/agent/revoke-self", s.handleAgentRevokeSelf)
-		ar.Post("/api/agent/jobs/{jobID}/status", s.handleAgentJobStatus)
-		ar.Post("/api/agent/secrets/{ref}", s.handleAgentRuntimeSecret)
-		ar.Get("/api/agent/platform-subscriptions/{id}", s.handleAgentPlatformSubscription)
-	})
 
 	// 受 session 保护的资源接口
 	r.Group(func(pr chi.Router) {
@@ -95,6 +74,7 @@ func (s *Server) Handler() http.Handler {
 		pr.Post("/api/sources/{id}/refresh-via-platform-proxy", s.handleRefreshSourceViaPlatformProxy)
 		pr.Get("/api/settings", s.handleGetSettings)
 		pr.Put("/api/settings", s.handlePutSettings)
+		pr.Get("/api/settings/shared-fake-ip-filter/preview", s.handlePreviewSharedFakeIPFilter)
 		pr.Post("/api/settings/platform-resource-proxy/test", s.handleTestPlatformResourceProxy)
 		pr.Get("/api/nodes", s.handleListNodes)
 		pr.Post("/api/nodes/import", s.handleImportNodes)
@@ -121,16 +101,6 @@ func (s *Server) Handler() http.Handler {
 		pr.Post("/api/subscriptions/{id}/publish", s.handlePublishOutputSubscription)
 		pr.Post("/api/subscriptions/{id}/reset-token", s.handleResetOutputSubscriptionToken)
 		pr.Put("/api/subscriptions/{id}/enabled", s.handleSetOutputSubscriptionEnabled)
-		pr.Post("/api/runtime/enrollments", s.handleCreateAgentEnrollment)
-		pr.Get("/api/runtime/instances", s.handleListRuntimeInstances)
-		pr.Get("/api/runtime/instances/{id}", s.handleGetRuntimeInstance)
-		pr.Post("/api/runtime/instances/{id}/revoke", s.handleRevokeRuntimeInstance)
-		pr.Get("/api/runtime/instances/{id}/jobs", s.handleListRuntimeJobs)
-		pr.Post("/api/runtime/instances/{id}/jobs", s.handleCreateRuntimeJob)
-		pr.Post("/api/runtime/instances/{id}/secrets", s.handleCreateRuntimeSecret)
-		pr.Get("/api/runtime/instances/{id}/audit", s.handleListRuntimeAudit)
-		pr.Get("/api/runtime/instances/{id}/events", s.handleBrowserRuntimeEvents)
-		pr.Get("/api/runtime/instances/{id}/stream/{kind}", s.handleBrowserRuntimeStream)
 	})
 
 	// 静态控制台(兜底)
@@ -177,46 +147,6 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	} else if len(artifact.Warnings) > 0 {
 		w.Header().Set("X-Submux-Degraded", "upstream lifecycle warning")
 	}
-	_, _ = w.Write(artifact.Body)
-}
-
-func (s *Server) handleAgentPlatformSubscription(w http.ResponseWriter, r *http.Request) {
-	instance := deviceInstance(r)
-	allowed := false
-	for _, capability := range instance.Capabilities {
-		if capability == "subscription.manage" {
-			allowed = true
-			break
-		}
-	}
-	if !allowed {
-		http.Error(w, "device cannot manage subscriptions", http.StatusForbidden)
-		return
-	}
-	id, err := idParam(r)
-	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
-		return
-	}
-	subscription, err := s.store.GetOutputSubscription(id)
-	if err != nil || !subscription.Enabled || subscription.Engine != compiler.EngineMihomo {
-		http.Error(w, "platform subscription is unavailable", http.StatusNotFound)
-		return
-	}
-	if subscription.ExpiresAt != "" {
-		if expiry, parseErr := time.Parse(time.RFC3339, subscription.ExpiresAt); parseErr != nil || !time.Now().Before(expiry) {
-			http.Error(w, "platform subscription expired", http.StatusGone)
-			return
-		}
-	}
-	artifact, err := s.store.GetSubscriptionArtifact(subscription.ID)
-	if err != nil || len(artifact.Body) == 0 || artifact.BlockedReason != "" {
-		http.Error(w, "platform subscription has no available published artifact", http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Type", artifact.ContentType)
-	w.Header().Set("X-Submux-Revision", artifact.Revision)
 	_, _ = w.Write(artifact.Body)
 }
 

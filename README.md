@@ -1,20 +1,20 @@
 # submux
 
-submux 是一个 **Mihomo / sing-box 配置编排服务**。它从机场订阅和手工输入中建立统一节点库，再把用户选择的节点、配置模板和规则方案编译成固定引擎、固定策略、可分享的输出订阅。
+submux 是一个 **Mihomo / sing-box 配置编排服务**。它从机场来源和手工输入中建立统一节点库，再把用户选择的节点、配置模板和规则方案编译成固定引擎、固定策略、可分享的输出订阅。
 
-submux 控制面本身不运行代理内核，也不沿用机场的策略组、规则或 DNS 配置。机场只提供节点；入口和运行方式由模板决定，分流规则由规则方案决定。需要管理本机或服务器 Mihomo 时，可另行安装可选的 `submux-agent`。
+submux 控制面本身不运行代理内核，也不沿用机场的策略组、规则或 DNS 配置。机场只提供节点；入口和运行方式由模板决定，分流规则由规则方案决定。需要管理本机或服务器 Mihomo 时，可以另行安装完全独立、只接受本机 IPC 管理的 Submux Runtime。
 
 ## 产品工作流
 
 ```text
-机场订阅 ─刷新─┐
+机场来源 ─刷新─┐
               ├─> 规范化节点库 ─选择节点─┐
 手工分享链接 ─┘                           ├─> 输出订阅 ─> /sub/{token}
 完整配置模板 ─> 不可变模板版本 ───────────┘
 规则方案 ─────> MetaCubeX 规则目录 ───────┘
 ```
 
-1. 添加机场订阅来源；手工分享链接可直接导入，系统自动归入内置“自建节点”分组。
+1. 添加机场来源；手工分享链接可直接导入，系统自动归入内置“自建节点”分组。
 2. 在统一节点库中查看和整理节点，维护分类、标签和启用状态。
 3. 选择平台预置或自行维护的 Mihomo / sing-box 模板版本。
 4. 在规则方案中设置直连、主代理、流媒体代理和拦截规则。
@@ -24,11 +24,11 @@ v4 直接采用输出订阅保存有序节点选择的模型，不保留旧 Node
 
 ## 主要能力
 
-- 机场订阅定时刷新，支持 Mihomo YAML、明文分享链接和 Base64 分享链接订阅。
-- 平台资源代理与 Agent 资源代理互相独立；机场来源可在直连发生网络错误后尝试平台资源代理，并记录两次请求的结果。
+- 机场来源定时刷新，来源内容可以是 Mihomo YAML、明文分享链接或 Base64 分享链接列表。
+- 平台资源代理只属于 submux 控制面；机场来源可在直连发生网络错误后尝试平台资源代理，并记录两次请求的结果。Submux Runtime 独立保存自己的下载线路。
 - 识别 `Subscription-Userinfo` 与伪装成节点的剩余流量/到期信息，提供到期预警、状态事件和自动恢复。
 - 手工导入 VLESS、VMess、Trojan、Shadowsocks、Hysteria2 节点，无需预先创建来源。
-- 节点语义指纹去重；机场改名或唯一同名节点更新 IP、端口及其他连接参数时仍保留标签、启用状态、节点 ID 和订阅选择。
+- 节点语义指纹去重；机场改名或唯一同名节点更新 IP、端口及其他连接参数时仍保留标签、启用状态、节点 ID 和输出订阅选择。
 - 输出订阅直接保存每个模板插槽的有序节点选择；控制台支持搜索、来源/协议过滤、批量选择、拖放和排序。
 - 内置 MetaCubeX `meta-rules-dat` 的完整 geosite/geoip 目录快照；规则方案按需选择分类，只有启用的 `.mrs` provider 才会写入 Mihomo 配置。
 - MetaCubeX 目录可以从 GitHub 手工刷新；已有规则方案固定原提交，只有用户确认更新后才切换版本。
@@ -36,12 +36,13 @@ v4 直接采用输出订阅保存有序节点选择的模型，不保留旧 Node
 - Mihomo YAML 与 sing-box JSON 双编译器；无法无损转换时整体失败，不静默丢字段或节点。
 - 模板版本发布后不可变；输出订阅固定某个版本，不会随模板更新发生隐式变化。
 - 每个输出订阅拥有独立 token、启用状态、可选到期时间和预编译产物。
-- 一般编译失败保留该订阅的 last-good 产物，并通过 `X-Submux-Degraded` 暴露错误；strict 生命周期阻断时旧产物只供审计，公开链接返回 503。
+- 一般编译失败保留该输出订阅的最近可用产物，并通过 `X-Submux-Degraded` 暴露错误；strict 生命周期阻断时旧产物只供审计，公开链接返回 503。
 - 机场到期默认 continuity 保持连续性；可为单个来源启用 strict，排除过期节点并在无替代节点时阻断输出订阅。
-- 内置两套可版本化 Mihomo 模板：IPv4-only `Mihomo 桌面 TUN`，以及仅监听回环、供 rootless Agent 使用的 `Mihomo Linux 服务器`。
+- 内置两套可版本化 Mihomo 模板：IPv4-only `Mihomo 桌面 TUN` 与仅监听回环的 `Mihomo Linux 服务器`。这里的 IPv4-only 是直接使用模板时的默认值；Submux Runtime 会覆盖这些运行字段，并按本机设置默认接管 IPv4 与 IPv6。
+- 设置页统一维护共享 `fake-ip-filter`；fake-ip 模板在模板专用条目前稳定合并并去重，redir-host 模板不应用。
 - Go 单二进制、内嵌控制台、bbolt 单文件存储，无 CGO 依赖。
 
-协议边界和依据见 [docs/PROTOCOLS.md](docs/PROTOCOLS.md)，机场状态见 [docs/LIFECYCLE.md](docs/LIFECYCLE.md)，节点身份、领域模型与发布语义见 [docs/DESIGN.md](docs/DESIGN.md)。可选 Mihomo 运行面的实现、权限边界和验收基线见 [docs/AGENT.md](docs/AGENT.md)。
+协议边界和依据见 [docs/PROTOCOLS.md](docs/PROTOCOLS.md)，机场状态见 [docs/LIFECYCLE.md](docs/LIFECYCLE.md)，节点身份、领域模型与发布语义见 [docs/DESIGN.md](docs/DESIGN.md)。Submux Runtime 的目标架构、IPC、网络权限与发行方式分别见 [docs/RUNTIME.md](docs/RUNTIME.md)、[docs/RUNTIME-IPC.md](docs/RUNTIME-IPC.md)、[docs/RUNTIME-NETWORK.md](docs/RUNTIME-NETWORK.md) 和 [docs/RUNTIME-DISTRIBUTION.md](docs/RUNTIME-DISTRIBUTION.md)。
 
 ## 构建与运行
 
@@ -64,60 +65,22 @@ curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/insta
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh | bash -s -- --version v1.0.2 --service
 ```
 
-## 可选 Mihomo Agent
+## Submux Runtime
 
-`submux-agent` 与控制面分别发布和安装。Agent 以当前用户权限运行，只管理自己用户目录中的 Mihomo 二进制、配置和子进程；它不会修改 Docker、Git、包管理器或系统代理配置。Agent 只建立到控制面的 HTTPS/WSS 出站连接，不开放远程管理端口；Mihomo 控制 API 和本地管理 IPC 只绑定回环或当前用户可访问的 Socket/命名管道。
+Submux Runtime 是另行安装的机器级 Mihomo 管理程序。它可以读取 submux 输出订阅，但不向 submux 注册，不建立设备身份，也没有配对、心跳、WSS 或由 submux 发起的运行操作。GUI、TUI 和 CLI 只通过 Unix Socket 或 Windows Named Pipe 管理本机 Runtime。
 
-Linux amd64/arm64：
+目标产品由低权限的 `submux-runtime`、按需执行固定网络操作的 `submux-runtime-net` 和可选的 Tauri GUI 组成。一台机器或一个网络命名空间只运行一个 Runtime，并且只管理一个 Mihomo。运行方式可以选择显式代理、TUN 或 Linux 网关；TUN 和网关异常时恢复直连。
 
-```sh
-AGENT_VERSION='v1.0.2'
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.sh | bash -s -- --version "$AGENT_VERSION" --service
-~/.local/bin/submux-agent enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
-```
+Runtime 可以保存 submux 输出订阅、外部 HTTP(S) 完整配置和本机导入副本。来源原文之上可以应用本机高级覆盖，最后由 Runtime 强制写入监听、控制端点、TUN、路由、DNS、网关和数据路径等保留设置。来源不能扩大本机权限或引用任意文件。
 
-只有 root 登录入口的 Linux 服务器可直接复制控制台生成的“一键接入”命令：
+Runtime 目前只有已接受的设计文档，目标二进制和安装器尚未实现。新的 Runtime 采用清理后重新安装，不读取或迁移任何已移除的远程运行端状态。
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/bootstrap-agent.sh | sudo bash -s -- \
-  --version "$AGENT_VERSION" --server https://submux.example.com --code '<一次性配对码>'
-```
+完整设计见：
 
-已通过一键接入安装的服务器可以由 root 原地升级 Agent，不需要新的配对码：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/bootstrap-agent.sh | sudo bash -s -- \
-  --upgrade --version "$AGENT_VERSION"
-```
-
-升级模式要求既有 `submuxagent` 用户、用户服务管理器和 Agent 服务均处于运行状态，只调用普通用户安装器完成校验、原子替换、重启和失败恢复；不会创建用户、修改 lingering、重新配对或读取本地开发 bundle。引导脚本的 root 权限只用于首次接入时创建无 sudo 权限的专用用户，以及升级时进入该用户环境；安装、配对、Agent 和 Mihomo 进程均以该普通用户运行。源码开发版首次接入还可使用 root 所有且摘要固定的本地二进制包，避免从 Release 下载不存在的版本。
-
-Windows amd64/arm64（普通 PowerShell）：
-
-```powershell
-Invoke-WebRequest https://raw.githubusercontent.com/Questrove/submux/main/scripts/install-agent.ps1 -OutFile .\install-agent.ps1
-$AgentVersion = 'v1.0.2'
-.\install-agent.ps1 -Version $AgentVersion -Service
-& "$env:LOCALAPPDATA\Programs\Submux\submux-agent.exe" enroll --server https://submux.example.com --code '<控制台生成的一次性配对码>'
-```
-
-`v0.2.0` 的 Agent 使用旧的 root/Administrator 模型，不能直接原地升级到 `v1.0.2`。升级前请按 [Agent 迁移步骤](docs/AGENT.md#从-v020-迁移) 停止并卸载旧服务，再以普通用户安装和配对新 Agent。
-
-常用本机恢复入口：
-
-```text
-submux-agent status | doctor | logs
-submux-agent service start|stop|status
-submux-agent mihomo status|restart|rollback
-submux-agent subscription status|rollback
-submux-agent unenroll [--force-local] [--yes]
-```
-
-这些本机管理命令不需要 Linux root 或 Windows 管理员权限。控制台只显示 Agent 上报的实际状态，安装、启停、回滚、管理配置订阅和修改 Agent 资源代理都作为一次性任务执行，不会在 Agent 重新连接后按旧表单内容持续对账。显式启动或重启 Mihomo 成功后，Agent 会在本地记录下次启动时恢复运行；显式停止或卸载会清除该记录。恢复失败时按 2、4、8、16 秒退避，最多尝试五次。每个 Agent 可以保存并切换多个 Mihomo 配置订阅：既可以直接选择平台已经发布的 Mihomo 订阅，也可以填写独立的 HTTPS 地址。外部订阅地址只保存在 Agent 本机；平台订阅通过设备认证接口读取。Linux 的 `--service` 安装 systemd user unit；无人值守服务器若需要用户退出后继续运行，应由主机管理员明确决定是否为该用户启用 lingering。
-
-Agent 接入后，可以在运行实例的“配置”页设置独立的 HTTP 或 SOCKS5 Agent 资源代理，例如 SSH 转发到本机的 `socks5://127.0.0.1:1080`。该地址只用于读取 Mihomo 官方版本并下载核心，不会代理 Agent 与控制面的连接，也不会修改系统或其他软件的代理设置。页面会实时显示 Agent 接收、下载、校验、部署、启动和验证进度；日志页可在 Agent 日志和 Mihomo 日志之间切换。
-
-终端代理只作用于新 Shell：Linux 使用 `eval "$(submux-agent proxy env bash)"`，PowerShell 使用 `submux-agent proxy env powershell | Invoke-Expression`。Web 控制台的“代理设置指南”会按终端、Git、APT/DNF、npm/pnpm/Yarn、pip、Docker Engine/Desktop、systemd 服务和 Windows 系统代理生成步骤或可复制命令；只有用户亲自执行后才会修改对应软件。
+- [Runtime 总体设计](docs/RUNTIME.md)
+- [本机 IPC](docs/RUNTIME-IPC.md)
+- [TUN、Linux 网关与特权边界](docs/RUNTIME-NETWORK.md)
+- [安装、手动更新、离线包与发行](docs/RUNTIME-DISTRIBUTION.md)
 
 ## 配置
 
@@ -128,17 +91,13 @@ Agent 接入后，可以在运行实例的“配置”页设置独立的 HTTP �
 | `base_url` | 空 | 控制台生成输出订阅外部链接时使用 |
 | `fetch_interval_sec` | `10800` | 机场刷新间隔，范围 60–604800 秒 |
 | 平台资源代理 | 直连 | 在设置页配置，只供规则目录刷新和已明确启用回退的机场来源使用 |
+| 共享 `fake-ip-filter` | blacklist、空列表 | 在设置页统一配置，保存后重建已启用的 Mihomo 输出订阅 |
 
 ## 反向代理
 
-输出订阅 token 相当于访问凭据；对外提供订阅必须使用 HTTPS。
+输出订阅 token 相当于访问凭据；对外提供输出订阅必须使用 HTTPS。
 
 ```nginx
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
-}
-
 server {
     listen 443 ssl;
     server_name sub.example.com;
@@ -149,20 +108,17 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
-        proxy_read_timeout 1800s;
     }
 }
 ```
 
-然后把控制台 `base_url` 设置为 `https://sub.example.com`。Agent 更新提示和运行数据使用 WebSocket，反向代理必须保留上面的 Upgrade 头；配对、设备认证和任务状态仍走 HTTPS。
+然后把控制台 `base_url` 设置为 `https://sub.example.com`。Submux Runtime 不通过这个反向代理接受管理，也不需要为 Runtime 保留 WebSocket、设备认证或任务端点。
 
 ## 安全边界
 
 - 管理密码使用 bcrypt，登录会话使用 HMAC 签名的 `HttpOnly` / `SameSite` Cookie。
-- 管理 API 需要会话；公开端点只能通过 192-bit 随机订阅 token 读取已发布产物。
-- 上游只接受 HTTP(S)，响应上限 10 MiB；原始订阅不会入库。
-- 模板发布、规则方案、输出订阅保存和节点转换均采用严格校验；失败不会覆盖 last-good。
+- 管理 API 需要会话；公开端点只能通过 192-bit 随机输出订阅 token 读取已发布产物。
+- 上游只接受 HTTP(S)，响应上限 10 MiB；来源原文不会入库。
+- 模板发布、规则方案、输出订阅保存和节点转换均采用严格校验；失败不会覆盖最近可用产物。
 - sing-box 转换仅接受文档中明确支持且可保持语义的字段。
-- Agent 协议只允许固定类型化操作；设备私钥和 Mihomo secret 只保存在 Agent 本机，核心二进制只从内置的 MetaCubeX/mihomo 官方 Release 坐标下载并校验 GitHub 提供的 SHA-256 摘要。
+- Submux Runtime 与控制面没有设备协议。Runtime 的管理接口只存在于本机 Socket 或 Named Pipe；Mihomo secret、配置来源凭据和系统网络权限都不进入 submux 控制面。

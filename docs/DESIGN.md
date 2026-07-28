@@ -4,6 +4,8 @@
 
 submux 是配置编排器，不是订阅文件合并器，也不运行代理内核。上游机场只拥有节点连接信息；策略组、入口和运行场景由平台模板拥有，域名/IP 分流及其 DNS 策略由规则方案拥有。
 
+Submux Runtime 是独立安装、只接受本机 IPC 管理的另一个程序。它可以读取输出订阅，但不向 submux 注册，不发送主机状态，也不接受由 submux 发起的运行操作。submux 不保存 Runtime 设备、运行期望或本机网络设置。
+
 核心约束：
 
 1. 不继承机场策略，不做全局覆盖。
@@ -44,20 +46,20 @@ SourceCache 保存带 provenance 的生命周期元数据；高置信度 notice 
 ```text
 直连 HTTP(S) 下载（10 MiB 上限）
   -> HTTPS 来源按设置在网络连接失败时尝试平台资源代理
-  -> 解析订阅
+  -> 解析来源内容
   -> 规范化 NodeRecord
   -> 按连接语义计算 fingerprint
   -> 单事务替换该来源节点 + 更新刷新元数据
   -> 重编译所有启用的输出订阅
 ```
 
-数据库不保存上游原文，也不保存第二份序列化节点快照。刷新时先按 fingerprint 精确关联；连接配置变化时，仅对来源内新旧快照中名称都唯一的条目按名称关联并沿用 Node ID、标签、启用状态和订阅选择，同时递增配置版本。重名歧义不猜测，按删除和新增处理。名称始终采用上游当前值；消失的节点从该来源快照删除。单来源失败只更新 `last_error`，上一份规范化节点快照保持不变。
+数据库不保存上游原文，也不保存第二份序列化节点快照。刷新时先按 fingerprint 精确关联；连接配置变化时，仅对来源内新旧快照中名称都唯一的条目按名称关联并沿用 Node ID、标签、启用状态和输出订阅选择，同时递增配置版本。重名歧义不猜测，按删除和新增处理。名称始终采用上游当前值；消失的节点从该来源快照删除。单来源失败只更新 `last_error`，上一份规范化节点快照保持不变。
 
 新建机场来源会立即执行一次同步刷新，使节点和生命周期状态在创建响应返回时可用。首次刷新失败仍保留来源并记录 `last_error`，API 返回刷新结果供控制台明确提示；手工来源不执行网络刷新。
 
-机场刷新默认只直连。单个 HTTPS 来源可以开启“直连失败后尝试平台资源代理”：只有超时、拒绝连接、连接重置等网络错误会自动回退；HTTP 状态错误、证书校验失败、内容超限或订阅解析失败不会切换线路。页面也允许在失败后显式通过平台资源代理重试一次。缓存分别记录成功线路、直连错误和代理错误，失败不会覆盖上一份节点快照。直连客户端明确忽略 submux 进程的 `HTTP_PROXY`、`HTTPS_PROXY` 环境变量。
+机场刷新默认只直连。单个 HTTPS 来源可以开启“直连失败后尝试平台资源代理”：只有超时、拒绝连接、连接重置等网络错误会自动回退；HTTP 状态错误、证书校验失败、内容超限或来源解析失败不会切换线路。页面也允许在失败后显式通过平台资源代理重试一次。缓存分别记录成功线路、直连错误和代理错误，失败不会覆盖上一份节点快照。直连客户端明确忽略 submux 进程的 `HTTP_PROXY`、`HTTPS_PROXY` 环境变量。
 
-平台资源代理在设置页独立保存，支持直连、自定义 HTTP 和 SOCKS5。它只供控制面读取 MetaCubeX 目录，以及为明确开启回退或手工重试的机场来源下载订阅；不会修改系统设置，也不影响 Agent、Mihomo 或其他程序。
+平台资源代理在设置页独立保存，支持直连、自定义 HTTP 和 SOCKS5。它只供控制面读取 MetaCubeX 目录，以及为明确开启回退或手工重试的机场来源下载来源内容；不会修改系统设置，也不影响 Submux Runtime、Mihomo 或其他程序。
 
 手工节点导入不要求用户先创建来源。未指定 `source_id` 时，存储层会自动创建或复用内置“自建节点”手工分组；该分组始终启用，不能通过管理 API 修改或删除。`source_id` 仍作为内部兼容参数保留。
 
@@ -70,7 +72,7 @@ SourceCache 保存带 provenance 的生命周期元数据；高置信度 notice 
 3. strict 生命周期过滤；
 4. 跨插槽按 fingerprint 去重，同时保留首次出现顺序。
 
-多插槽选择相同 fingerprint 时，输出订阅中只生成一个节点实体。生成名称固定使用“来源名称 + 上游节点名称”，冲突时追加节点 ID。节点在来源刷新后消失、停用或被 strict 排除时会产生 warning；必需插槽为空则保留 last-good。
+多插槽选择相同 fingerprint 时，输出订阅中只生成一个节点实体。生成名称固定使用“来源名称 + 上游节点名称”，冲突时追加节点 ID。节点在来源刷新后消失、停用或被 strict 排除时会产生 warning；必需插槽为空则保留最近可用产物。
 
 ### 模板发布
 
@@ -89,19 +91,20 @@ SourceCache 保存带 provenance 的生命周期元数据；高置信度 notice 
 ### 输出订阅编译与发布
 
 ```text
-OutputSubscription + TemplateVersion + RuleProfile + bindings
+OutputSubscription + TemplateVersion + RuleProfile + bindings + shared fake-ip-filter
   -> 按顺序解析每个插槽的已选节点
   -> 全局节点去重与确定性命名
   -> 引擎编译器注入节点与插槽成员
+  -> fake-ip 模板按共享条目在前、模板条目在后的稳定顺序合并并去重
   -> Mihomo 编译器按规则顺序注入 provider、rules 与 DNS policy
   -> 严格引用/协议字段校验
   -> SHA-256(最终产物) 作为 revision
   -> 原子替换该订阅 artifact
 ```
 
-保存输出订阅时先 Preview，成功后才持久化并发布。来源或节点变化会自动重编译启用的订阅。一般重编译失败时只更新该 artifact 的 `last_error`，原 body、revision 与 last-success 不变；公开链接继续返回 last-good，并附带 `X-Submux-Degraded`。strict 生命周期过滤导致必需插槽为空时会额外设置 `blocked_reason`，旧 body 只供审计，公开链接返回 503。
+保存输出订阅时先 Preview，成功后才持久化并发布。来源或节点变化会自动重编译启用的订阅。一般重编译失败时只更新该 artifact 的 `last_error`，原 body、revision 与 last-success 不变；公开链接继续返回最近可用产物，并附带 `X-Submux-Degraded`。strict 生命周期过滤导致必需插槽为空时会额外设置 `blocked_reason`，旧 body 只供审计，公开链接返回 503。
 
-### 订阅请求
+### 输出订阅请求
 
 `GET /sub/{token}` 只执行：token 索引查找、启用/到期校验、生命周期阻断校验、读取 artifact、返回固定 Content-Type。Mihomo 返回 YAML，sing-box 返回 JSON；User-Agent 不参与决策。无产物或 strict 生命周期阻断返回 503，输出订阅自身过期返回 410，未知或禁用 token 返回 401。
 
@@ -111,21 +114,23 @@ bbolt bucket：
 
 | bucket | 内容 |
 |---|---|
-| `settings` | 管理凭据、session secret、base URL、刷新设置、预置模板标记 |
+| `settings` | 管理凭据、session secret、base URL、刷新设置、共享 fake-ip-filter、预置模板标记 |
 | `sources` | Source |
-| `source_cache` | 流量元数据、刷新时间与错误，不含订阅原文 |
+| `source_cache` | 流量元数据、刷新时间与错误，不含来源原文 |
 | `nodes` | NodeRecord |
 | `templates` | Template |
 | `template_versions` | TemplateVersion |
 | `rule_profiles` | RuleProfile |
 | `rule_catalog_snapshots` | 按提交号保存已校验的 MetaCubeX 规则目录 |
 | `subscriptions` | OutputSubscription |
-| `subscription_artifacts` | SubscriptionArtifact，以订阅 ID 为 key |
-| `token_index` | 独立 token 到订阅 ID 的索引 |
+| `subscription_artifacts` | SubscriptionArtifact，以输出订阅 ID 为 key |
+| `token_index` | 独立 token 到输出订阅 ID 的索引 |
 | `lifecycle_events` | 机场权益状态转换事件 |
 | `meta` | schema version |
 
-v1 数据库首次打开时执行破坏式迁移：旧 Source 归类为 subscription；删除全局 output token、override 与全局 last-good；清除 source cache 中的原文。v2 升级到 v3 时补齐来源生命周期默认值。v3 升级到 v4 时保留来源、节点、模板、设置和生命周期历史，清理尚未发布产品中的 NodeSet/Profile 输出状态，并启用统一输出订阅模型。v6 升级到 v7 时增加规则方案存储；已有 Mihomo 输出订阅在启动时绑定内置“常用规则”并重新编译。v7 升级到 v8 时把开发阶段的 Mihomo 下载代理字段和任务改名为 Agent 资源代理。
+v1 数据库首次打开时执行破坏式迁移：旧 Source 归类为 subscription；删除全局 output token、override 与旧版全局最近可用产物；清除 source cache 中的原文。v2 升级到 v3 时补齐来源生命周期默认值。v3 升级到 v4 时保留来源、节点、模板、设置和生命周期历史，清理尚未发布产品中的 NodeSet/Profile 输出状态，并启用统一输出订阅模型。v6 升级到 v7 时增加规则方案存储；已有 Mihomo 输出订阅在启动时绑定内置“常用规则”并重新编译。v8 升级到 v9 时删除旧远程运行端的全部控制面状态桶和模板运行契约字段。
+
+Submux Runtime 使用自己的本机数据库，控制面不迁移或继续持有 Runtime 状态。
 
 ## 模块边界
 
@@ -138,7 +143,8 @@ v1 数据库首次打开时执行破坏式迁移：旧 Source 归类为 subscrip
 | `internal/resourceproxy` | 平台资源代理校验、保存和独立 HTTP 客户端 |
 | `internal/store` | v4 领域持久化、有序节点选择与 token 索引 |
 | `internal/rulecatalog` | MetaCubeX 规则目录快照、常用规则元数据与默认方案 |
-| `internal/compiler` | 模板校验、节点选择解析、Mihomo/sing-box 编译、last-good |
+| `internal/compiler` | 模板校验、节点选择解析、Mihomo/sing-box 编译、最近可用产物 |
+| `internal/fakeip` | 共享 fake-ip-filter 的严格格式、规范化与 revision |
 | `internal/server` | 鉴权、管理 API、固定引擎订阅端点 |
 | `web` | 来源、节点库、模板、规则方案和输出订阅控制台 |
 
@@ -159,11 +165,12 @@ v1 数据库首次打开时执行破坏式迁移：旧 Source 归类为 subscrip
 
 内置模板目录使用目录版本执行一次性迁移；迁移可以原地修正内置模板的当前版本并重建相关产物，用户创建的模板不受影响。
 
-- Mihomo 桌面 TUN：IPv4-only、mixed TUN、严格路由和 fake-ip DNS；内置模板不预设任何用户网络的路由排除项。
+- Mihomo 桌面 TUN：直接使用时默认为 IPv4-only、mixed TUN、严格路由和 fake-ip DNS；内置模板不预设任何用户网络的路由排除项。Runtime 将这些字段视为本机运行设置，默认可以改为 IPv4 与 IPv6 双栈接管。
 - Mihomo Linux 服务器：只向本机应用提供回环 mixed 代理，使用 redir-host 内部 DNS，不启用 TUN、透明代理、系统路由或进程匹配。
-
 两个模板都提供必填 `PROXY` 节点槽位和可选 `MEDIA` 节点槽位。`MEDIA` 默认包含 `PROXY` 作为回退，用户选择流媒体节点后追加到该策略组。通用规则由规则方案注入，自定义域名和网段只有在管理员明确添加后才进入编译结果。
 
-Linux 服务器模板遵循 Mihomo 官方配置边界：`allow-lan: false` 且 mixed 入口绑定 `127.0.0.1`；显式代理场景使用 redir-host 而非 fake-ip/DNS 劫持；MRS 只用于 domain/ipcidr provider；控制 API 地址和 secret 由 Agent 在部署时注入。依据见 [General configuration](https://wiki.metacubex.one/en/config/general/)、[DNS configuration](https://wiki.metacubex.one/en/config/dns/)、[Route Rules](https://wiki.metacubex.one/en/config/rules/) 与 [Rule-Providers](https://wiki.metacubex.one/en/config/rule-providers/)。官方 systemd 示例包含 TUN/透明代理所需的广泛 capabilities，但本项目的服务器 sidecar 不使用这些能力，始终保持普通用户权限。
+Linux 服务器模板遵循 Mihomo 官方配置边界：`allow-lan: false` 且 mixed 入口绑定 `127.0.0.1`；显式代理场景使用 redir-host 而非 fake-ip/DNS 劫持；MRS 只用于 domain/ipcidr provider。依据见 [General configuration](https://wiki.metacubex.one/en/config/general/)、[DNS configuration](https://wiki.metacubex.one/en/config/dns/)、[Route Rules](https://wiki.metacubex.one/en/config/rules/) 与 [Rule-Providers](https://wiki.metacubex.one/en/config/rule-providers/)。
+
+Submux Runtime 可以读取任意 Mihomo 输出订阅，不要求专用的 desktop、server 或 gateway 场景。Runtime 把输出当作来源原文，再用本机设置覆盖控制端点、secret、监听、TUN、路由、DNS 接管、网关范围和数据路径等保留字段；输出订阅本身不能取得主机网络权限。完整边界见 [RUNTIME.md](RUNTIME.md) 与 [RUNTIME-NETWORK.md](RUNTIME-NETWORK.md)。
 
 旧版预置模板在升级时会被移除；若某个旧模板版本仍被输出订阅引用，则仅保留为隐藏的 `retired` 记录，不能再用于新建订阅。`Mihomo 桌面 TUN（推荐）` 与 `Mihomo 服务器 Sidecar（推荐）` 会原地改名并升级到当前模板，保留模板 ID 和现有订阅引用。用户自行创建的模板不受目录迁移影响。

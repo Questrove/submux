@@ -335,12 +335,17 @@ func TestEnsureBuiltinTemplatesUpgradesV2CatalogOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second) != 2 || second[0].CurrentVersionID != first[0].CurrentVersionID || second[1].CurrentVersionID != first[1].CurrentVersionID {
-		t.Fatalf("builtin catalog upgrade was not idempotent: first=%#v second=%#v", first, second)
+	if len(second) != len(first) {
+		t.Fatalf("builtin catalog upgrade changed template count: first=%#v second=%#v", first, second)
+	}
+	for i := range first {
+		if second[i].CurrentVersionID != first[i].CurrentVersionID {
+			t.Fatalf("builtin catalog upgrade was not idempotent: first=%#v second=%#v", first, second)
+		}
 	}
 }
 
-func TestLinuxServerTemplateIsRootlessAgentSafe(t *testing.T) {
+func TestLinuxServerTemplateAvoidsHostNetworkAuthority(t *testing.T) {
 	st := compilerTestStore(t)
 	service := New(st)
 	if err := service.EnsureBuiltinTemplates(); err != nil {

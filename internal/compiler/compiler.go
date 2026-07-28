@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"submux/internal/fakeip"
 	"submux/internal/lifecycle"
 	"submux/internal/node"
 	"submux/internal/rulecatalog"
@@ -35,6 +36,7 @@ type Result struct {
 type resolvedSubscription struct {
 	Subscription store.OutputSubscription
 	Template     store.TemplateVersion
+	SharedFakeIP fakeip.Config
 	RuleProfile  *store.RuleProfile
 	RuleCatalog  rulecatalog.Snapshot
 	Records      []store.NodeRecord
@@ -203,6 +205,14 @@ func (s *Service) resolve(subscription store.OutputSubscription) (resolvedSubscr
 	if subscription.Engine != template.Engine {
 		return resolvedSubscription{}, fmt.Errorf("output subscription engine %q does not match template engine %q", subscription.Engine, template.Engine)
 	}
+	rawSharedFakeIP, err := s.store.GetSetting(fakeip.SettingKey)
+	if err != nil {
+		return resolvedSubscription{}, err
+	}
+	sharedFakeIP, err := fakeip.Parse(rawSharedFakeIP)
+	if err != nil {
+		return resolvedSubscription{}, err
+	}
 	var ruleProfile *store.RuleProfile
 	var resolvedCatalog rulecatalog.Snapshot
 	if subscription.RuleProfileID != 0 {
@@ -302,7 +312,7 @@ func (s *Service) resolve(subscription store.OutputSubscription) (resolvedSubscr
 			}
 		}
 	}
-	return resolvedSubscription{Subscription: subscription, Template: version, RuleProfile: ruleProfile, RuleCatalog: resolvedCatalog, Records: records, Names: names, Slots: slots, Counts: counts, Warnings: sortedKeys(warningSet)}, nil
+	return resolvedSubscription{Subscription: subscription, Template: version, SharedFakeIP: sharedFakeIP, RuleProfile: ruleProfile, RuleCatalog: resolvedCatalog, Records: records, Names: names, Slots: slots, Counts: counts, Warnings: sortedKeys(warningSet)}, nil
 }
 
 type nodeSelectionResolution struct {

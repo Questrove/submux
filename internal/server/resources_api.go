@@ -309,11 +309,17 @@ func (s *Server) handleListOutputSubscriptions(w http.ResponseWriter, _ *http.Re
 		store.OutputSubscription
 		Artifact *artifactStatus `json:"artifact,omitempty"`
 		URL      string          `json:"url"`
+		Scenario string          `json:"scenario,omitempty"`
 	}
 	base, _ := s.store.GetSetting("base_url")
 	out := make([]item, 0, len(values))
 	for _, value := range values {
 		entry := item{OutputSubscription: value, URL: "/sub/" + value.Token}
+		if version, versionErr := s.store.GetTemplateVersion(value.TemplateVersionID); versionErr == nil {
+			if template, templateErr := s.store.GetTemplate(version.TemplateID); templateErr == nil {
+				entry.Scenario = template.Scenario
+			}
+		}
 		if artifact, err := s.store.GetSubscriptionArtifact(value.ID); err == nil {
 			entry.Artifact = &artifactStatus{
 				ContentType: artifact.ContentType, Revision: artifact.Revision,
