@@ -10,6 +10,7 @@ import (
 
 	"submux/internal/buildinfo"
 	"submux/internal/compiler"
+	"submux/internal/consolesnapshot"
 	"submux/internal/outputsubscription"
 	"submux/internal/outputupdate"
 	"submux/internal/source"
@@ -21,6 +22,7 @@ type Server struct {
 	store     *store.Store
 	fetcher   *source.Fetcher
 	compiler  *compiler.Service
+	console   *consolesnapshot.Reader
 	publisher *outputsubscription.Publisher
 	updater   *outputupdate.Service
 	initErr   error
@@ -33,6 +35,7 @@ func New(st *store.Store, f *source.Fetcher) *Server {
 		updater := outputupdate.New(st, compilerService)
 		return &Server{
 			store: st, fetcher: f, compiler: compilerService,
+			console:   consolesnapshot.New(st),
 			publisher: outputsubscription.New(st, compilerService, updater),
 			updater:   updater, initErr: err,
 		}
@@ -56,6 +59,7 @@ func NewChecked(st *store.Store, f *source.Fetcher) (*Server, error) {
 	}
 	return &Server{
 		store: st, fetcher: f, compiler: service,
+		console:   consolesnapshot.New(st),
 		publisher: outputsubscription.New(st, service, updater), updater: updater,
 	}, nil
 }
@@ -98,35 +102,28 @@ func (s *Server) Handler() http.Handler {
 	// 受 session 保护的资源接口
 	r.Group(func(pr chi.Router) {
 		pr.Use(s.requireAuth)
-		pr.Get("/api/sources", s.handleListSources)
-		pr.Get("/api/lifecycle-events", s.handleListLifecycleEvents)
+		pr.Get("/api/console-snapshot", s.handleConsoleSnapshot)
 		pr.Post("/api/sources", s.handleCreateSource)
 		pr.Put("/api/sources/{id}", s.handleUpdateSource)
 		pr.Delete("/api/sources/{id}", s.handleDeleteSource)
 		pr.Post("/api/sources/{id}/refresh", s.handleRefreshSource)
 		pr.Post("/api/sources/{id}/refresh-via-platform-proxy", s.handleRefreshSourceViaPlatformProxy)
-		pr.Get("/api/settings", s.handleGetSettings)
 		pr.Put("/api/settings", s.handlePutSettings)
 		pr.Get("/api/settings/shared-fake-ip-filter/preview", s.handlePreviewSharedFakeIPFilter)
 		pr.Post("/api/settings/platform-resource-proxy/test", s.handleTestPlatformResourceProxy)
-		pr.Get("/api/nodes", s.handleListNodes)
 		pr.Post("/api/nodes/import", s.handleImportNodes)
 		pr.Put("/api/nodes/{id}", s.handleUpdateNode)
 		pr.Delete("/api/nodes/{id}", s.handleDeleteNode)
-		pr.Get("/api/templates", s.handleListTemplates)
 		pr.Post("/api/templates", s.handleSaveTemplate)
 		pr.Put("/api/templates/{id}", s.handleSaveTemplate)
 		pr.Delete("/api/templates/{id}", s.handleDeleteTemplate)
-		pr.Get("/api/templates/{id}/versions", s.handleListTemplateVersions)
 		pr.Post("/api/templates/{id}/versions", s.handlePublishTemplateVersion)
 		pr.Get("/api/rule-catalog", s.handleRuleCatalog)
 		pr.Post("/api/rule-catalog/refresh", s.handleRefreshRuleCatalog)
-		pr.Get("/api/rule-profiles", s.handleListRuleProfiles)
 		pr.Post("/api/rule-profiles", s.handleSaveRuleProfile)
 		pr.Put("/api/rule-profiles/{id}", s.handleSaveRuleProfile)
 		pr.Post("/api/rule-profiles/{id}/catalog-version", s.handleUpdateRuleProfileCatalog)
 		pr.Delete("/api/rule-profiles/{id}", s.handleDeleteRuleProfile)
-		pr.Get("/api/subscriptions", s.handleListOutputSubscriptions)
 		pr.Post("/api/subscriptions", s.handleSaveOutputSubscription)
 		pr.Put("/api/subscriptions/{id}", s.handleSaveOutputSubscription)
 		pr.Delete("/api/subscriptions/{id}", s.handleDeleteOutputSubscription)

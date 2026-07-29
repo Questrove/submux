@@ -12,12 +12,27 @@ import (
 	"time"
 
 	"submux/internal/compiler"
+	"submux/internal/consolesnapshot"
 	"submux/internal/rulecatalog"
 	"submux/internal/source"
 	"submux/internal/store"
 )
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+func mustConsoleSnapshot(t *testing.T, client *http.Client, serverURL string) consolesnapshot.Snapshot {
+	t.Helper()
+	response := mustGet(t, client, serverURL+"/api/console-snapshot")
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("console snapshot status = %d", response.StatusCode)
+	}
+	var snapshot consolesnapshot.Snapshot
+	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("decode console snapshot: %v", err)
+	}
+	return snapshot
+}
 
 func TestSourcesAPICRUD(t *testing.T) {
 	st := newTestStore(t)
@@ -36,11 +51,8 @@ func TestSourcesAPICRUD(t *testing.T) {
 		t.Fatalf("no id returned")
 	}
 
-	r2 := mustGet(t, c, srv.URL+"/api/sources")
-	var list []map[string]any
-	json.NewDecoder(r2.Body).Decode(&list)
-	r2.Body.Close()
-	if len(list) != 1 || list[0]["name"] != "AirA" || list[0]["kind"] != "subscription" {
+	list := mustConsoleSnapshot(t, c, srv.URL).Sources
+	if len(list) != 1 || list[0].Name != "AirA" || list[0].Kind != "subscription" {
 		t.Fatalf("list wrong: %v", list)
 	}
 
@@ -60,10 +72,7 @@ func TestSourcesAPICRUD(t *testing.T) {
 		t.Fatalf("delete status %d", r4.StatusCode)
 	}
 
-	r5 := mustGet(t, c, srv.URL+"/api/sources")
-	var list2 []map[string]any
-	json.NewDecoder(r5.Body).Decode(&list2)
-	r5.Body.Close()
+	list2 := mustConsoleSnapshot(t, c, srv.URL).Sources
 	if len(list2) != 0 {
 		t.Fatalf("expected empty after delete, got %v", list2)
 	}
@@ -96,31 +105,14 @@ func TestSourceLifecycleAPI(t *testing.T) {
 		t.Fatalf("lifecycle update status %d", updated.StatusCode)
 	}
 
-	response := mustGet(t, c, srv.URL+"/api/sources")
-	var sources []struct {
-		LifecyclePolicy  string `json:"lifecycle_policy"`
-		WarnBeforeDays   int    `json:"warn_before_days"`
-		TrustNodeNotices bool   `json:"trust_node_notices"`
-		Lifecycle        struct {
-			Entitlement    string `json:"entitlement"`
-			RemainingBytes int64  `json:"remaining_bytes"`
-		} `json:"lifecycle"`
-	}
-	_ = json.NewDecoder(response.Body).Decode(&sources)
-	response.Body.Close()
+	snapshot := mustConsoleSnapshot(t, c, srv.URL)
+	sources := snapshot.Sources
 	if len(sources) != 1 || sources[0].LifecyclePolicy != "strict" || sources[0].WarnBeforeDays != 3 || !sources[0].TrustNodeNotices || sources[0].Lifecycle.Entitlement != "expiring" {
 		t.Fatalf("wrong lifecycle DTO: %+v", sources)
 	}
 
-	events := mustGet(t, c, srv.URL+"/api/lifecycle-events")
-	if events.StatusCode != http.StatusOK {
-		events.Body.Close()
-		t.Fatalf("events status %d", events.StatusCode)
-	}
-	eventBody, _ := io.ReadAll(events.Body)
-	events.Body.Close()
-	if strings.TrimSpace(string(eventBody)) != "[]" {
-		t.Fatalf("empty lifecycle events must be a JSON array, got %s", eventBody)
+	if snapshot.LifecycleEvents == nil || len(snapshot.LifecycleEvents) != 0 {
+		t.Fatalf("empty lifecycle events must be a JSON array, got %#v", snapshot.LifecycleEvents)
 	}
 }
 
@@ -158,21 +150,11 @@ func TestSourceFetchModeAndPlatformResourceProxySettings(t *testing.T) {
 		t.Fatalf("platform resource proxy settings failed: %d", settingsResponse.StatusCode)
 	}
 
-	sourcesResponse := mustGet(t, client, srv.URL+"/api/sources")
-	var sources []store.Source
-	_ = json.NewDecoder(sourcesResponse.Body).Decode(&sources)
-	sourcesResponse.Body.Close()
-	settingsView := mustGet(t, client, srv.URL+"/api/settings")
-	var settingsBody struct {
-		PlatformResourceProxy struct {
-			Mode string `json:"mode"`
-			URL  string `json:"url"`
-		} `json:"platform_resource_proxy"`
-	}
-	_ = json.NewDecoder(settingsView.Body).Decode(&settingsBody)
-	settingsView.Body.Close()
-	if len(sources) != 1 || sources[0].FetchMode != store.SourceFetchProxyBackup || settingsBody.PlatformResourceProxy.Mode != "http" || settingsBody.PlatformResourceProxy.URL != "http://127.0.0.1:1080" {
-		t.Fatalf("proxy settings were not returned: sources=%+v settings=%+v", sources, settingsBody)
+	snapshot := mustConsoleSnapshot(t, client, srv.URL)
+	if len(snapshot.Sources) != 1 || snapshot.Sources[0].FetchMode != store.SourceFetchProxyBackup ||
+		snapshot.Settings.PlatformResourceProxy.Mode != "http" ||
+		snapshot.Settings.PlatformResourceProxy.URL != "http://127.0.0.1:1080" {
+		t.Fatalf("proxy settings were not returned: sources=%+v settings=%+v", snapshot.Sources, snapshot.Settings)
 	}
 }
 
@@ -385,18 +367,22 @@ func TestOutputSubscriptionAPIRejectsInformationalNode(t *testing.T) {
 	}
 }
 
-func TestV4SettingsAndLegacyRoutesRemoved(t *testing.T) {
+func TestConsoleSnapshotReplacesManagementReadRoutes(t *testing.T) {
 	st := newTestStore(t)
 	app := New(st, nil)
 	srv := httptest.NewServer(app.Handler())
 	defer srv.Close()
 	c := initAndClient(t, srv)
 
-	for _, path := range []string{"/api/override", "/api/settings/reset-token", "/api/node-sets", "/api/profiles"} {
+	for _, path := range []string{
+		"/api/override", "/api/settings/reset-token", "/api/node-sets", "/api/profiles",
+		"/api/settings", "/api/sources", "/api/nodes", "/api/lifecycle-events",
+		"/api/templates", "/api/templates/1/versions", "/api/rule-profiles", "/api/subscriptions",
+	} {
 		r := mustGet(t, c, srv.URL+path)
 		r.Body.Close()
-		if r.StatusCode != http.StatusNotFound {
-			t.Fatalf("legacy route %s should be gone, got %d", path, r.StatusCode)
+		if r.StatusCode != http.StatusNotFound && r.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("removed read route %s should be gone, got %d", path, r.StatusCode)
 		}
 	}
 
@@ -405,18 +391,51 @@ func TestV4SettingsAndLegacyRoutesRemoved(t *testing.T) {
 	req2.Header.Set("Content-Type", "application/json")
 	r5 := mustDo(t, c, req2)
 	r5.Body.Close()
-	r6 := mustGet(t, c, srv.URL+"/api/settings")
-	var s2 map[string]any
-	json.NewDecoder(r6.Body).Decode(&s2)
-	r6.Body.Close()
-	if s2["base_url"] != "https://sub.example.com" || s2["fetch_interval_sec"] != float64(3600) {
-		t.Fatalf("settings wrong: %#v", s2)
+	snapshotResponse := mustGet(t, c, srv.URL+"/api/console-snapshot")
+	if snapshotResponse.StatusCode != http.StatusOK ||
+		!strings.Contains(snapshotResponse.Header.Get("Content-Type"), "application/json") {
+		t.Fatalf("console snapshot response = %d %q", snapshotResponse.StatusCode, snapshotResponse.Header.Get("Content-Type"))
 	}
-	if _, exists := s2["output_token"]; exists {
-		t.Fatalf("global output token must not exist in v4: %#v", s2)
+	if snapshotResponse.Header.Get("Cache-Control") != "no-store" {
+		t.Fatalf("console snapshot cache control = %q", snapshotResponse.Header.Get("Cache-Control"))
+	}
+	var snapshot consolesnapshot.Snapshot
+	_ = json.NewDecoder(snapshotResponse.Body).Decode(&snapshot)
+	snapshotResponse.Body.Close()
+	if snapshot.Settings.BaseURL != "https://sub.example.com" || snapshot.Settings.FetchIntervalSec != 3600 {
+		t.Fatalf("settings wrong: %#v", snapshot.Settings)
+	}
+	if snapshot.GeneratedAt == "" {
+		t.Fatal("console snapshot has no generation timestamp")
+	}
+	encoded, _ := json.Marshal(snapshot.Settings)
+	if strings.Contains(string(encoded), "output_token") {
+		t.Fatalf("global output token must not exist in console settings: %s", encoded)
 	}
 	if token, _ := st.GetSetting("output_token"); token != "" {
 		t.Fatalf("initialization created legacy output token %q", token)
+	}
+}
+
+func TestConsoleSnapshotReturnsJSONErrorForMalformedPersistedState(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+	if err := st.SetSetting("shared_fake_ip_filter", `{"mode":`); err != nil {
+		t.Fatal(err)
+	}
+
+	response := mustGet(t, client, srv.URL+"/api/console-snapshot")
+	defer response.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusInternalServerError ||
+		!strings.Contains(response.Header.Get("Content-Type"), "application/json") ||
+		result["ok"] != false {
+		t.Fatalf("malformed state response = %d %q %#v", response.StatusCode, response.Header.Get("Content-Type"), result)
 	}
 }
 
@@ -479,15 +498,7 @@ func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 		t.Fatalf("imported node missing: %#v", nodes)
 	}
 
-	templatesResponse := mustGet(t, c, srv.URL+"/api/templates")
-	var templates []struct {
-		ID               int64  `json:"id"`
-		Name             string `json:"name"`
-		Engine           string `json:"engine"`
-		CurrentVersionID int64  `json:"current_version_id"`
-	}
-	_ = json.NewDecoder(templatesResponse.Body).Decode(&templates)
-	templatesResponse.Body.Close()
+	templates := mustConsoleSnapshot(t, c, srv.URL).Templates
 	if len(templates) != 2 ||
 		templates[0].Name != "Mihomo 桌面 TUN" ||
 		templates[1].Name != "Mihomo Linux 服务器" ||
@@ -612,10 +623,7 @@ func TestRuleCatalogAndProfileAPI(t *testing.T) {
 		t.Fatalf("rule catalog response is incomplete: status=%d source=%q commit=%q count=%d", catalogResponse.StatusCode, catalog.Source, catalog.Commit, len(catalog.Entries))
 	}
 
-	profilesResponse := mustGet(t, client, srv.URL+"/api/rule-profiles")
-	var profiles []store.RuleProfile
-	_ = json.NewDecoder(profilesResponse.Body).Decode(&profiles)
-	profilesResponse.Body.Close()
+	profiles := mustConsoleSnapshot(t, client, srv.URL).RuleProfiles
 	if len(profiles) != 1 || profiles[0].Key != "default" || !profiles[0].Builtin {
 		t.Fatalf("default rule profile was not seeded: %+v", profiles)
 	}
@@ -802,15 +810,18 @@ func TestSubscriptionManagementSeparatesArtifactAndUpdateState(t *testing.T) {
 		t.Fatalf("record update failure: recorded=%v err=%v", recorded, err)
 	}
 
-	response := mustGet(t, client, srv.URL+"/api/subscriptions")
+	response := mustGet(t, client, srv.URL+"/api/console-snapshot")
 	defer response.Body.Close()
-	var values []struct {
-		Artifact map[string]json.RawMessage    `json:"artifact"`
-		Update   store.SubscriptionUpdateState `json:"update"`
+	var snapshot struct {
+		Subscriptions []struct {
+			Artifact map[string]json.RawMessage    `json:"artifact"`
+			Update   store.SubscriptionUpdateState `json:"update"`
+		} `json:"subscriptions"`
 	}
-	if err := json.NewDecoder(response.Body).Decode(&values); err != nil {
+	if err := json.NewDecoder(response.Body).Decode(&snapshot); err != nil {
 		t.Fatal(err)
 	}
+	values := snapshot.Subscriptions
 	if response.StatusCode != http.StatusOK || len(values) != 1 {
 		t.Fatalf("subscription response: status=%d values=%+v", response.StatusCode, values)
 	}

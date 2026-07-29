@@ -42,15 +42,6 @@ func (s *Server) handleRefreshRuleCatalog(w http.ResponseWriter, r *http.Request
 	writeJSON(w, map[string]any{"ok": true, "catalog": catalog, "refresh": state})
 }
 
-func (s *Server) handleListRuleProfiles(w http.ResponseWriter, _ *http.Request) {
-	profiles, err := s.store.ListRuleProfiles()
-	if err != nil {
-		http.Error(w, "list rule profiles failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, profiles)
-}
-
 func (s *Server) handleSaveRuleProfile(w http.ResponseWriter, r *http.Request) {
 	var value store.RuleProfile
 	if err := decodeJSON(r, &value); err != nil {

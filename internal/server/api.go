@@ -15,7 +15,6 @@ import (
 	"submux/internal/compiler"
 	"submux/internal/fakeip"
 
-	"submux/internal/lifecycle"
 	"submux/internal/resourceproxy"
 	"submux/internal/store"
 )
@@ -70,88 +69,6 @@ func randomHex(nBytes int) string {
 
 func idParam(r *http.Request) (int64, error) {
 	return strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-}
-
-type sourceDTO struct {
-	ID               int64             `json:"id"`
-	Kind             string            `json:"kind"`
-	Builtin          bool              `json:"builtin,omitempty"`
-	Name             string            `json:"name"`
-	Description      string            `json:"description,omitempty"`
-	Tags             []string          `json:"tags,omitempty"`
-	URL              string            `json:"url,omitempty"`
-	UserAgent        string            `json:"user_agent,omitempty"`
-	Enabled          bool              `json:"enabled"`
-	SortOrder        int               `json:"sort_order"`
-	LifecyclePolicy  string            `json:"lifecycle_policy,omitempty"`
-	WarnBeforeDays   int               `json:"warn_before_days,omitempty"`
-	TrustNodeNotices bool              `json:"trust_node_notices,omitempty"`
-	FetchMode        string            `json:"fetch_mode,omitempty"`
-	NodeCount        int               `json:"node_count"`
-	NoticeCount      int               `json:"notice_count,omitempty"`
-	LastSuccessAt    string            `json:"last_success_at,omitempty"`
-	LastError        string            `json:"last_error,omitempty"`
-	LastSuccessRoute string            `json:"last_success_route,omitempty"`
-	LastDirectError  string            `json:"last_direct_error,omitempty"`
-	LastProxyError   string            `json:"last_proxy_error,omitempty"`
-	Userinfo         string            `json:"userinfo,omitempty"`
-	Lifecycle        *lifecycle.Status `json:"lifecycle,omitempty"`
-}
-
-func (s *Server) handleListSources(w http.ResponseWriter, r *http.Request) {
-	srcs, err := s.store.ListSources()
-	if err != nil {
-		http.Error(w, "store error", http.StatusInternalServerError)
-		return
-	}
-	nodes, _ := s.store.ListNodes()
-	counts := make(map[int64]int)
-	noticeCounts := make(map[int64]int)
-	for _, value := range nodes {
-		if value.Role == "notice" {
-			noticeCounts[value.SourceID]++
-		} else {
-			counts[value.SourceID]++
-		}
-	}
-	out := make([]sourceDTO, 0, len(srcs))
-	for _, src := range srcs {
-		d := sourceDTO{
-			ID: src.ID, Kind: src.Kind, Builtin: src.Builtin, Name: src.Name, Description: src.Description,
-			Tags: src.Tags, URL: src.URL, UserAgent: src.UserAgent,
-			Enabled: src.Enabled, SortOrder: src.SortOrder, NodeCount: counts[src.ID], NoticeCount: noticeCounts[src.ID],
-			LifecyclePolicy: src.LifecyclePolicy, WarnBeforeDays: src.WarnBeforeDays, TrustNodeNotices: src.TrustNodeNotices,
-			FetchMode: src.FetchMode,
-		}
-		if src.Kind == store.SourceKindSubscription {
-			c, err := s.store.GetCache(src.ID)
-			if err != nil {
-				status := lifecycle.Evaluate(src, store.Cache{}, time.Now())
-				d.Lifecycle = &status
-				out = append(out, d)
-				continue
-			}
-			d.LastSuccessAt = c.LastSuccessAt
-			d.LastError = c.LastError
-			d.LastSuccessRoute = c.LastSuccessRoute
-			d.LastDirectError = c.LastDirectError
-			d.LastProxyError = c.LastProxyError
-			d.Userinfo = c.UserinfoJSON
-			status := lifecycle.Evaluate(src, c, time.Now())
-			d.Lifecycle = &status
-		}
-		out = append(out, d)
-	}
-	writeJSON(w, out)
-}
-
-func (s *Server) handleListLifecycleEvents(w http.ResponseWriter, _ *http.Request) {
-	values, err := s.store.ListLifecycleEvents(100)
-	if err != nil {
-		http.Error(w, "list lifecycle events failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, values)
 }
 
 func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
@@ -393,30 +310,6 @@ func (s *Server) handleRefreshSourceViaPlatformProxy(w http.ResponseWriter, r *h
 		result["outcome"] = "failed"
 	}
 	writeJSON(w, result)
-}
-
-func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
-	base, _ := s.store.GetSetting("base_url")
-	interval, _ := s.store.GetSettingInt("fetch_interval_sec", 10800)
-	proxy, err := resourceproxy.Load(s.store)
-	if err != nil {
-		proxy = resourceproxy.Config{Mode: resourceproxy.ModeDirect}
-	}
-	rawSharedFakeIP, err := s.store.GetSetting(fakeip.SettingKey)
-	if err != nil {
-		http.Error(w, "load shared fake-ip-filter failed", http.StatusInternalServerError)
-		return
-	}
-	sharedFakeIP, err := fakeip.Parse(rawSharedFakeIP)
-	if err != nil {
-		sharedFakeIP = fakeip.Default()
-	}
-	writeJSON(w, map[string]any{
-		"base_url":                base,
-		"fetch_interval_sec":      interval,
-		"platform_resource_proxy": proxy,
-		"shared_fake_ip_filter":   sharedFakeIP,
-	})
 }
 
 func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {

@@ -68,10 +68,10 @@ func TestStatusThenInitGrantsAccess(t *testing.T) {
 	}
 
 	c := initAndClient(t, srv)
-	r2 := mustGet(t, c, srv.URL+"/api/sources")
+	r2 := mustGet(t, c, srv.URL+"/api/console-snapshot")
 	defer r2.Body.Close()
 	if r2.StatusCode != 200 {
-		t.Fatalf("authed /api/sources want 200, got %d", r2.StatusCode)
+		t.Fatalf("authed /api/console-snapshot want 200, got %d", r2.StatusCode)
 	}
 }
 
@@ -79,7 +79,7 @@ func TestUnauthorizedWithoutCookie(t *testing.T) {
 	st := newTestStore(t)
 	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
-	r := mustGet(t, http.DefaultClient, srv.URL+"/api/sources")
+	r := mustGet(t, http.DefaultClient, srv.URL+"/api/console-snapshot")
 	defer r.Body.Close()
 	if r.StatusCode != 401 {
 		t.Fatalf("want 401, got %d", r.StatusCode)

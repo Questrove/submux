@@ -339,3 +339,39 @@ func TestSharedFakeIPFilterHasOneEditorAndTemplatePreview(t *testing.T) {
 		}
 	}
 }
+
+func TestConsoleUsesOnePageSnapshotRead(t *testing.T) {
+	content, err := FS.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(content)
+	for _, required := range []string{
+		`/api/console-snapshot`,
+		`function applyConsoleSnapshot(snapshot)`,
+		`for(const version of value.versions||[])VERSIONS.set(version.id,version)`,
+		`async function reloadConsoleSnapshot()`,
+		`await reloadConsoleSnapshot()`,
+		`数据关联异常`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("console snapshot integration is missing %q", required)
+		}
+	}
+	for _, removed := range []string{
+		`api('GET','/api/settings')`,
+		`api('GET','/api/sources')`,
+		`api('GET','/api/nodes')`,
+		`api('GET','/api/lifecycle-events')`,
+		`api('GET','/api/templates')`,
+		`api('GET','/api/rule-profiles')`,
+		`api('GET','/api/subscriptions')`,
+		`loadVersions`,
+		`reloadSourcesAndNodes`,
+		`reloadBuildState`,
+	} {
+		if strings.Contains(html, removed) {
+			t.Fatalf("console still uses removed management read path %q", removed)
+		}
+	}
+}

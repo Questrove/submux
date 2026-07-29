@@ -18,15 +18,6 @@ import (
 	"submux/internal/store"
 )
 
-func (s *Server) handleListNodes(w http.ResponseWriter, _ *http.Request) {
-	values, err := s.store.ListNodes()
-	if err != nil {
-		http.Error(w, "list nodes failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, values)
-}
-
 func (s *Server) handleImportNodes(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		SourceID int64  `json:"source_id"`
@@ -153,15 +144,6 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})
 }
 
-func (s *Server) handleListTemplates(w http.ResponseWriter, _ *http.Request) {
-	values, err := s.store.ListTemplates()
-	if err != nil {
-		http.Error(w, "list templates failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, values)
-}
-
 func (s *Server) handleSaveTemplate(w http.ResponseWriter, r *http.Request) {
 	var value store.Template
 	if err := decodeJSON(r, &value); err != nil {
@@ -220,20 +202,6 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
-func (s *Server) handleListTemplateVersions(w http.ResponseWriter, r *http.Request) {
-	id, err := idParam(r)
-	if err != nil {
-		http.Error(w, "bad id", http.StatusBadRequest)
-		return
-	}
-	values, err := s.store.ListTemplateVersions(id)
-	if err != nil {
-		http.Error(w, "list versions failed", http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, values)
-}
-
 func (s *Server) handlePublishTemplateVersion(w http.ResponseWriter, r *http.Request) {
 	id, err := idParam(r)
 	if err != nil {
@@ -267,51 +235,6 @@ func (s *Server) handlePublishTemplateVersion(w http.ResponseWriter, r *http.Req
 		store.TemplateVersion
 		Outcome string `json:"outcome"`
 	}{TemplateVersion: version, Outcome: "completed"})
-}
-
-func (s *Server) handleListOutputSubscriptions(w http.ResponseWriter, _ *http.Request) {
-	values, err := s.store.ListOutputSubscriptions()
-	if err != nil {
-		http.Error(w, "list output subscriptions failed", http.StatusInternalServerError)
-		return
-	}
-	type artifactStatus struct {
-		ContentType string `json:"content_type,omitempty"`
-		Revision    string `json:"revision,omitempty"`
-		LastSuccess string `json:"last_success,omitempty"`
-		UpdatedAt   string `json:"updated_at,omitempty"`
-	}
-	type item struct {
-		store.OutputSubscription
-		Artifact *artifactStatus                `json:"artifact,omitempty"`
-		Update   *store.SubscriptionUpdateState `json:"update,omitempty"`
-		URL      string                         `json:"url"`
-		Scenario string                         `json:"scenario,omitempty"`
-	}
-	base, _ := s.store.GetSetting("base_url")
-	out := make([]item, 0, len(values))
-	for _, value := range values {
-		entry := item{OutputSubscription: value, URL: "/sub/" + value.Token}
-		if version, versionErr := s.store.GetTemplateVersion(value.TemplateVersionID); versionErr == nil {
-			if template, templateErr := s.store.GetTemplate(version.TemplateID); templateErr == nil {
-				entry.Scenario = template.Scenario
-			}
-		}
-		if artifact, err := s.store.GetSubscriptionArtifact(value.ID); err == nil {
-			entry.Artifact = &artifactStatus{
-				ContentType: artifact.ContentType, Revision: artifact.Revision,
-				LastSuccess: artifact.LastSuccess, UpdatedAt: artifact.UpdatedAt,
-			}
-		}
-		if update, err := s.store.GetSubscriptionUpdate(value.ID); err == nil {
-			entry.Update = &update
-		}
-		if base != "" {
-			entry.URL = strings.TrimRight(base, "/") + "/sub/" + value.Token
-		}
-		out = append(out, entry)
-	}
-	writeJSON(w, out)
 }
 
 type outputSubscriptionSaveRequest struct {
