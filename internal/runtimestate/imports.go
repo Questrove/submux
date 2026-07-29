@@ -136,6 +136,32 @@ func (s *Store) ConsumeImport(contentID, caller, operationID string, now time.Ti
 	return body, claimed.Content, nil
 }
 
+func (s *Store) PeekImport(contentID, caller string, now time.Time) ([]byte, runtimeapi.ImportContent, error) {
+	if s == nil || s.db == nil {
+		return nil, runtimeapi.ImportContent{}, errors.New("Runtime state is not open")
+	}
+	var record importRecord
+	if err := s.db.View(func(transaction *bbolt.Tx) error {
+		var err error
+		record, err = readImport(transaction.Bucket(importsBucket), contentID)
+		return err
+	}); err != nil {
+		return nil, runtimeapi.ImportContent{}, err
+	}
+	if err := validateImportForCaller(record, caller, "", now); err != nil {
+		return nil, runtimeapi.ImportContent{}, err
+	}
+	path, err := s.importPath(contentID)
+	if err != nil {
+		return nil, runtimeapi.ImportContent{}, err
+	}
+	body, err := readVerifiedImport(path, record.Content)
+	if err != nil {
+		return nil, runtimeapi.ImportContent{}, err
+	}
+	return body, record.Content, nil
+}
+
 func (s *Store) RemoveImport(contentID string) error {
 	if s == nil || s.db == nil {
 		return errors.New("Runtime state is not open")

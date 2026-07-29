@@ -1,0 +1,25 @@
+[package]
+name = "submux-runtime-gui"
+version = "0.0.0"
+description = "Local desktop client for Submux Runtime"
+authors = ["Submux contributors"]
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+name = "submux_runtime_gui"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "submux-runtime-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }

@@ -342,7 +342,18 @@ func (s *Store) CompleteOperation(
 		}
 		if state == runtimeapi.OperationSucceeded {
 			switch operation.Action.Kind {
-			case runtimeapi.ActionApplyImportedConfig, runtimeapi.ActionStartProxy:
+			case runtimeapi.ActionApplyImportedConfig:
+				mihomoState := "stopped"
+				if result != nil && result.Verified {
+					mihomoState = "running"
+				}
+				if err := metadata.Put(mihomoStateKey, []byte(mihomoState)); err != nil {
+					return err
+				}
+				if err := metadata.Put(runModeKey, []byte("explicit")); err != nil {
+					return err
+				}
+			case runtimeapi.ActionStartProxy:
 				if err := metadata.Put(mihomoStateKey, []byte("running")); err != nil {
 					return err
 				}

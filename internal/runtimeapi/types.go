@@ -71,6 +71,20 @@ type ImportContent struct {
 	ExpiresAt   time.Time `json:"expires_at"`
 }
 
+type PreviewCandidateRequest struct {
+	ContentID string `json:"content_id"`
+}
+
+type CandidatePreview struct {
+	ContentID          string   `json:"content_id"`
+	CandidateYAML      string   `json:"candidate_yaml"`
+	CandidateSHA256    string   `json:"candidate_sha256"`
+	ProxyKind          string   `json:"proxy_kind"`
+	ProxyAddresses     []string `json:"proxy_addresses"`
+	RuntimeOwnedFields []string `json:"runtime_owned_fields"`
+	Validated          bool     `json:"validated"`
+}
+
 type Action struct {
 	Kind   string       `json:"kind"`
 	Params ActionParams `json:"params"`

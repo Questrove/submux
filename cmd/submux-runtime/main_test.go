@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"submux/internal/buildinfo"
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimeapp"
 	"submux/internal/runtimeipc"
@@ -67,6 +68,21 @@ func (commandExecutor) Verify(context.Context) (runtimeapi.ProxyVerification, er
 		Kind:      "mixed",
 		Addresses: []string{"127.0.0.1:7890", "[::1]:7890"},
 		CheckedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (commandExecutor) PreviewCandidate(
+	_ context.Context,
+	_ runtimeapi.PeerIdentity,
+	request runtimeapi.PreviewCandidateRequest,
+) (runtimeapi.CandidatePreview, error) {
+	return runtimeapi.CandidatePreview{
+		ContentID:       request.ContentID,
+		CandidateYAML:   "listeners: []\n",
+		CandidateSHA256: strings.Repeat("0", 64),
+		ProxyKind:       "mixed",
+		ProxyAddresses:  []string{"127.0.0.1:7890", "[::1]:7890"},
+		Validated:       true,
 	}, nil
 }
 
@@ -180,7 +196,7 @@ func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
 	coordinator := &runtimeapp.Coordinator{
 		State:    state,
 		Executor: commandExecutor{state: state},
-		Version:  "test",
+		Version:  buildinfo.Current().Version,
 	}
 	endpoint := commandTestEndpoint(t)
 	listener, err := runtimeipc.Listen(endpoint)
@@ -222,27 +238,53 @@ func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
 		t.Fatalf("decode CLI import: %v", err)
 	}
 
-	var startOut bytes.Buffer
+	var previewOut bytes.Buffer
 	stderr.Reset()
 	exitCode = runProxy([]string{
-		"start",
+		"preview",
+		"--endpoint", endpoint,
+		"--content-id", content.ID,
+		"--json",
+	}, &previewOut, &stderr)
+	if exitCode != 0 || !json.Valid(previewOut.Bytes()) {
+		cancel()
+		t.Fatalf("proxy preview exit=%d stdout=%s stderr=%s", exitCode, previewOut.String(), stderr.String())
+	}
+
+	var applyOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runProxy([]string{
+		"apply",
 		"--endpoint", endpoint,
 		"--content-id", content.ID,
 		"--wait",
 		"--json",
-	}, &startOut, &stderr)
+	}, &applyOut, &stderr)
 	if exitCode != 0 {
 		cancel()
-		t.Fatalf("proxy start exit=%d stdout=%s stderr=%s", exitCode, startOut.String(), stderr.String())
+		t.Fatalf("proxy apply exit=%d stdout=%s stderr=%s", exitCode, applyOut.String(), stderr.String())
 	}
 	var operationEnvelope runtimeapi.OperationResponse
-	if err := json.Unmarshal(startOut.Bytes(), &operationEnvelope); err != nil {
+	if err := json.Unmarshal(applyOut.Bytes(), &operationEnvelope); err != nil {
 		cancel()
 		t.Fatalf("decode CLI operation: %v", err)
 	}
 	if operationEnvelope.Operation.State != runtimeapi.OperationSucceeded {
 		cancel()
 		t.Fatalf("CLI operation = %#v", operationEnvelope.Operation)
+	}
+
+	var startOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runProxy([]string{
+		"start",
+		"--endpoint", endpoint,
+		"--wait",
+		"--json",
+	}, &startOut, &stderr)
+	if exitCode != 0 || !json.Valid(startOut.Bytes()) {
+		cancel()
+		t.Fatalf("proxy start exit=%d stdout=%s stderr=%s", exitCode, startOut.String(), stderr.String())
 	}
 
 	var getOut bytes.Buffer

@@ -1,6 +1,6 @@
 # Submux Runtime 本机 IPC
 
-本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传和持久化运行操作；事件流和 GUI 桥接仍按本文继续开发。
+本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传、候选配置预览、持久化运行操作和 Tauri GUI 桥接；事件流仍按本文继续开发。
 
 ## 传输
 
@@ -84,6 +84,15 @@ POST /v1/imports
 本机配置副本、托管资源、备份和离线包由客户端打开后把字节流上传给 Runtime，不能把客户端文件路径交给 Runtime。请求声明内容类型、大小和客户端计算的 SHA-256；Runtime 在硬上限内重新计算摘要，保存到固定暂存区并返回短期 `content_id`。
 
 `content_id` 绑定 Runtime 安装实例和上传者 OS 身份，默认三十分钟过期，只能被一次后续 Action 消费。暂存内容不能执行、不能被 Mihomo 引用，也不能传给特权进程；Action 完成、失败或过期后清理。运行中导入的离线更新包只有通过 Runtime 校验并变成受信任 bundle ID 后，平台安装器才能接收该 ID。
+
+### 预览候选配置
+
+```http
+POST /v1/candidates/preview
+Content-Type: application/json
+```
+
+请求只包含当前调用者尚未消费的 `content_id`。Runtime 使用当前本机运行设置覆盖保留字段，并用准备运行的 Mihomo 精确版本完成静态校验；响应返回最终候选配置、摘要、显式代理监听以及由 Runtime 接管的字段。预览不消费导入内容、不创建运行操作、不切换当前配置，也不启动 Mihomo。响应使用 `Cache-Control: no-store`，因为候选配置可能包含来源秘密。
 
 ### 创建运行操作
 
@@ -180,7 +189,7 @@ Runtime 是机器状态的唯一写入者：
 
 路径中的主版本定义不兼容协议。`/v1` 内只允许增加可选响应字段和新的 Action kind，不能改变既有字段含义。
 
-GUI、Runtime 和特权网络进程作为同一个产品版本安装。服务升级后，仍在运行的旧 GUI 必须识别版本不匹配，提示重启自身，不能继续提交修改。CLI 与 TUI 位于 Runtime 二进制中，不会产生独立安装版本。
+GUI、Runtime 和特权网络进程作为同一个产品版本安装。服务升级后，仍在运行的旧 GUI 必须识别版本不匹配，提示重启自身，不能继续提交修改。Runtime 会对上传、创建运行操作和取消操作再次检查客户端产品版本；版本不一致时返回 `protocol_unsupported`。只读快照和候选配置预览仍可用于显示故障信息。CLI 与 TUI 位于 Runtime 二进制中，不会产生独立安装版本。
 
 客户端发送未知 Action 或高于服务端能力的协议特性时，Runtime 返回明确的 `unsupported`，不能尽力猜测执行。
 

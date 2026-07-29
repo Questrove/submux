@@ -20,6 +20,10 @@ type ActionExecutor interface {
 	Verify(context.Context) (runtimeapi.ProxyVerification, error)
 }
 
+type CandidatePreviewer interface {
+	PreviewCandidate(context.Context, runtimeapi.PeerIdentity, runtimeapi.PreviewCandidateRequest) (runtimeapi.CandidatePreview, error)
+}
+
 type PublicError struct {
 	Code      string
 	Message   string
@@ -41,6 +45,18 @@ func (e *PublicError) Unwrap() error {
 	return e.Cause
 }
 
+func (e *PublicError) ProtocolCode() string {
+	return e.Code
+}
+
+func (e *PublicError) ProtocolMessage() string {
+	return e.Message
+}
+
+func (e *PublicError) ProtocolRetryable() bool {
+	return e.Retryable
+}
+
 type Coordinator struct {
 	State         *runtimestate.Store
 	Executor      ActionExecutor
@@ -57,6 +73,13 @@ type Coordinator struct {
 func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
 	service := &Service{State: c.State, Version: c.Version, Now: c.Now}
 	return service.Observe(ctx, peer)
+}
+
+func (c *Coordinator) RuntimeVersion() string {
+	if c == nil {
+		return ""
+	}
+	return c.Version
 }
 
 func (c *Coordinator) UploadImport(
@@ -119,6 +142,24 @@ func (c *Coordinator) GetOperation(ctx context.Context, id string) (runtimeapi.O
 		return runtimeapi.Operation{}, errors.New("Runtime state is unavailable")
 	}
 	return c.State.GetOperation(id)
+}
+
+func (c *Coordinator) PreviewCandidate(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.PreviewCandidateRequest,
+) (runtimeapi.CandidatePreview, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.CandidatePreview{}, err
+	}
+	if c == nil {
+		return runtimeapi.CandidatePreview{}, errors.New("Runtime candidate preview is unavailable")
+	}
+	previewer, ok := c.Executor.(CandidatePreviewer)
+	if !ok {
+		return runtimeapi.CandidatePreview{}, errors.New("Runtime candidate preview is unavailable")
+	}
+	return previewer.PreviewCandidate(ctx, peer, request)
 }
 
 func (c *Coordinator) CancelOperation(

@@ -74,6 +74,31 @@ func TestDeployerRequiresRuntimeCandidateBuilder(t *testing.T) {
 	}
 }
 
+func TestPrepareValidatesAndStoresCandidateWithoutStartingRuntime(t *testing.T) {
+	source := []byte("source: local\n")
+	service := &fakeService{}
+	verifier := &sequenceVerifier{}
+	deployer := &Deployer{
+		Root:      filepath.Join(t.TempDir(), "configs"),
+		Builder:   fakeBuilder{candidate: []byte("mixed-port: 7890\n")},
+		Validator: fakeValidator{},
+		Service:   service,
+		Verifier:  verifier,
+	}
+
+	result, err := deployer.Prepare(context.Background(), "rev-1", sourceHash(source), source)
+
+	if err != nil || result.Status != "ready" || result.Validation != "passed" {
+		t.Fatalf("prepared deployment: result=%#v err=%v", result, err)
+	}
+	if service.reloads != 0 || service.stops != 0 || verifier.calls != 0 {
+		t.Fatalf("preparing candidate changed runtime: service=%#v verifier.calls=%d", service, verifier.calls)
+	}
+	if _, err := os.Stat(filepath.Join(deployer.Root, "current", "config.yaml")); err != nil {
+		t.Fatalf("prepared candidate was not stored: %v", err)
+	}
+}
+
 func TestProxyEndpointFollowsCandidateWithoutChangingIt(t *testing.T) {
 	for _, test := range []struct {
 		config string

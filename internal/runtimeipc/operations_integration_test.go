@@ -39,6 +39,22 @@ func (IPCExecutor) Verify(context.Context) (runtimeapi.ProxyVerification, error)
 	}, nil
 }
 
+func (IPCExecutor) PreviewCandidate(
+	_ context.Context,
+	_ runtimeapi.PeerIdentity,
+	request runtimeapi.PreviewCandidateRequest,
+) (runtimeapi.CandidatePreview, error) {
+	return runtimeapi.CandidatePreview{
+		ContentID:          request.ContentID,
+		CandidateYAML:      "listeners: []\n",
+		CandidateSHA256:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		ProxyKind:          "mixed",
+		ProxyAddresses:     []string{"127.0.0.1:7890", "[::1]:7890"},
+		RuntimeOwnedFields: []string{"listeners"},
+		Validated:          true,
+	}, nil
+}
+
 func TestImportOperationWaitAndVerifyOverLocalIPC(t *testing.T) {
 	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
@@ -71,7 +87,7 @@ func TestImportOperationWaitAndVerifyOverLocalIPC(t *testing.T) {
 	go func() { workerResult <- coordinator.Run(ctx) }()
 	go func() { serverResult <- server.Serve(ctx, listener) }()
 
-	client, err := NewClient(endpoint, "integration-test")
+	client, err := NewClient(endpoint, "test")
 	if err != nil {
 		cancel()
 		t.Fatalf("create Runtime IPC client: %v", err)
@@ -87,6 +103,15 @@ func TestImportOperationWaitAndVerifyOverLocalIPC(t *testing.T) {
 	if err != nil {
 		cancel()
 		t.Fatalf("upload Runtime import: %v", err)
+	}
+	preview, err := client.PreviewCandidate(context.Background(), content.ID)
+	if err != nil {
+		cancel()
+		t.Fatalf("preview Runtime candidate: %v", err)
+	}
+	if !preview.Validated || preview.ContentID != content.ID {
+		cancel()
+		t.Fatalf("candidate preview = %#v", preview)
 	}
 	request := runtimeapi.CreateOperationRequest{
 		RequestID:  "operation-request-one",

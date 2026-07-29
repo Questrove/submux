@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Submux Runtime</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header>
+        <div>
+          <p class="eyebrow">LOCAL RUNTIME</p>
+          <h1>Submux Runtime</h1>
+        </div>
+        <button id="refresh" class="secondary">刷新状态</button>
+      </header>
+
+      <section id="compatibility" class="notice hidden" role="alert"></section>
+
+      <section class="status-grid" aria-label="Runtime 状态">
+        <article>
+          <span>Runtime</span>
+          <strong id="runtime-state">连接中</strong>
+          <small id="runtime-version">—</small>
+        </article>
+        <article>
+          <span>Mihomo</span>
+          <strong id="mihomo-state">—</strong>
+          <small id="run-mode">—</small>
+        </article>
+        <article>
+          <span>状态版本</span>
+          <strong id="revision">—</strong>
+          <small id="queue">—</small>
+        </article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">CONFIGURATION</p>
+            <h2>导入与候选配置</h2>
+          </div>
+          <span id="candidate-state" class="badge">尚未预览</span>
+        </div>
+        <label for="source-yaml">完整 Mihomo YAML</label>
+        <textarea id="source-yaml" spellcheck="false" placeholder="粘贴配置内容。文件路径不会发送给 Runtime。"></textarea>
+        <div class="actions">
+          <button id="import-preview">上传并预览</button>
+          <button id="apply" disabled>应用候选配置</button>
+        </div>
+        <details>
+          <summary>查看最终候选配置</summary>
+          <pre id="candidate-yaml">尚未生成候选配置。</pre>
+        </details>
+        <p id="owned-fields" class="muted"></p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">OPERATIONS</p>
+            <h2>显式代理</h2>
+          </div>
+          <span id="proxy-verification" class="badge">未验证</span>
+        </div>
+        <div class="actions">
+          <button id="start">启动</button>
+          <button id="stop" class="danger">停止</button>
+          <button id="verify" class="secondary">验证代理</button>
+          <button id="get-operation" class="secondary" disabled>查询运行操作</button>
+          <button id="wait" class="secondary" disabled>等待运行操作</button>
+          <button id="cancel-operation" class="danger" disabled>取消运行操作</button>
+        </div>
+        <pre id="operation">还没有运行操作。</pre>
+      </section>
+
+      <footer id="message" aria-live="polite">正在连接本机 Runtime…</footer>
+    </main>
+  </body>
+</html>

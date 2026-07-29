@@ -91,6 +91,20 @@ func ProxyEndpoint(config []byte) (int, string, error) {
 }
 
 func (d *Deployer) Apply(ctx context.Context, revision, expectedSourceHash string, source []byte) (DeploymentResult, error) {
+	return d.deploy(ctx, revision, expectedSourceHash, source, true)
+}
+
+func (d *Deployer) Prepare(ctx context.Context, revision, expectedSourceHash string, source []byte) (DeploymentResult, error) {
+	return d.deploy(ctx, revision, expectedSourceHash, source, false)
+}
+
+func (d *Deployer) deploy(
+	ctx context.Context,
+	revision string,
+	expectedSourceHash string,
+	source []byte,
+	activate bool,
+) (DeploymentResult, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -103,7 +117,7 @@ func (d *Deployer) Apply(ctx context.Context, revision, expectedSourceHash strin
 	if !strings.EqualFold(expectedSourceHash, result.SourceHash) {
 		return result, errors.New("source SHA-256 does not match its metadata")
 	}
-	if d.Builder == nil || d.Validator == nil || d.Service == nil || d.Verifier == nil {
+	if d.Builder == nil || d.Validator == nil || (activate && (d.Service == nil || d.Verifier == nil)) {
 		return result, errors.New("deployer dependencies are incomplete")
 	}
 	root, err := d.safeRoot()
@@ -205,6 +219,11 @@ func (d *Deployer) Apply(ctx context.Context, revision, expectedSourceHash strin
 		return result, fmt.Errorf("activate candidate config: %w", err)
 	}
 	cleanupStaging = false
+
+	if !activate {
+		result.Status = "ready"
+		return result, nil
+	}
 
 	activationErr := d.Service.ReloadOrRestart(ctx)
 	if activationErr == nil {

@@ -2,6 +2,8 @@ package runtimeapp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +27,69 @@ type MihomoExecutor struct {
 	Platform        string
 	Verifier        mihomo.RuntimeVerifier
 	Now             func() time.Time
+}
+
+func (e *MihomoExecutor) PreviewCandidate(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.PreviewCandidateRequest,
+) (runtimeapi.CandidatePreview, error) {
+	if e == nil || e.State == nil || e.Core == nil || e.Process == nil {
+		return runtimeapi.CandidatePreview{}, errors.New("Mihomo Runtime previewer is incomplete")
+	}
+	body, content, err := e.State.PeekImport(request.ContentID, peer.Key(), e.now())
+	if err != nil {
+		return runtimeapi.CandidatePreview{}, err
+	}
+	binaryPath, exactVersion, err := e.currentCore()
+	if err != nil {
+		return runtimeapi.CandidatePreview{}, &PublicError{
+			Code:    runtimeapi.ErrorServiceUnavailable,
+			Message: "A verified Mihomo core must be installed before previewing a configuration",
+			Cause:   err,
+		}
+	}
+	builder := mihomo.ExplicitCandidateBuilder{
+		Port:            e.ProxyPort,
+		ControlEndpoint: e.ControlEndpoint,
+		Platform:        e.Platform,
+	}
+	candidate, err := builder.BuildCandidate(body)
+	if err != nil {
+		return runtimeapi.CandidatePreview{}, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The imported Mihomo configuration is outside the Runtime safety policy",
+			Cause:   err,
+		}
+	}
+	listeners, err := mihomo.ProxyListeners(candidate)
+	if err != nil {
+		return runtimeapi.CandidatePreview{}, err
+	}
+	if len(listeners) == 0 {
+		return runtimeapi.CandidatePreview{}, errors.New("candidate configuration has no explicit proxy listeners")
+	}
+	if err := validatePreviewCandidate(ctx, e.ConfigRoot, runtimeprocess.ConfigValidator{
+		BinaryPath:   binaryPath,
+		DataDir:      e.Process.DataDir,
+		ExactVersion: exactVersion,
+	}, candidate); err != nil {
+		return runtimeapi.CandidatePreview{}, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Mihomo rejected the candidate configuration",
+			Cause:   err,
+		}
+	}
+	digest := sha256.Sum256(candidate)
+	return runtimeapi.CandidatePreview{
+		ContentID:          content.ID,
+		CandidateYAML:      string(candidate),
+		CandidateSHA256:    hex.EncodeToString(digest[:]),
+		ProxyKind:          listeners[0].Kind,
+		ProxyAddresses:     listenerAddresses(listeners),
+		RuntimeOwnedFields: mihomo.ExplicitRuntimeOwnedFields(),
+		Validated:          true,
+	}, nil
 }
 
 func (e *MihomoExecutor) Execute(
@@ -117,19 +182,6 @@ func (e *MihomoExecutor) applyImport(
 			Cause:   err,
 		}
 	}
-	listeners, err := mihomo.ProxyListeners(candidate)
-	if err != nil {
-		return nil, err
-	}
-	if !running {
-		if err := runtimeprocess.CheckLoopbackPortsAvailable(listenerAddresses(listeners)); err != nil {
-			return nil, &PublicError{
-				Code:    runtimeapi.ErrorServiceUnavailable,
-				Message: err.Error(),
-				Cause:   err,
-			}
-		}
-	}
 	service := stagedRuntimeService{
 		service: e.Process,
 		report:  report,
@@ -147,18 +199,30 @@ func (e *MihomoExecutor) applyImport(
 		Service:  service,
 		Verifier: e.Verifier,
 	}
-	deployment, err := deployer.Apply(ctx, operation.ID, content.SHA256, body)
+	var deployment mihomo.DeploymentResult
+	if running {
+		deployment, err = deployer.Apply(ctx, operation.ID, content.SHA256, body)
+	} else {
+		if err := report("preparing_candidate", 70, false); err != nil {
+			return nil, err
+		}
+		deployment, err = deployer.Prepare(ctx, operation.ID, content.SHA256, body)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if err := report("verified", 95, false); err != nil {
+	finalStage := "ready_to_start"
+	if running {
+		finalStage = "verified"
+	}
+	if err := report(finalStage, 95, false); err != nil {
 		return nil, err
 	}
 	return &runtimeapi.OperationResult{
 		ConfigRevision: deployment.Revision,
 		ProxyKind:      deployment.ProxyKind,
 		ProxyAddresses: append([]string(nil), deployment.ProxyAddresses...),
-		Verified:       true,
+		Verified:       running,
 	}, nil
 }
 
@@ -292,4 +356,43 @@ func importErrorCode(err error) string {
 	default:
 		return runtimeapi.ErrorNotFound
 	}
+}
+
+func validatePreviewCandidate(
+	ctx context.Context,
+	configRoot string,
+	validator runtimeprocess.ConfigValidator,
+	candidate []byte,
+) error {
+	if configRoot == "" || !filepath.IsAbs(configRoot) {
+		return errors.New("Runtime configuration root is invalid")
+	}
+	if err := os.MkdirAll(configRoot, 0700); err != nil {
+		return err
+	}
+	directory, err := os.MkdirTemp(configRoot, ".preview-")
+	if err != nil {
+		return err
+	}
+	configPath := filepath.Join(directory, "config.yaml")
+	defer func() {
+		_ = os.Remove(configPath)
+		_ = os.Remove(directory)
+	}()
+	file, err := os.OpenFile(configPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(candidate); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return validator.ValidateConfig(ctx, configPath)
 }

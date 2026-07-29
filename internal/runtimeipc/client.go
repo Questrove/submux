@@ -194,6 +194,44 @@ func (c *Client) UploadImport(
 	return content, nil
 }
 
+func (c *Client) PreviewCandidate(
+	ctx context.Context,
+	contentID string,
+) (runtimeapi.CandidatePreview, error) {
+	var preview runtimeapi.CandidatePreview
+	requestID, err := newRequestID()
+	if err != nil {
+		return preview, err
+	}
+	body, err := json.Marshal(runtimeapi.PreviewCandidateRequest{ContentID: contentID})
+	if err != nil {
+		return preview, err
+	}
+	request, err := c.newRequest(
+		ctx,
+		http.MethodPost,
+		"/v1/candidates/preview",
+		bytes.NewReader(body),
+		requestID,
+	)
+	if err != nil {
+		return preview, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.do(request)
+	if err != nil {
+		return preview, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return preview, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, &preview); err != nil {
+		return preview, invalidResponseError("candidate preview response", err)
+	}
+	return preview, nil
+}
+
 func (c *Client) Execute(
 	ctx context.Context,
 	requestValue runtimeapi.CreateOperationRequest,

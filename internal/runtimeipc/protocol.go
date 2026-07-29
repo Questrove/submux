@@ -16,7 +16,7 @@ const (
 	HeaderContentSHA256   = "X-Submux-Content-SHA256"
 
 	MaxRequestBytes  = 1 << 20
-	MaxResponseBytes = 4 << 20
+	MaxResponseBytes = 12 << 20
 	MaxJSONDepth     = 32
 	MaxJSONString    = 64 << 10
 	MaxJSONArray     = 4096

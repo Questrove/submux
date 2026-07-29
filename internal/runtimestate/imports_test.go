@@ -194,3 +194,28 @@ func TestConsumeImportIsAtomicAcrossConcurrentCallers(t *testing.T) {
 		t.Fatalf("concurrent consume results: succeeded=%d consumed=%d", succeeded, consumed)
 	}
 }
+
+func TestPeekImportDoesNotConsumeContent(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
+	body := []byte("proxies: []\n")
+	digest := sha256.Sum256(body)
+	now := time.Now().UTC()
+	content, err := store.UploadImport(peer, "text/yaml", int64(len(body)), hex.EncodeToString(digest[:]), body, now)
+	if err != nil {
+		t.Fatalf("upload Runtime import: %v", err)
+	}
+
+	previewed, _, err := store.PeekImport(content.ID, peer.Key(), now)
+	if err != nil || string(previewed) != string(body) {
+		t.Fatalf("peek Runtime import: body=%q err=%v", previewed, err)
+	}
+	consumed, _, err := store.ConsumeImport(content.ID, peer.Key(), "", now)
+	if err != nil || string(consumed) != string(body) {
+		t.Fatalf("consume previewed Runtime import: body=%q err=%v", consumed, err)
+	}
+}

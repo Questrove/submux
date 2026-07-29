@@ -29,6 +29,18 @@ func (operatorObserver) UploadImport(context.Context, runtimeapi.PeerIdentity, s
 	return runtimeapi.ImportContent{}, nil
 }
 
+func (operatorObserver) PreviewCandidate(
+	context.Context,
+	runtimeapi.PeerIdentity,
+	runtimeapi.PreviewCandidateRequest,
+) (runtimeapi.CandidatePreview, error) {
+	return runtimeapi.CandidatePreview{Validated: true}, nil
+}
+
+func (operatorObserver) RuntimeVersion() string {
+	return "test"
+}
+
 func (operatorObserver) Execute(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error) {
 	return runtimeapi.Operation{}, false, nil
 }
@@ -183,5 +195,60 @@ func TestOperationHandlerRejectsUnknownAndDuplicateJSONFields(t *testing.T) {
 		if !strings.Contains(recorder.Body.String(), `"code":"invalid_request"`) {
 			t.Fatalf("body %s: response=%s", body, recorder.Body.String())
 		}
+	}
+}
+
+func TestMutationRejectsIncompatibleClientVersion(t *testing.T) {
+	service := operatorObserver{observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+		return runtimeapi.Snapshot{}, nil
+	}}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	body := `{"request_id":"request-1","if_revision":1,"action":{"kind":"proxy.stop","params":{}}}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/operations", bytes.NewBufferString(body))
+	request.Header.Set(HeaderRequestID, "request-1")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientVersion, "old")
+	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUpgradeRequired {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"protocol_unsupported"`) {
+		t.Fatalf("response=%s", recorder.Body.String())
+	}
+}
+
+func TestCandidatePreviewUsesReadOnlyIPCEndpoint(t *testing.T) {
+	service := operatorObserver{observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+		return runtimeapi.Snapshot{}, nil
+	}}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/candidates/preview",
+		bytes.NewBufferString(`{"content_id":"content_0123456789abcdef0123456789abcdef"}`),
+	)
+	request.Header.Set(HeaderRequestID, "request-1")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientVersion, "old")
+	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+	recorder := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"validated":true`) {
+		t.Fatalf("response=%s", recorder.Body.String())
 	}
 }

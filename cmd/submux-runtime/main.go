@@ -26,6 +26,7 @@ import (
 	"submux/internal/runtimepaths"
 	"submux/internal/runtimeprocess"
 	"submux/internal/runtimestate"
+	"submux/internal/runtimetui"
 )
 
 func main() {
@@ -42,11 +43,20 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		_ = json.NewEncoder(stdout).Encode(buildinfo.Current())
 		return 0
 	}
-	if len(arguments) == 0 || arguments[0] == "serve" {
+	if len(arguments) == 0 {
+		if interactiveTerminal(os.Stdin, os.Stdout) {
+			return runTUI(nil, os.Stdin, stdout, stderr)
+		}
+		return runServe(nil, stderr)
+	}
+	if arguments[0] == "serve" {
 		if len(arguments) > 0 {
 			arguments = arguments[1:]
 		}
 		return runServe(arguments, stderr)
+	}
+	if arguments[0] == "tui" {
+		return runTUI(arguments[1:], os.Stdin, stdout, stderr)
 	}
 	if arguments[0] == "status" {
 		return runStatus(arguments[1:], stdout, stderr)
@@ -60,8 +70,46 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "proxy" {
 		return runProxy(arguments[1:], stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|status|import|operation|proxy|version|--version-json]")
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|version|--version-json]")
 	return 2
+}
+
+func runTUI(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("tui", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "tui does not accept positional arguments")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := runtimetui.Run(ctx, client, stdin, stdout); err != nil && !errors.Is(err, context.Canceled) {
+		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
+		return 1
+	}
+	return 0
+}
+
+func interactiveTerminal(stdin, stdout *os.File) bool {
+	if stdin == nil || stdout == nil {
+		return false
+	}
+	inputInfo, inputErr := stdin.Stat()
+	outputInfo, outputErr := stdout.Stat()
+	return inputErr == nil && outputErr == nil &&
+		inputInfo.Mode()&os.ModeCharDevice != 0 &&
+		outputInfo.Mode()&os.ModeCharDevice != 0
 }
 
 func runServe(arguments []string, stderr io.Writer) int {
@@ -325,7 +373,7 @@ func runOperation(arguments []string, stdout io.Writer, stderr io.Writer) int {
 
 func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if len(arguments) == 0 {
-		fmt.Fprintln(stderr, "usage: submux-runtime proxy [start|stop|verify]")
+		fmt.Fprintln(stderr, "usage: submux-runtime proxy [apply|preview|start|stop|verify]")
 		return 2
 	}
 	command := arguments[0]
@@ -349,6 +397,23 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	defer client.CloseIdleConnections()
+	if command == "preview" {
+		if *contentID == "" || *wait {
+			fmt.Fprintln(stderr, "proxy preview requires --content-id and does not accept --wait")
+			return 2
+		}
+		preview, err := client.PreviewCandidate(context.Background(), *contentID)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		if *jsonOutput {
+			_ = json.NewEncoder(stdout).Encode(preview)
+		} else {
+			fmt.Fprintf(stdout, "validated %s via %s at %s\n", preview.CandidateSHA256, preview.ProxyKind, strings.Join(preview.ProxyAddresses, ", "))
+			fmt.Fprintln(stdout, preview.CandidateYAML)
+		}
+		return 0
+	}
 	if command == "verify" {
 		if *contentID != "" || *wait {
 			fmt.Fprintln(stderr, "proxy verify does not accept --content-id or --wait")
@@ -370,12 +435,16 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		return 0
 	}
-	if command != "start" && command != "stop" {
-		fmt.Fprintln(stderr, "usage: submux-runtime proxy [start|stop|verify]")
+	if command != "apply" && command != "start" && command != "stop" {
+		fmt.Fprintln(stderr, "usage: submux-runtime proxy [apply|preview|start|stop|verify]")
 		return 2
 	}
-	if command == "stop" && *contentID != "" {
-		fmt.Fprintln(stderr, "proxy stop does not accept --content-id")
+	if command == "apply" && *contentID == "" {
+		fmt.Fprintln(stderr, "proxy apply requires --content-id")
+		return 2
+	}
+	if command != "apply" && *contentID != "" {
+		fmt.Fprintf(stderr, "proxy %s does not accept --content-id\n", command)
 		return 2
 	}
 	snapshot, err := client.Observe(context.Background())
@@ -385,7 +454,7 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	action := runtimeapi.Action{Kind: runtimeapi.ActionStartProxy}
 	if command == "stop" {
 		action.Kind = runtimeapi.ActionStopProxy
-	} else if *contentID != "" {
+	} else if command == "apply" {
 		action.Kind = runtimeapi.ActionApplyImportedConfig
 		action.Params.ContentID = *contentID
 	}

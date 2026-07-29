@@ -1,6 +1,8 @@
 package runtimestate
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -134,5 +136,58 @@ func TestOperationStageAndCrashRecovery(t *testing.T) {
 	}
 	if recovered.State != runtimeapi.OperationOutcomeUnknown || recovered.Cancellable {
 		t.Fatalf("recovered operation = %#v", recovered)
+	}
+}
+
+func TestPreparedConfigurationRemainsStoppedUntilExplicitStart(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
+	now := time.Now().UTC()
+	body := []byte("proxies: []\n")
+	digest := sha256.Sum256(body)
+	content, err := store.UploadImport(
+		peer,
+		"text/yaml",
+		int64(len(body)),
+		hex.EncodeToString(digest[:]),
+		body,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("upload Runtime import: %v", err)
+	}
+	operation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+		RequestID:  "prepare-config",
+		IfRevision: 1,
+		Action: runtimeapi.Action{
+			Kind:   runtimeapi.ActionApplyImportedConfig,
+			Params: runtimeapi.ActionParams{ContentID: content.ID},
+		},
+	}, 4, now)
+	if err != nil {
+		t.Fatalf("submit prepare operation: %v", err)
+	}
+	if _, found, err := store.BeginNextOperation(now); err != nil || !found {
+		t.Fatalf("begin prepare operation: found=%v err=%v", found, err)
+	}
+	if err := store.CompleteOperation(
+		operation.ID,
+		runtimeapi.OperationSucceeded,
+		&runtimeapi.OperationResult{ConfigRevision: operation.ID, Verified: false},
+		nil,
+		now,
+	); err != nil {
+		t.Fatalf("complete prepare operation: %v", err)
+	}
+	snapshot, err := store.Observe("test", now)
+	if err != nil {
+		t.Fatalf("observe prepared Runtime: %v", err)
+	}
+	if snapshot.Mihomo.State != "stopped" || snapshot.RunMode != "explicit" {
+		t.Fatalf("prepared Runtime snapshot = %#v", snapshot)
 	}
 }

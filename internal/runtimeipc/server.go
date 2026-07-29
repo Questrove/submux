@@ -22,6 +22,7 @@ type Observer interface {
 
 type Operator interface {
 	UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error)
+	PreviewCandidate(context.Context, runtimeapi.PeerIdentity, runtimeapi.PreviewCandidateRequest) (runtimeapi.CandidatePreview, error)
 	Execute(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error)
 	GetOperation(context.Context, string) (runtimeapi.Operation, error)
 	CancelOperation(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CancelOperationRequest) (runtimeapi.Operation, bool, error)
@@ -29,9 +30,10 @@ type Operator interface {
 }
 
 type Server struct {
-	observer   Observer
-	operator   Operator
-	authorizer Authorizer
+	observer       Observer
+	operator       Operator
+	authorizer     Authorizer
+	runtimeVersion string
 }
 
 type peerContextValue struct {
@@ -49,7 +51,16 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		return nil, errors.New("Runtime authorizer is required")
 	}
 	operator, _ := observer.(Operator)
-	return &Server{observer: observer, operator: operator, authorizer: authorizer}, nil
+	runtimeVersion := ""
+	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
+		runtimeVersion = provider.RuntimeVersion()
+	}
+	return &Server{
+		observer:       observer,
+		operator:       operator,
+		authorizer:     authorizer,
+		runtimeVersion: runtimeVersion,
+	}, nil
 }
 
 func (s *Server) Serve(ctx context.Context, listener LocalListener) error {
@@ -100,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/snapshot", s.handleSnapshot)
 	mux.HandleFunc("/v1/imports", s.handleImport)
+	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
 	mux.HandleFunc("/v1/operations", s.handleCreateOperation)
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
 	mux.HandleFunc("/v1/proxy/verify", s.handleProxyVerification)
@@ -142,7 +154,7 @@ func (s *Server) handleSnapshot(writer http.ResponseWriter, request *http.Reques
 }
 
 func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request) {
-	requestID, _, ok := s.validateCommon(writer, request)
+	requestID, clientVersion, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -161,6 +173,9 @@ func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request)
 	}
 	if s.operator == nil {
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation service is unavailable", true)
+		return
+	}
+	if !s.validateWriteCompatibility(writer, request, clientVersion) {
 		return
 	}
 	size, err := strconv.ParseInt(request.Header.Get(HeaderContentSize), 10, 64)
@@ -197,6 +212,47 @@ func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request)
 	s.writeJSON(writer, http.StatusCreated, content)
 }
 
+func (s *Server) handleCandidatePreview(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime candidate preview only accepts POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime candidate preview does not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime candidate preview is unavailable", true)
+		return
+	}
+	var previewRequest runtimeapi.PreviewCandidateRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &previewRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	if !strings.HasPrefix(previewRequest.ContentID, "content_") ||
+		!validIdentifier(previewRequest.ContentID, len("content_")+64) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime candidate preview request is invalid", false)
+		return
+	}
+	preview, err := s.operator.PreviewCandidate(request.Context(), peer, previewRequest)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, preview)
+}
+
 func (s *Server) handleCreateOperation(writer http.ResponseWriter, request *http.Request) {
 	requestID, clientVersion, ok := s.validateCommon(writer, request)
 	if !ok {
@@ -219,6 +275,9 @@ func (s *Server) handleCreateOperation(writer http.ResponseWriter, request *http
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation service is unavailable", true)
 		return
 	}
+	if !s.validateWriteCompatibility(writer, request, clientVersion) {
+		return
+	}
 	var operationRequest runtimeapi.CreateOperationRequest
 	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &operationRequest); err != nil {
 		s.writeDecodeError(writer, request, err)
@@ -238,7 +297,7 @@ func (s *Server) handleCreateOperation(writer http.ResponseWriter, request *http
 }
 
 func (s *Server) handleOperation(writer http.ResponseWriter, request *http.Request) {
-	requestID, _, ok := s.validateCommon(writer, request)
+	requestID, clientVersion, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -272,6 +331,9 @@ func (s *Server) handleOperation(writer http.ResponseWriter, request *http.Reque
 	case len(parts) == 2 && parts[1] == "cancel" && request.Method == http.MethodPost:
 		if request.URL.RawQuery != "" {
 			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime cancellation query is invalid", false)
+			return
+		}
+		if !s.validateWriteCompatibility(writer, request, clientVersion) {
 			return
 		}
 		var cancellation runtimeapi.CancelOperationRequest
@@ -340,6 +402,25 @@ func (s *Server) validateCommon(writer http.ResponseWriter, request *http.Reques
 	return requestID, clientVersion, true
 }
 
+func (s *Server) validateWriteCompatibility(
+	writer http.ResponseWriter,
+	request *http.Request,
+	clientVersion string,
+) bool {
+	if s.runtimeVersion == "" || clientVersion == s.runtimeVersion {
+		return true
+	}
+	s.writeError(
+		writer,
+		request,
+		http.StatusUpgradeRequired,
+		runtimeapi.ErrorProtocolUnsupported,
+		"Runtime client version is incompatible; restart or update the client before modifying state",
+		false,
+	)
+	return false
+}
+
 func (s *Server) authenticatedPeer(writer http.ResponseWriter, request *http.Request) (runtimeapi.PeerIdentity, bool) {
 	peerValue, ok := request.Context().Value(peerContextKey{}).(peerContextValue)
 	if !ok || peerValue.err != nil {
@@ -393,6 +474,35 @@ func (s *Server) writeOperationError(writer http.ResponseWriter, request *http.R
 	default:
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation state is temporarily unavailable", true)
 	}
+}
+
+func (s *Server) writeImmediateError(writer http.ResponseWriter, request *http.Request, err error) {
+	var exposed interface {
+		ProtocolCode() string
+		ProtocolMessage() string
+		ProtocolRetryable() bool
+	}
+	if !errors.As(err, &exposed) {
+		s.writeOperationError(writer, request, err)
+		return
+	}
+	status := http.StatusBadRequest
+	switch exposed.ProtocolCode() {
+	case runtimeapi.ErrorServiceUnavailable:
+		status = http.StatusServiceUnavailable
+	case runtimeapi.ErrorUnauthorized:
+		status = http.StatusForbidden
+	case runtimeapi.ErrorProtocolUnsupported:
+		status = http.StatusUpgradeRequired
+	}
+	s.writeError(
+		writer,
+		request,
+		status,
+		exposed.ProtocolCode(),
+		exposed.ProtocolMessage(),
+		exposed.ProtocolRetryable(),
+	)
 }
 
 func (s *Server) writeJSON(writer http.ResponseWriter, status int, value any) {

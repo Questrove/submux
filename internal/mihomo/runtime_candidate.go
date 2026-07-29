@@ -13,6 +13,39 @@ import (
 
 const DefaultExplicitProxyPort = 7890
 
+var explicitRuntimeOwnedFields = []string{
+	"mixed-port",
+	"port",
+	"socks-port",
+	"redir-port",
+	"tproxy-port",
+	"allow-lan",
+	"bind-address",
+	"authentication",
+	"skip-auth-prefixes",
+	"lan-allowed-ips",
+	"lan-disallowed-ips",
+	"listeners",
+	"external-controller",
+	"external-controller-unix",
+	"external-controller-pipe",
+	"external-controller-tls",
+	"external-controller-cors",
+	"external-doh-server",
+	"secret",
+	"external-ui",
+	"external-ui-name",
+	"external-ui-url",
+	"tls",
+	"geox-url",
+	"geo-auto-update",
+	"geo-update-interval",
+	"interface-name",
+	"routing-mark",
+	"tun",
+	"dns.listen",
+}
+
 type ExplicitCandidateBuilder struct {
 	Port            int
 	ControlEndpoint string
@@ -53,37 +86,10 @@ func (b ExplicitCandidateBuilder) BuildCandidate(source []byte) ([]byte, error) 
 		return nil, err
 	}
 
-	for _, key := range []string{
-		"mixed-port",
-		"port",
-		"socks-port",
-		"redir-port",
-		"tproxy-port",
-		"allow-lan",
-		"bind-address",
-		"authentication",
-		"skip-auth-prefixes",
-		"lan-allowed-ips",
-		"lan-disallowed-ips",
-		"listeners",
-		"external-controller",
-		"external-controller-unix",
-		"external-controller-pipe",
-		"external-controller-tls",
-		"external-controller-cors",
-		"external-doh-server",
-		"secret",
-		"external-ui",
-		"external-ui-name",
-		"external-ui-url",
-		"tls",
-		"geox-url",
-		"geo-auto-update",
-		"geo-update-interval",
-		"interface-name",
-		"routing-mark",
-		"tun",
-	} {
+	for _, key := range explicitRuntimeOwnedFields {
+		if strings.Contains(key, ".") {
+			continue
+		}
 		removeMappingKey(root, key)
 	}
 	if dns := mappingValue(root, "dns"); dns != nil && dns.Kind == yaml.MappingNode {
@@ -118,6 +124,10 @@ func (b ExplicitCandidateBuilder) BuildCandidate(source []byte) ([]byte, error) 
 		return nil, fmt.Errorf("encode Runtime-owned Mihomo configuration: %w", err)
 	}
 	return candidate, nil
+}
+
+func ExplicitRuntimeOwnedFields() []string {
+	return append([]string(nil), explicitRuntimeOwnedFields...)
 }
 
 func prependRuntimeHealthRules(root *yaml.Node) error {

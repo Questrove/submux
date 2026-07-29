@@ -90,6 +90,14 @@ func TestMihomoExecutorWithOfficialBinary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload Mihomo integration config: %v", err)
 	}
+	preview, err := executor.PreviewCandidate(
+		context.Background(),
+		peer,
+		runtimeapi.PreviewCandidateRequest{ContentID: content.ID},
+	)
+	if err != nil || !preview.Validated || len(preview.ProxyAddresses) != 2 {
+		t.Fatalf("preview Mihomo integration config: preview=%#v err=%v", preview, err)
+	}
 	result, err := executor.Execute(
 		context.Background(),
 		runtimeapi.Operation{
@@ -103,10 +111,21 @@ func TestMihomoExecutorWithOfficialBinary(t *testing.T) {
 		func(string, int, bool) error { return nil },
 	)
 	if err != nil {
-		t.Fatalf("apply and verify Mihomo integration config: %v", err)
+		t.Fatalf("prepare Mihomo integration config: %v", err)
 	}
-	if result == nil || !result.Verified || len(result.ProxyAddresses) != 2 {
+	if result == nil || result.Verified || len(result.ProxyAddresses) != 2 {
 		t.Fatalf("Mihomo integration result = %#v", result)
+	}
+	if running, err := process.IsRunning(context.Background()); err != nil || running {
+		t.Fatalf("first imported config started Mihomo: running=%v err=%v", running, err)
+	}
+	result, err = executor.Execute(
+		context.Background(),
+		runtimeapi.Operation{Action: runtimeapi.Action{Kind: runtimeapi.ActionStartProxy}},
+		func(string, int, bool) error { return nil },
+	)
+	if err != nil || result == nil || !result.Verified {
+		t.Fatalf("start and verify Mihomo integration config: result=%#v err=%v", result, err)
 	}
 	verification, err := executor.Verify(context.Background())
 	if err != nil || !verification.Available {
