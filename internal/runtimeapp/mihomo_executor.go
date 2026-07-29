@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"submux/internal/mihomo"
@@ -29,7 +30,10 @@ type MihomoExecutor struct {
 	Platform        string
 	Verifier        mihomo.RuntimeVerifier
 	Sources         *runtimesource.Manager
+	Network         FailOpenController
 	Now             func() time.Time
+
+	lifecycleMu sync.Mutex
 }
 
 func (e *MihomoExecutor) PreviewCandidate(
@@ -37,7 +41,12 @@ func (e *MihomoExecutor) PreviewCandidate(
 	peer runtimeapi.PeerIdentity,
 	request runtimeapi.PreviewCandidateRequest,
 ) (runtimeapi.CandidatePreview, error) {
-	if e == nil || e.State == nil || e.Core == nil || e.Process == nil {
+	if e == nil {
+		return runtimeapi.CandidatePreview{}, errors.New("Mihomo Runtime previewer is incomplete")
+	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+	if e.State == nil || e.Core == nil || e.Process == nil {
 		return runtimeapi.CandidatePreview{}, errors.New("Mihomo Runtime previewer is incomplete")
 	}
 	body, contentID, sourceDigest, err := e.previewSource(peer, request)
@@ -103,7 +112,12 @@ func (e *MihomoExecutor) Execute(
 	operation runtimeapi.Operation,
 	report StageReporter,
 ) (*runtimeapi.OperationResult, error) {
-	if e == nil || e.State == nil || e.Core == nil || e.Process == nil || e.Verifier == nil {
+	if e == nil {
+		return nil, errors.New("Mihomo Runtime executor is incomplete")
+	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+	if e.State == nil || e.Core == nil || e.Process == nil || e.Verifier == nil {
 		return nil, errors.New("Mihomo Runtime executor is incomplete")
 	}
 	switch operation.Action.Kind {
@@ -140,6 +154,11 @@ func (e *MihomoExecutor) Execute(
 }
 
 func (e *MihomoExecutor) Verify(ctx context.Context) (runtimeapi.ProxyVerification, error) {
+	if e == nil {
+		return runtimeapi.ProxyVerification{}, errors.New("Mihomo Runtime verifier is unavailable")
+	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
 	verification := runtimeapi.ProxyVerification{CheckedAt: e.now()}
 	listeners, err := e.currentListeners()
 	if err != nil {
@@ -156,6 +175,55 @@ func (e *MihomoExecutor) Verify(ctx context.Context) (runtimeapi.ProxyVerificati
 	}
 	verification.Available = true
 	return verification, nil
+}
+
+func (e *MihomoExecutor) RestoreLastGood(ctx context.Context) error {
+	if e == nil {
+		return errors.New("Mihomo Runtime executor is unavailable")
+	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+	_, err := e.start(ctx, func(string, int, bool) error { return nil })
+	return err
+}
+
+func (e *MihomoExecutor) ReconcileCoreVersion(context.Context) error {
+	if e == nil || e.State == nil || e.Core == nil {
+		return errors.New("Mihomo Runtime executor is unavailable")
+	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+	status, err := e.Core.Status()
+	if err != nil {
+		return err
+	}
+	if !status.Installed {
+		return nil
+	}
+	if _, err := e.Core.CurrentBinaryPath(); err != nil {
+		return err
+	}
+	_, err = e.State.ObserveMihomoCoreVersion(status.Version, e.now())
+	return err
+}
+
+func (e *MihomoExecutor) FailOpen(ctx context.Context) error {
+	if e == nil {
+		return errors.New("Mihomo Runtime executor is unavailable")
+	}
+	if e.Network == nil {
+		// Explicit-proxy mode has no system network takeover. Once Mihomo has
+		// exited, applications naturally use their direct path.
+		return nil
+	}
+	return e.Network.FailOpen(ctx)
+}
+
+func (e *MihomoExecutor) ExitEvents() <-chan runtimeprocess.ExitEvent {
+	if e == nil || e.Process == nil {
+		return nil
+	}
+	return e.Process.ExitEvents()
 }
 
 func (e *MihomoExecutor) applyImport(
@@ -915,6 +983,9 @@ func (e *MihomoExecutor) currentCore() (string, string, error) {
 	}
 	path, err := e.Core.CurrentBinaryPath()
 	if err != nil {
+		return "", "", err
+	}
+	if _, err := e.State.ObserveMihomoCoreVersion(status.Version, e.now()); err != nil {
 		return "", "", err
 	}
 	return path, status.Version, nil

@@ -551,13 +551,28 @@ func (m Model) View() tea.View {
 	runtimeVersion := valueOr(m.snapshot.Runtime.Version, "未知")
 	serviceState := valueOr(m.snapshot.Runtime.ServiceState, "不可用")
 	mihomoState := valueOr(m.snapshot.Mihomo.State, "未知")
+	mihomoDesired := valueOr(m.snapshot.Mihomo.DesiredState, "未设置")
+	mihomoRecovery := valueOr(m.snapshot.Mihomo.Recovery, "未知")
+	nextRestart := "无"
+	if m.snapshot.Mihomo.NextRestartAt != nil {
+		nextRestart = m.snapshot.Mihomo.NextRestartAt.Local().Format(time.RFC3339)
+	}
 	runMode := valueOr(m.snapshot.RunMode, "未配置")
 	lines := []string{
 		titleStyle.Render("Submux Runtime"),
 		"",
 		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("Runtime"), runtimeVersion, labelStyle.Render("服务"), serviceState),
-		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("Mihomo"), mihomoState, labelStyle.Render("运行方式"), runMode),
+		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("Mihomo 实际"), mihomoState, labelStyle.Render("期望"), mihomoDesired),
+		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("崩溃恢复"), mihomoRecovery, labelStyle.Render("运行方式"), runMode),
+		fmt.Sprintf("%s %d  %s %s", labelStyle.Render("重试次数"), m.snapshot.Mihomo.CrashAttempts, labelStyle.Render("下次重试"), nextRestart),
 		fmt.Sprintf("%s %d  %s %d", labelStyle.Render("Revision"), m.snapshot.Revision, labelStyle.Render("队列"), m.snapshot.Operations.Queued),
+	}
+	if m.snapshot.Mihomo.Fault != nil {
+		lines = append(lines, errorStyle.Render(fmt.Sprintf(
+			"Mihomo 故障：%s · %s",
+			m.snapshot.Mihomo.Fault.Code,
+			m.snapshot.Mihomo.Fault.Message,
+		)))
 	}
 	if m.preview.CandidateSHA256 != "" {
 		lines = append(lines,

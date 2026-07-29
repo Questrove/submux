@@ -30,6 +30,11 @@ type ScheduledActionProvider interface {
 	DueActions(time.Time) ([]runtimeapi.Action, error)
 }
 
+type RecoveryService interface {
+	RecoverStartup(context.Context) error
+	Run(context.Context) error
+}
+
 type PublicError struct {
 	Code      string
 	Message   string
@@ -66,6 +71,7 @@ func (e *PublicError) ProtocolRetryable() bool {
 type Coordinator struct {
 	State         *runtimestate.Store
 	Executor      ActionExecutor
+	Recovery      RecoveryService
 	Version       string
 	Now           func() time.Time
 	QueueCapacity int
@@ -257,6 +263,17 @@ func (c *Coordinator) Run(ctx context.Context) error {
 	if _, err := c.State.GCOperationHistory(c.now()); err != nil {
 		return fmt.Errorf("clean Runtime operation history: %w", err)
 	}
+	var recoveryResult <-chan error
+	if c.Recovery != nil {
+		if err := c.Recovery.RecoverStartup(ctx); err != nil {
+			return fmt.Errorf("recover Mihomo startup state: %w", err)
+		}
+		result := make(chan error, 1)
+		recoveryResult = result
+		go func() {
+			result <- c.Recovery.Run(ctx)
+		}()
+	}
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -278,6 +295,11 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
+		case err := <-recoveryResult:
+			if err != nil {
+				return fmt.Errorf("supervise Mihomo recovery: %w", err)
+			}
+			recoveryResult = nil
 		case <-c.wake:
 		case now := <-ticker.C:
 			if err := c.State.GCExpiredImports(now); err != nil {

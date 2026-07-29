@@ -84,6 +84,27 @@ func TestGUIExposesMultipleSourceManagementControls(t *testing.T) {
 	}
 }
 
+func TestGUIRendersMihomoDesiredActualAndRecoveryState(t *testing.T) {
+	page := readGUIFile(t, "ui", "index.html")
+	if !strings.Contains(page, `id="mihomo-state"`) ||
+		!strings.Contains(page, `id="mihomo-recovery"`) {
+		t.Fatal("GUI Mihomo lifecycle status controls are missing")
+	}
+	script := readGUIFile(t, "ui", "app.js")
+	for _, field := range []string{
+		"snapshot.mihomo?.desired_state",
+		"snapshot.mihomo?.state",
+		"snapshot.mihomo?.recovery",
+		"snapshot.mihomo?.crash_attempts",
+		"snapshot.mihomo?.next_restart_at",
+		"snapshot.mihomo?.fault",
+	} {
+		if !strings.Contains(script, field) {
+			t.Fatalf("GUI does not render Mihomo lifecycle field %q", field)
+		}
+	}
+}
+
 func TestGUIHasNoCloseHookThatStopsRuntime(t *testing.T) {
 	script := readGUIFile(t, "ui", "app.js")
 	for _, forbidden := range []string{

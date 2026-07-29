@@ -21,9 +21,21 @@ type Process struct {
 	DataDir    string
 	SafePaths  []string
 
-	mu   sync.Mutex
-	cmd  *exec.Cmd
-	done chan error
+	mu            sync.Mutex
+	cmd           *exec.Cmd
+	done          chan error
+	exits         chan ExitEvent
+	runID         uint64
+	stoppingRunID uint64
+	startedAt     time.Time
+}
+
+type ExitEvent struct {
+	RunID       uint64
+	StartedAt   time.Time
+	ExitedAt    time.Time
+	Err         error
+	Intentional bool
 }
 
 func (p *Process) IsRunning(context.Context) (bool, error) {
@@ -49,6 +61,7 @@ func (p *Process) Start(ctx context.Context) error {
 	if p.cmd != nil {
 		return nil
 	}
+	p.ensureExitChannelLocked()
 	if err := validateManagedExecutable(p.BinaryPath); err != nil {
 		return err
 	}
@@ -72,20 +85,63 @@ func (p *Process) Start(ctx context.Context) error {
 		return fmt.Errorf("start Mihomo: %w", err)
 	}
 	done := make(chan error, 1)
+	p.runID++
+	runID := p.runID
+	startedAt := time.Now().UTC()
 	p.cmd = command
 	p.done = done
+	p.startedAt = startedAt
 	go func() {
 		waitErr := command.Wait()
 		done <- waitErr
 		close(done)
-		p.mu.Lock()
-		if p.cmd == command {
-			p.cmd = nil
-			p.done = nil
-		}
-		p.mu.Unlock()
+		p.finishRun(command, runID, startedAt, waitErr, time.Now().UTC())
 	}()
 	return nil
+}
+
+func (p *Process) finishRun(
+	command *exec.Cmd,
+	runID uint64,
+	startedAt time.Time,
+	waitErr error,
+	exitedAt time.Time,
+) {
+	p.mu.Lock()
+	intentional := p.stoppingRunID == runID
+	if p.cmd == command {
+		p.cmd = nil
+		p.done = nil
+	}
+	if p.stoppingRunID == runID {
+		p.stoppingRunID = 0
+	}
+	p.ensureExitChannelLocked()
+	exits := p.exits
+	p.mu.Unlock()
+	exits <- ExitEvent{
+		RunID:       runID,
+		StartedAt:   startedAt,
+		ExitedAt:    exitedAt,
+		Err:         waitErr,
+		Intentional: intentional,
+	}
+}
+
+func (p *Process) ExitEvents() <-chan ExitEvent {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ensureExitChannelLocked()
+	return p.exits
+}
+
+func (p *Process) ensureExitChannelLocked() {
+	if p.exits == nil {
+		p.exits = make(chan ExitEvent, 64)
+	}
 }
 
 func (p *Process) refreshLocked() {
@@ -105,8 +161,12 @@ func (p *Process) Stop(ctx context.Context) error {
 		return nil
 	}
 	p.mu.Lock()
+	p.refreshLocked()
 	command := p.cmd
 	done := p.done
+	if command != nil {
+		p.stoppingRunID = p.runID
+	}
 	p.mu.Unlock()
 	if command == nil {
 		return nil

@@ -23,10 +23,16 @@ type commandObserver struct{}
 
 func (commandObserver) Observe(_ context.Context, _ runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
 	return runtimeapi.Snapshot{
-		ProtocolVersion:   runtimeapi.ProtocolVersion,
-		Revision:          11,
-		Runtime:           runtimeapi.RuntimeStatus{Version: "v1.2.3", ServiceState: "running"},
-		Mihomo:            runtimeapi.MihomoStatus{State: "not_installed", Recovery: "idle"},
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        11,
+		Runtime:         runtimeapi.RuntimeStatus{Version: "v1.2.3", ServiceState: "running"},
+		Mihomo: runtimeapi.MihomoStatus{
+			DesiredState:  runtimeapi.MihomoDesiredRunning,
+			State:         "stopped",
+			Recovery:      runtimeapi.MihomoRecoveryNeedsAttention,
+			CrashAttempts: 3,
+			Fault:         &runtimeapi.Fault{Code: "mihomo_restart_limit", Message: "restart limit reached"},
+		},
 		RunMode:           "unconfigured",
 		LatestEventCursor: 12,
 		ObservedAt:        time.Now().UTC(),
@@ -214,6 +220,16 @@ func TestStatusJSONUsesLocalIPC(t *testing.T) {
 	if stderr.Len() != 0 {
 		cancel()
 		t.Fatalf("status stderr = %s", stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = run([]string{"status", "--endpoint", endpoint}, &stdout, &stderr)
+	if exitCode != 0 ||
+		!strings.Contains(stdout.String(), "Mihomo desired: running; actual: stopped; recovery: needs_attention") ||
+		!strings.Contains(stdout.String(), "Mihomo crash attempts: 3") ||
+		!strings.Contains(stdout.String(), "Mihomo fault: mihomo_restart_limit") {
+		cancel()
+		t.Fatalf("human Runtime status exit=%d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
 	}
 
 	cancel()

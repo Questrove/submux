@@ -24,9 +24,19 @@ var (
 	installationIDKey        = []byte("installation_id")
 	createdAtKey             = []byte("created_at")
 	mihomoStateKey           = []byte("mihomo_state")
+	mihomoDesiredStateKey    = []byte("mihomo_desired_state")
+	mihomoRecoveryStateKey   = []byte("mihomo_recovery_state")
+	mihomoCrashAttemptsKey   = []byte("mihomo_crash_attempts")
+	mihomoCrashWindowKey     = []byte("mihomo_crash_window_started_at")
+	mihomoNextRestartKey     = []byte("mihomo_next_restart_at")
+	mihomoStableSinceKey     = []byte("mihomo_stable_since")
+	mihomoFaultCodeKey       = []byte("mihomo_fault_code")
+	mihomoFaultMessageKey    = []byte("mihomo_fault_message")
+	mihomoCoreVersionKey     = []byte("mihomo_core_version")
 	runModeKey               = []byte("run_mode")
 	currentOperationKey      = []byte("current_operation")
 	currentConfigRevisionKey = []byte("current_config_revision")
+	currentConfigSHA256Key   = []byte("current_config_sha256")
 )
 
 type Store struct {
@@ -81,9 +91,9 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 		if err != nil {
 			return err
 		}
-		mihomoState := string(metadata.Get(mihomoStateKey))
-		if mihomoState == "" {
-			mihomoState = "not_installed"
+		mihomo, err := mihomoLifecycleSummary(metadata)
+		if err != nil {
+			return err
 		}
 		runMode := string(metadata.Get(runModeKey))
 		if runMode == "" {
@@ -112,10 +122,7 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 				Version:      runtimeVersion,
 				ServiceState: "running",
 			},
-			Mihomo: runtimeapi.MihomoStatus{
-				State:    mihomoState,
-				Recovery: "idle",
-			},
+			Mihomo:            mihomo,
 			RunMode:           runMode,
 			Sources:           sources,
 			Resources:         resources,
@@ -184,6 +191,21 @@ func (s *Store) initialize() error {
 		}
 		if metadata.Get(mihomoStateKey) == nil {
 			if err := metadata.Put(mihomoStateKey, []byte("not_installed")); err != nil {
+				return err
+			}
+		}
+		if metadata.Get(mihomoDesiredStateKey) == nil {
+			if err := metadata.Put(mihomoDesiredStateKey, []byte(runtimeapi.MihomoDesiredUnset)); err != nil {
+				return err
+			}
+		}
+		if metadata.Get(mihomoRecoveryStateKey) == nil {
+			if err := metadata.Put(mihomoRecoveryStateKey, []byte(runtimeapi.MihomoRecoveryIdle)); err != nil {
+				return err
+			}
+		}
+		if metadata.Get(mihomoCrashAttemptsKey) == nil {
+			if err := metadata.Put(mihomoCrashAttemptsKey, encodeUint64(0)); err != nil {
 				return err
 			}
 		}

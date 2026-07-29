@@ -49,9 +49,13 @@ type Fault struct {
 }
 
 type MihomoStatus struct {
-	Version  string `json:"version,omitempty"`
-	State    string `json:"state"`
-	Recovery string `json:"recovery"`
+	Version       string     `json:"version,omitempty"`
+	DesiredState  string     `json:"desired_state"`
+	State         string     `json:"state"`
+	Recovery      string     `json:"recovery"`
+	CrashAttempts int        `json:"crash_attempts,omitempty"`
+	NextRestartAt *time.Time `json:"next_restart_at,omitempty"`
+	Fault         *Fault     `json:"fault,omitempty"`
 }
 
 type SourceStatus struct {
@@ -305,6 +309,20 @@ const (
 	OperationFailed         = "failed"
 	OperationCancelled      = "cancelled"
 	OperationOutcomeUnknown = "outcome_unknown"
+)
+
+const (
+	MihomoDesiredUnset   = "unset"
+	MihomoDesiredRunning = "running"
+	MihomoDesiredStopped = "stopped"
+
+	MihomoRecoveryIdle            = "idle"
+	MihomoRecoveryStartup         = "startup_recovery"
+	MihomoRecoveryWaiting         = "waiting_to_restart"
+	MihomoRecoveryRestarting      = "restarting"
+	MihomoRecoveryMonitoring      = "monitoring_stability"
+	MihomoRecoveryNeedsAttention  = "needs_attention"
+	MihomoRecoveryFailOpenUnknown = "fail_open_unknown"
 )
 
 const (

@@ -353,8 +353,9 @@ func (s *Store) CompleteOperation(
 			}
 		}
 		if state == runtimeapi.OperationSucceeded {
+			previousConfigSHA256 := string(metadata.Get(currentConfigSHA256Key))
 			switch operation.Action.Kind {
-			case runtimeapi.ActionApplyImportedConfig, runtimeapi.ActionApplySource:
+			case runtimeapi.ActionApplyImportedConfig, runtimeapi.ActionApplySource, runtimeapi.ActionSwitchSource:
 				mihomoState := "stopped"
 				if result != nil && result.Verified {
 					mihomoState = "running"
@@ -366,14 +367,14 @@ func (s *Store) CompleteOperation(
 					return err
 				}
 			case runtimeapi.ActionStartProxy:
-				if err := metadata.Put(mihomoStateKey, []byte("running")); err != nil {
+				if err := recordExplicitMihomoStart(metadata); err != nil {
 					return err
 				}
 				if err := metadata.Put(runModeKey, []byte("explicit")); err != nil {
 					return err
 				}
 			case runtimeapi.ActionStopProxy:
-				if err := metadata.Put(mihomoStateKey, []byte("stopped")); err != nil {
+				if err := recordExplicitMihomoStop(metadata); err != nil {
 					return err
 				}
 				if err := metadata.Put(runModeKey, []byte("explicit")); err != nil {
@@ -382,6 +383,18 @@ func (s *Store) CompleteOperation(
 			}
 			if result != nil && result.ConfigRevision != "" {
 				if err := metadata.Put(currentConfigRevisionKey, []byte(result.ConfigRevision)); err != nil {
+					return err
+				}
+			}
+			if result != nil && result.CandidateSHA256 != "" {
+				if err := metadata.Put(currentConfigSHA256Key, []byte(result.CandidateSHA256)); err != nil {
+					return err
+				}
+				if err := clearMihomoRecoveryForNewConfig(
+					metadata,
+					previousConfigSHA256,
+					result.CandidateSHA256,
+				); err != nil {
 					return err
 				}
 			}

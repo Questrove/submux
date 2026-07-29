@@ -16,6 +16,7 @@ const elements = {
   runtimeState: document.querySelector("#runtime-state"),
   runtimeVersion: document.querySelector("#runtime-version"),
   mihomoState: document.querySelector("#mihomo-state"),
+  mihomoRecovery: document.querySelector("#mihomo-recovery"),
   runMode: document.querySelector("#run-mode"),
   revision: document.querySelector("#revision"),
   queue: document.querySelector("#queue"),
@@ -146,7 +147,15 @@ function renderSnapshot(snapshot) {
   elements.runtimeState.textContent = snapshot.runtime?.service_state || "未知";
   elements.runtimeVersion.textContent = snapshot.runtime?.version || "未知版本";
   state.mihomoState = snapshot.mihomo?.state || "";
-  elements.mihomoState.textContent = state.mihomoState || "未知";
+  const desiredState = snapshot.mihomo?.desired_state || "未设置";
+  const recoveryState = snapshot.mihomo?.recovery || "未知";
+  const crashAttempts = snapshot.mihomo?.crash_attempts ?? 0;
+  const nextRestartAt = snapshot.mihomo?.next_restart_at || "无";
+  elements.mihomoState.textContent = `实际：${state.mihomoState || "未知"} · 期望：${desiredState}`;
+  const recoverySummary = `恢复：${recoveryState} · 重试：${crashAttempts} · 下次：${nextRestartAt}`;
+  elements.mihomoRecovery.textContent = snapshot.mihomo?.fault
+    ? `${recoverySummary} · ${snapshot.mihomo.fault.code}`
+    : recoverySummary;
   elements.runMode.textContent = `运行方式：${snapshot.run_mode || "未配置"}`;
   elements.revision.textContent = String(snapshot.revision ?? "—");
   elements.queue.textContent = `排队：${snapshot.operations?.queued ?? 0}`;

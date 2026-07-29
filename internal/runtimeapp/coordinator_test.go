@@ -23,6 +23,22 @@ type scheduledExecutor struct {
 	delivered bool
 }
 
+type blockingStartupRecovery struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (recovery *blockingStartupRecovery) RecoverStartup(context.Context) error {
+	close(recovery.started)
+	<-recovery.release
+	return nil
+}
+
+func (*blockingStartupRecovery) Run(ctx context.Context) error {
+	<-ctx.Done()
+	return nil
+}
+
 func (e *scheduledExecutor) DueActions(time.Time) ([]runtimeapi.Action, error) {
 	if e.delivered {
 		return nil, nil
@@ -272,6 +288,67 @@ func TestCoordinatorPersistsAndRunsDueSourceRefreshAsRuntimeCaller(t *testing.T)
 		t.Fatalf("scheduled operation = %#v", operation)
 	}
 	waitForOperationState(t, state, operation.ID, runtimeapi.OperationSucceeded)
+	cancel()
+	if err := <-result; err != nil {
+		t.Fatalf("stop Runtime coordinator: %v", err)
+	}
+}
+
+func TestCoordinatorCompletesStartupRecoveryBeforeDueRefresh(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	executed := make(chan struct{}, 1)
+	executor := &scheduledExecutor{
+		action: runtimeapi.Action{
+			Kind: runtimeapi.ActionRefreshSource,
+			Params: runtimeapi.ActionParams{
+				SourceID: "src_0123456789abcdef0123456789abcdef",
+			},
+		},
+	}
+	executor.execute = func(
+		context.Context,
+		runtimeapi.Operation,
+		StageReporter,
+	) (*runtimeapi.OperationResult, error) {
+		executed <- struct{}{}
+		return &runtimeapi.OperationResult{RefreshResult: "not_modified"}, nil
+	}
+	recovery := &blockingStartupRecovery{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	coordinator := &Coordinator{
+		State:    state,
+		Executor: executor,
+		Recovery: recovery,
+		Version:  "test",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- coordinator.Run(ctx) }()
+	select {
+	case <-recovery.started:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("Mihomo startup recovery did not start")
+	}
+	select {
+	case <-executed:
+		cancel()
+		t.Fatal("due source refresh ran before Mihomo startup recovery completed")
+	default:
+	}
+	close(recovery.release)
+	select {
+	case <-executed:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("due source refresh did not run after Mihomo startup recovery")
+	}
 	cancel()
 	if err := <-result; err != nil {
 		t.Fatalf("stop Runtime coordinator: %v", err)

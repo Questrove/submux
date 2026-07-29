@@ -107,12 +107,20 @@ func (f *fakeClient) VerifyProxy(context.Context) (runtimeapi.ProxyVerification,
 }
 
 func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
+	nextRestart := time.Date(2026, 7, 30, 12, 34, 56, 0, time.Local)
 	client := &fakeClient{snapshot: runtimeapi.Snapshot{
 		ProtocolVersion: runtimeapi.ProtocolVersion,
 		Revision:        7,
 		Runtime:         runtimeapi.RuntimeStatus{Version: "dev", ServiceState: "running"},
-		Mihomo:          runtimeapi.MihomoStatus{State: "stopped"},
-		RunMode:         "explicit",
+		Mihomo: runtimeapi.MihomoStatus{
+			DesiredState:  runtimeapi.MihomoDesiredRunning,
+			State:         "stopped",
+			Recovery:      runtimeapi.MihomoRecoveryNeedsAttention,
+			CrashAttempts: 3,
+			NextRestartAt: &nextRestart,
+			Fault:         &runtimeapi.Fault{Code: "mihomo_restart_limit", Message: "restart limit reached"},
+		},
+		RunMode: "explicit",
 	}}
 	model := New(t.Context(), client)
 	updated, command := model.Update(model.Init()())
@@ -200,7 +208,13 @@ func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
 	if client.verifyCalls != 1 || !model.verification.Available {
 		t.Fatalf("verification calls=%d value=%#v", client.verifyCalls, model.verification)
 	}
-	if !strings.Contains(model.View().Content, "Submux Runtime") {
+	if !strings.Contains(model.View().Content, "Submux Runtime") ||
+		!strings.Contains(model.View().Content, "Mihomo 实际") ||
+		!strings.Contains(model.View().Content, runtimeapi.MihomoDesiredRunning) ||
+		!strings.Contains(model.View().Content, runtimeapi.MihomoRecoveryNeedsAttention) ||
+		!strings.Contains(model.View().Content, "重试次数") ||
+		!strings.Contains(model.View().Content, nextRestart.Format(time.RFC3339)) ||
+		!strings.Contains(model.View().Content, "mihomo_restart_limit") {
 		t.Fatalf("view=%q", model.View().Content)
 	}
 }

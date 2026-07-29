@@ -200,9 +200,14 @@ func runServe(arguments []string, stderr io.Writer) int {
 		},
 		Validator: executor,
 	}
+	supervisor := &runtimeapp.MihomoSupervisor{
+		State:  state,
+		Target: executor,
+	}
 	coordinator := &runtimeapp.Coordinator{
 		State:         state,
 		Executor:      executor,
+		Recovery:      supervisor,
 		Version:       buildinfo.Current().Version,
 		QueueCapacity: runtimeapp.DefaultQueueCapacity,
 	}
@@ -282,7 +287,22 @@ func runStatus(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(stdout, "Runtime %s: %s\n", snapshot.Runtime.Version, snapshot.Runtime.ServiceState)
-	fmt.Fprintf(stdout, "Mihomo: %s\n", snapshot.Mihomo.State)
+	fmt.Fprintf(
+		stdout,
+		"Mihomo desired: %s; actual: %s; recovery: %s\n",
+		snapshot.Mihomo.DesiredState,
+		snapshot.Mihomo.State,
+		snapshot.Mihomo.Recovery,
+	)
+	if snapshot.Mihomo.CrashAttempts > 0 {
+		fmt.Fprintf(stdout, "Mihomo crash attempts: %d\n", snapshot.Mihomo.CrashAttempts)
+	}
+	if snapshot.Mihomo.NextRestartAt != nil {
+		fmt.Fprintf(stdout, "Mihomo next restart: %s\n", snapshot.Mihomo.NextRestartAt.Format(time.RFC3339))
+	}
+	if snapshot.Mihomo.Fault != nil {
+		fmt.Fprintf(stdout, "Mihomo fault: %s: %s\n", snapshot.Mihomo.Fault.Code, snapshot.Mihomo.Fault.Message)
+	}
 	fmt.Fprintf(stdout, "Revision: %d\n", snapshot.Revision)
 	fmt.Fprintf(stdout, "Latest event cursor: %d\n", snapshot.LatestEventCursor)
 	writeSourceStatus(stdout, snapshot.Sources)
@@ -1300,26 +1320,26 @@ func writeOperation(stdout io.Writer, asJSON bool, operation runtimeapi.Operatio
 	if asJSON {
 		_ = json.NewEncoder(stdout).Encode(runtimeapi.OperationResponse{Operation: operation})
 	} else {
-			fmt.Fprintf(stdout, "%s %s %s\n", operation.ID, operation.State, operation.Stage)
-			if operation.Result != nil {
-				if operation.Result.SourceID != "" {
-					switch {
-					case operation.Result.Deleted:
-						fmt.Fprintf(stdout, "source %s deleted\n", operation.Result.SourceID)
-					case operation.Result.PreviousSourceID != "":
-						fmt.Fprintf(stdout, "source %s -> %s", operation.Result.PreviousSourceID, operation.Result.SourceID)
-						if operation.Result.UsedCachedSource {
-							fmt.Fprint(stdout, " using cached validated revision")
-						}
-						fmt.Fprintln(stdout)
-					default:
-						fmt.Fprintf(stdout, "source %s: %s", operation.Result.SourceID, operation.Result.RefreshResult)
-						if operation.Result.RefreshRoute != "" {
-							fmt.Fprintf(stdout, " via %s", operation.Result.RefreshRoute)
-						}
-						fmt.Fprintln(stdout)
+		fmt.Fprintf(stdout, "%s %s %s\n", operation.ID, operation.State, operation.Stage)
+		if operation.Result != nil {
+			if operation.Result.SourceID != "" {
+				switch {
+				case operation.Result.Deleted:
+					fmt.Fprintf(stdout, "source %s deleted\n", operation.Result.SourceID)
+				case operation.Result.PreviousSourceID != "":
+					fmt.Fprintf(stdout, "source %s -> %s", operation.Result.PreviousSourceID, operation.Result.SourceID)
+					if operation.Result.UsedCachedSource {
+						fmt.Fprint(stdout, " using cached validated revision")
 					}
+					fmt.Fprintln(stdout)
+				default:
+					fmt.Fprintf(stdout, "source %s: %s", operation.Result.SourceID, operation.Result.RefreshResult)
+					if operation.Result.RefreshRoute != "" {
+						fmt.Fprintf(stdout, " via %s", operation.Result.RefreshRoute)
+					}
+					fmt.Fprintln(stdout)
 				}
+			}
 			if operation.Result.ResourceID != "" {
 				fmt.Fprintf(stdout, "resource %s: %s\n",
 					operation.Result.ResourceID,

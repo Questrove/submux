@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSanitizedEnvironmentRemovesMihomoPathExpansion(t *testing.T) {
@@ -76,5 +77,30 @@ func TestIsRunningRefreshesExitedProcess(t *testing.T) {
 	}
 	if running || process.cmd != nil || process.done != nil {
 		t.Fatalf("exited process remained running: running=%v cmd=%v done=%v", running, process.cmd, process.done)
+	}
+}
+
+func TestProcessExitEventDistinguishesIntentionalStop(t *testing.T) {
+	command := &exec.Cmd{}
+	process := &Process{
+		cmd:           command,
+		done:          make(chan error),
+		runID:         7,
+		stoppingRunID: 7,
+	}
+	started := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	exited := started.Add(time.Second)
+	waitErr := exec.ErrNotFound
+	process.finishRun(command, 7, started, waitErr, exited)
+	event := <-process.ExitEvents()
+	if event.RunID != 7 ||
+		!event.Intentional ||
+		!event.StartedAt.Equal(started) ||
+		!event.ExitedAt.Equal(exited) ||
+		event.Err != waitErr {
+		t.Fatalf("intentional process exit event=%#v", event)
+	}
+	if process.cmd != nil || process.done != nil || process.stoppingRunID != 0 {
+		t.Fatalf("intentional process exit did not clear state: %#v", process)
 	}
 }
