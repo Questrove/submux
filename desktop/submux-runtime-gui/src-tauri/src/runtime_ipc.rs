@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const PROTOCOL_VERSION: u64 = 1;
 const MAX_RESPONSE_BYTES: usize = 12 << 20;
 const MAX_IMPORT_BYTES: usize = 8 << 20;
+const MAX_SOURCE_DRAFT_BYTES: usize = 512 << 10;
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 300_000;
 
 #[cfg(target_os = "windows")]
@@ -117,6 +118,51 @@ impl RuntimeBridge {
         )
     }
 
+    pub fn add_remote_source(&self, draft_json: &[u8]) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        if draft_json.is_empty() || draft_json.len() > MAX_SOURCE_DRAFT_BYTES {
+            return Err(BridgeError::request(
+                "Remote source draft is empty or exceeds the Runtime limit",
+            ));
+        }
+        let digest = hex::encode(Sha256::digest(draft_json));
+        let size = draft_json.len().to_string();
+        let imported = self.call_json(
+            "POST",
+            "/v1/imports",
+            Some("application/vnd.submux.runtime-source+json"),
+            &[
+                ("X-Submux-Content-Size", size.as_str()),
+                ("X-Submux-Content-SHA256", digest.as_str()),
+            ],
+            draft_json,
+            None,
+        )?;
+        let content_id = imported
+            .get("content_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::service("Runtime source upload response is invalid"))?;
+        self.execute_action_with_params("source.add_remote", json!({ "content_id": content_id }))
+    }
+
+    pub fn refresh_source(&self, source_id: &str, route: &str) -> Result<Value, BridgeError> {
+        validate_source_id(source_id)?;
+        if !matches!(route, "" | "direct" | "mihomo") {
+            return Err(BridgeError::request(
+                "Remote source route must be direct or mihomo",
+            ));
+        }
+        self.execute_action_with_params(
+            "source.refresh",
+            json!({ "source_id": source_id, "route": route }),
+        )
+    }
+
+    pub fn apply_source(&self, source_id: &str) -> Result<Value, BridgeError> {
+        validate_source_id(source_id)?;
+        self.execute_action_with_params("source.apply", json!({ "source_id": source_id }))
+    }
+
     pub fn preview_candidate(&self, content_id: &str) -> Result<Value, BridgeError> {
         let body = serde_json::to_vec(&json!({ "content_id": content_id }))
             .map_err(BridgeError::internal)?;
@@ -139,16 +185,20 @@ impl RuntimeBridge {
         kind: &str,
         content_id: Option<&str>,
     ) -> Result<Value, BridgeError> {
+        let params = match content_id {
+            Some(value) => json!({ "content_id": value }),
+            None => json!({}),
+        };
+        self.execute_action_with_params(kind, params)
+    }
+
+    fn execute_action_with_params(&self, kind: &str, params: Value) -> Result<Value, BridgeError> {
         let snapshot = self.ensure_compatible()?;
         let revision = snapshot
             .get("revision")
             .and_then(Value::as_u64)
             .ok_or_else(|| BridgeError::service("Runtime snapshot revision is missing"))?;
         let request_id = new_request_id();
-        let params = match content_id {
-            Some(value) => json!({ "content_id": value }),
-            None => json!({}),
-        };
         let body = serde_json::to_vec(&json!({
             "request_id": request_id,
             "if_revision": revision,
@@ -566,6 +616,17 @@ fn validate_operation_id(operation_id: &str) -> Result<(), BridgeError> {
     }
 }
 
+fn validate_source_id(source_id: &str) -> Result<(), BridgeError> {
+    let valid = source_id.starts_with("src_")
+        && source_id.len() == 36
+        && source_id[4..].bytes().all(|byte| byte.is_ascii_hexdigit());
+    if valid {
+        Ok(())
+    } else {
+        Err(BridgeError::request("Runtime source ID is invalid"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -606,5 +667,13 @@ mod tests {
         assert!(validate_operation_id("op_with?query").is_err());
         assert!(validate_operation_id("op_with\r\nheader").is_err());
         assert!(validate_operation_id(&format!("op_{}", "a".repeat(126))).is_err());
+    }
+
+    #[test]
+    fn source_ids_must_use_the_runtime_identifier_format() {
+        assert!(validate_source_id("src_0123456789abcdef0123456789abcdef").is_ok());
+        assert!(validate_source_id("src_0123456789ABCDEF0123456789ABCDEF").is_ok());
+        assert!(validate_source_id("src_with/slash").is_err());
+        assert!(validate_source_id("src_0123456789abcdef").is_err());
     }
 }

@@ -252,3 +252,64 @@ func TestCandidatePreviewUsesReadOnlyIPCEndpoint(t *testing.T) {
 		t.Fatalf("response=%s", recorder.Body.String())
 	}
 }
+
+func TestValidActionAcceptsOnlyWellFormedSourceOperations(t *testing.T) {
+	sourceID := "src_0123456789abcdef0123456789abcdef"
+	for _, action := range []runtimeapi.Action{
+		{
+			Kind: runtimeapi.ActionApplyImportedConfig,
+			Params: runtimeapi.ActionParams{
+				ContentID: "content_0123456789abcdef0123456789abcdef",
+			},
+		},
+		{
+			Kind:   runtimeapi.ActionRefreshSource,
+			Params: runtimeapi.ActionParams{SourceID: sourceID},
+		},
+		{
+			Kind: runtimeapi.ActionRefreshSource,
+			Params: runtimeapi.ActionParams{
+				SourceID: sourceID,
+				Route:    runtimeapi.SourceRouteMihomo,
+			},
+		},
+		{
+			Kind:   runtimeapi.ActionApplySource,
+			Params: runtimeapi.ActionParams{SourceID: sourceID},
+		},
+	} {
+		if !validAction(action) {
+			t.Fatalf("valid source action rejected: %#v", action)
+		}
+	}
+	for _, action := range []runtimeapi.Action{
+		{
+			Kind: runtimeapi.ActionAddRemoteSource,
+			Params: runtimeapi.ActionParams{
+				ContentID: "content_0123456789abcdef0123456789abcdeg",
+			},
+		},
+		{
+			Kind:   runtimeapi.ActionRefreshSource,
+			Params: runtimeapi.ActionParams{SourceID: "src_0123456789abcdef0123456789abcdeg"},
+		},
+		{
+			Kind: runtimeapi.ActionApplySource,
+			Params: runtimeapi.ActionParams{
+				SourceID: sourceID,
+				Route:    runtimeapi.SourceRouteDirect,
+			},
+		},
+		{
+			Kind: runtimeapi.ActionApplySource,
+			Params: runtimeapi.ActionParams{
+				SourceID:  sourceID,
+				ContentID: "content_forbidden",
+			},
+		},
+	} {
+		if validAction(action) {
+			t.Fatalf("invalid source action accepted: %#v", action)
+		}
+	}
+}

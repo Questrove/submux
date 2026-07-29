@@ -1,6 +1,6 @@
 # Submux Runtime 本机 IPC
 
-本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传、候选配置预览、持久化运行操作和 Tauri GUI 桥接；事件流仍按本文继续开发。
+本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传、候选配置预览、远程来源添加与刷新、持久化运行操作和 Tauri GUI 桥接；事件流仍按本文继续开发。
 
 ## 传输
 
@@ -85,6 +85,8 @@ POST /v1/imports
 
 `content_id` 绑定 Runtime 安装实例和上传者 OS 身份，默认三十分钟过期，只能被一次后续 Action 消费。暂存内容不能执行、不能被 Mihomo 引用，也不能传给特权进程；Action 完成、失败或过期后清理。运行中导入的离线更新包只有通过 Runtime 校验并变成受信任 bundle ID 后，平台安装器才能接收该 ID。
 
+远程来源的 URL、凭据和兼容设置使用 `application/vnd.submux.runtime-source+json` 上传。客户端随后只能把返回的 `content_id` 交给固定的 `source.add_remote` Action；URL 和凭据不会进入 Action、Operation、Snapshot 或事件。Runtime 消费暂存内容后自行规范化目标、执行地址策略检查、下载、生成候选配置并用当前 Mihomo 精确版本校验。
+
 ### 预览候选配置
 
 ```http
@@ -119,6 +121,14 @@ Content-Type: application/json
 `request_id` 按“Runtime 安装实例 ID + 调用者 OS 身份 + request_id”在本机数据库中去重，并至少保留到对应 Operation 被清理。客户端因连接中断重试同一请求时，Runtime 返回原 Operation，不再执行第二次；其他调用者重复使用同一 ID 时返回冲突。`if_revision` 与当前 Snapshot revision 不一致时返回冲突和最新 revision。
 
 Action 使用固定 `kind` 和严格参数结构，不能承载 Shell、argv、任意环境变量、任意文件路径、下载 URL 转发或系统服务名。文件导入只提交已经上传的 `content_id`；任何特权操作都不能接收客户端提供的路径。
+
+远程来源当前使用以下 Action：
+
+- `source.add_remote` 只接受来源草稿的 `content_id`；
+- `source.refresh` 只接受 `source_id` 和可选的一次性 `direct` 或 `mihomo` 线路；
+- `source.apply` 只接受当前来源的 `source_id`。
+
+添加和刷新只保存通过校验的不可变来源版本，不切换运行配置，也不启动 Mihomo。`source.apply` 应用当前来源的最近有效版本；Mihomo 原先停止时仍保持停止，原先运行时必须完成健康检查后才提交。
 
 响应在副作用开始前返回已经持久化的 Operation：
 

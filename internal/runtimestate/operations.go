@@ -63,6 +63,7 @@ func createRuntimeBuckets(transaction *bbolt.Tx) error {
 		cancelRequestsBucket,
 		importsBucket,
 		eventsBucket,
+		sourcesBucket,
 	} {
 		if _, err := transaction.CreateBucketIfNotExists(name); err != nil {
 			return err
@@ -143,7 +144,7 @@ func (s *Store) SubmitOperation(
 		if active >= capacity {
 			return ErrBusy
 		}
-		if request.Action.Kind == runtimeapi.ActionApplyImportedConfig {
+		if actionConsumesImport(request.Action.Kind) {
 			content, err := readImport(imports, request.Action.Params.ContentID)
 			if err != nil {
 				return err
@@ -186,6 +187,11 @@ func (s *Store) SubmitOperation(
 		return runtimeapi.Operation{}, false, err
 	}
 	return operation, duplicate, nil
+}
+
+func actionConsumesImport(kind string) bool {
+	return kind == runtimeapi.ActionApplyImportedConfig ||
+		kind == runtimeapi.ActionAddRemoteSource
 }
 
 func (s *Store) GetOperation(id string) (runtimeapi.Operation, error) {
@@ -342,7 +348,7 @@ func (s *Store) CompleteOperation(
 		}
 		if state == runtimeapi.OperationSucceeded {
 			switch operation.Action.Kind {
-			case runtimeapi.ActionApplyImportedConfig:
+			case runtimeapi.ActionApplyImportedConfig, runtimeapi.ActionApplySource:
 				mihomoState := "stopped"
 				if result != nil && result.Verified {
 					mihomoState = "running"

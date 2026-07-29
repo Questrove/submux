@@ -39,6 +39,31 @@ fn runtime_apply_candidate(
 }
 
 #[tauri::command]
+fn runtime_add_remote_source(
+    bridge: State<'_, RuntimeBridge>,
+    draft_json: String,
+) -> Result<Value, BridgeError> {
+    bridge.add_remote_source(draft_json.as_bytes())
+}
+
+#[tauri::command]
+fn runtime_refresh_source(
+    bridge: State<'_, RuntimeBridge>,
+    source_id: String,
+    route: String,
+) -> Result<Value, BridgeError> {
+    bridge.refresh_source(&source_id, &route)
+}
+
+#[tauri::command]
+fn runtime_apply_source(
+    bridge: State<'_, RuntimeBridge>,
+    source_id: String,
+) -> Result<Value, BridgeError> {
+    bridge.apply_source(&source_id)
+}
+
+#[tauri::command]
 fn runtime_start_proxy(bridge: State<'_, RuntimeBridge>) -> Result<Value, BridgeError> {
     bridge.execute_action("proxy.start", None)
 }
@@ -88,6 +113,9 @@ pub fn run() {
             runtime_import_config,
             runtime_preview_candidate,
             runtime_apply_candidate,
+            runtime_add_remote_source,
+            runtime_refresh_source,
+            runtime_apply_source,
             runtime_start_proxy,
             runtime_stop_proxy,
             runtime_get_operation,

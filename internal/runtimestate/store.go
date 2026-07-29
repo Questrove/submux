@@ -93,6 +93,10 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 		if err != nil {
 			return err
 		}
+		sources, err := sourceSummary(transaction)
+		if err != nil {
+			return err
+		}
 		snapshot = runtimeapi.Snapshot{
 			ProtocolVersion: runtimeapi.ProtocolVersion,
 			Revision:        revision,
@@ -105,7 +109,7 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 				Recovery: "idle",
 			},
 			RunMode:           runMode,
-			Sources:           runtimeapi.SourceStatus{},
+			Sources:           sources,
 			Operations:        operations,
 			Updates:           runtimeapi.UpdateStatus{},
 			LatestEventCursor: eventCursor,

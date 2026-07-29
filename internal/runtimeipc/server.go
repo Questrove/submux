@@ -239,8 +239,7 @@ func (s *Server) handleCandidatePreview(writer http.ResponseWriter, request *htt
 		s.writeDecodeError(writer, request, err)
 		return
 	}
-	if !strings.HasPrefix(previewRequest.ContentID, "content_") ||
-		!validIdentifier(previewRequest.ContentID, len("content_")+64) {
+	if !validContentID(previewRequest.ContentID) {
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime candidate preview request is invalid", false)
 		return
 	}
@@ -538,14 +537,48 @@ func requestHasBody(request *http.Request) bool {
 func validAction(action runtimeapi.Action) bool {
 	switch action.Kind {
 	case runtimeapi.ActionApplyImportedConfig:
-		return strings.HasPrefix(action.Params.ContentID, "content_") &&
-			len(action.Params.ContentID) > len("content_") &&
-			len(action.Params.ContentID) <= len("content_")+64
+		return validContentID(action.Params.ContentID) &&
+			action.Params.SourceID == "" &&
+			action.Params.Route == ""
 	case runtimeapi.ActionStartProxy, runtimeapi.ActionStopProxy:
-		return action.Params.ContentID == ""
+		return action.Params.ContentID == "" &&
+			action.Params.SourceID == "" &&
+			action.Params.Route == ""
+	case runtimeapi.ActionAddRemoteSource:
+		return validContentID(action.Params.ContentID) &&
+			action.Params.SourceID == "" &&
+			action.Params.Route == ""
+	case runtimeapi.ActionRefreshSource:
+		return validSourceID(action.Params.SourceID) &&
+			action.Params.ContentID == "" &&
+			(action.Params.Route == "" ||
+				action.Params.Route == runtimeapi.SourceRouteDirect ||
+				action.Params.Route == runtimeapi.SourceRouteMihomo)
+	case runtimeapi.ActionApplySource:
+		return validSourceID(action.Params.SourceID) &&
+			action.Params.ContentID == "" &&
+			action.Params.Route == ""
 	default:
 		return false
 	}
+}
+
+func validSourceID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "src_")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
+func validContentID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "content_")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
 }
 
 func (s *Server) writeError(

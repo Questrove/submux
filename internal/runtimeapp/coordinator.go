@@ -2,8 +2,10 @@ package runtimeapp
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +24,10 @@ type ActionExecutor interface {
 
 type CandidatePreviewer interface {
 	PreviewCandidate(context.Context, runtimeapi.PeerIdentity, runtimeapi.PreviewCandidateRequest) (runtimeapi.CandidatePreview, error)
+}
+
+type ScheduledActionProvider interface {
+	DueActions(time.Time) ([]runtimeapi.Action, error)
 }
 
 type PublicError struct {
@@ -221,6 +227,13 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		if processed {
 			continue
 		}
+		scheduled, err := c.scheduleDueActions(ctx)
+		if err != nil {
+			return err
+		}
+		if scheduled {
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return nil
@@ -231,6 +244,44 @@ func (c *Coordinator) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (c *Coordinator) scheduleDueActions(ctx context.Context) (bool, error) {
+	scheduler, ok := c.Executor.(ScheduledActionProvider)
+	if !ok {
+		return false, nil
+	}
+	now := c.now()
+	actions, err := scheduler.DueActions(now)
+	if err != nil {
+		return false, fmt.Errorf("inspect scheduled Runtime actions: %w", err)
+	}
+	if len(actions) == 0 {
+		return false, nil
+	}
+	snapshot, err := c.State.Observe(c.Version, now)
+	if err != nil {
+		return false, err
+	}
+	peer := runtimeapi.PeerIdentity{Platform: "runtime"}
+	for index, action := range actions {
+		if err := validateAction(action); err != nil {
+			return false, err
+		}
+		_, _, err := c.Execute(ctx, peer, c.Version, runtimeapi.CreateOperationRequest{
+			RequestID:  fmt.Sprintf("scheduled-%d-%d", now.UnixNano(), index),
+			IfRevision: snapshot.Revision,
+			Action:     action,
+		})
+		if err == nil {
+			return true, nil
+		}
+		if errors.Is(err, runtimestate.ErrRevisionConflict) || errors.Is(err, runtimestate.ErrBusy) {
+			return false, nil
+		}
+		return false, err
+	}
+	return false, nil
 }
 
 func (c *Coordinator) processNext(serviceContext context.Context) (bool, error) {
@@ -280,7 +331,8 @@ func (c *Coordinator) processNext(serviceContext context.Context) (bool, error) 
 			return true, fmt.Errorf("complete Runtime operation: %w", err)
 		}
 	}
-	if operation.Action.Kind == runtimeapi.ActionApplyImportedConfig &&
+	if (operation.Action.Kind == runtimeapi.ActionApplyImportedConfig ||
+		operation.Action.Kind == runtimeapi.ActionAddRemoteSource) &&
 		operation.Action.Params.ContentID != "" {
 		if err := c.State.RemoveImport(operation.Action.Params.ContentID); err != nil {
 			return true, fmt.Errorf("remove consumed Runtime import: %w", err)
@@ -305,18 +357,58 @@ func (c *Coordinator) now() time.Time {
 func validateAction(action runtimeapi.Action) error {
 	switch action.Kind {
 	case runtimeapi.ActionApplyImportedConfig:
-		if len(action.Params.ContentID) <= len("content_") ||
-			len(action.Params.ContentID) > len("content_")+64 {
+		if !validContentID(action.Params.ContentID) {
 			return errors.New("proxy.apply_import requires a valid content_id")
 		}
+		if action.Params.SourceID != "" || action.Params.Route != "" {
+			return errors.New("proxy.apply_import accepts only content_id")
+		}
 	case runtimeapi.ActionStartProxy, runtimeapi.ActionStopProxy:
-		if action.Params.ContentID != "" {
-			return errors.New("proxy start and stop do not accept content_id")
+		if action.Params.ContentID != "" || action.Params.SourceID != "" || action.Params.Route != "" {
+			return errors.New("proxy start and stop do not accept parameters")
+		}
+	case runtimeapi.ActionAddRemoteSource:
+		if !validContentID(action.Params.ContentID) ||
+			action.Params.SourceID != "" ||
+			action.Params.Route != "" {
+			return errors.New("source.add_remote requires only a valid content_id")
+		}
+	case runtimeapi.ActionRefreshSource:
+		if !validSourceID(action.Params.SourceID) ||
+			action.Params.ContentID != "" ||
+			(action.Params.Route != "" &&
+				action.Params.Route != runtimeapi.SourceRouteDirect &&
+				action.Params.Route != runtimeapi.SourceRouteMihomo) {
+			return errors.New("source.refresh requires a valid source_id and optional route")
+		}
+	case runtimeapi.ActionApplySource:
+		if !validSourceID(action.Params.SourceID) ||
+			action.Params.ContentID != "" ||
+			action.Params.Route != "" {
+			return errors.New("source.apply requires only a valid source_id")
 		}
 	default:
 		return fmt.Errorf("Runtime action %q is not supported", action.Kind)
 	}
 	return nil
+}
+
+func validSourceID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "src_")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
+func validContentID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "content_")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
 }
 
 func publicExecutionMessage(kind string) string {
@@ -327,6 +419,12 @@ func publicExecutionMessage(kind string) string {
 		return "Mihomo could not start the explicit proxy"
 	case runtimeapi.ActionStopProxy:
 		return "Mihomo could not stop the explicit proxy"
+	case runtimeapi.ActionAddRemoteSource:
+		return "Runtime could not add the remote configuration source"
+	case runtimeapi.ActionRefreshSource:
+		return "Runtime could not refresh the remote configuration source"
+	case runtimeapi.ActionApplySource:
+		return "Runtime could not apply the current remote configuration source"
 	default:
 		return "Runtime operation failed"
 	}

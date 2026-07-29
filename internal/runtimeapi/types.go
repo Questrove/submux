@@ -53,9 +53,43 @@ type MihomoStatus struct {
 }
 
 type SourceStatus struct {
-	Count             int    `json:"count"`
-	CurrentSourceID   string `json:"current_source_id,omitempty"`
-	LastRefreshResult string `json:"last_refresh_result,omitempty"`
+	Count             int             `json:"count"`
+	CurrentSourceID   string          `json:"current_source_id,omitempty"`
+	LastRefreshResult string          `json:"last_refresh_result,omitempty"`
+	Items             []SourceSummary `json:"items,omitempty"`
+}
+
+type SourceSummary struct {
+	ID                     string     `json:"id"`
+	Type                   string     `json:"type"`
+	Name                   string     `json:"name"`
+	RedactedTarget         string     `json:"redacted_target"`
+	Route                  string     `json:"route"`
+	RefreshIntervalSeconds int64      `json:"refresh_interval_seconds"`
+	LastRefreshResult      string     `json:"last_refresh_result,omitempty"`
+	LastRefreshAt          *time.Time `json:"last_refresh_at,omitempty"`
+	NextRefreshAt          *time.Time `json:"next_refresh_at,omitempty"`
+	LastRefreshRoute       string     `json:"last_refresh_route,omitempty"`
+	FailureClass           string     `json:"failure_class,omitempty"`
+	HighRiskSettings       []string   `json:"high_risk_settings,omitempty"`
+	HasValidatedCandidate  bool       `json:"has_validated_candidate"`
+}
+
+type RemoteSourceDraft struct {
+	Name                   string `json:"name"`
+	URL                    string `json:"url"`
+	Route                  string `json:"route"`
+	UserAgent              string `json:"user_agent,omitempty"`
+	Username               string `json:"username,omitempty"`
+	Password               string `json:"password,omitempty"`
+	AuthorizedTarget       string `json:"authorized_target,omitempty"`
+	AllowPrivate           bool   `json:"allow_private,omitempty"`
+	AllowHTTP              bool   `json:"allow_http,omitempty"`
+	CustomCAPEM            string `json:"custom_ca_pem,omitempty"`
+	SkipTLSVerify          bool   `json:"skip_tls_verify,omitempty"`
+	RefreshIntervalSeconds *int64 `json:"refresh_interval_seconds,omitempty"`
+	TimeoutSeconds         int    `json:"timeout_seconds,omitempty"`
+	MaxResponseBytes       int64  `json:"max_response_bytes,omitempty"`
 }
 
 type OperationStatus struct {
@@ -92,6 +126,8 @@ type Action struct {
 
 type ActionParams struct {
 	ContentID string `json:"content_id,omitempty"`
+	SourceID  string `json:"source_id,omitempty"`
+	Route     string `json:"route,omitempty"`
 }
 
 type CreateOperationRequest struct {
@@ -123,10 +159,16 @@ type Operation struct {
 }
 
 type OperationResult struct {
-	ConfigRevision string   `json:"config_revision,omitempty"`
-	ProxyKind      string   `json:"proxy_kind,omitempty"`
-	ProxyAddresses []string `json:"proxy_addresses,omitempty"`
-	Verified       bool     `json:"verified,omitempty"`
+	ConfigRevision  string     `json:"config_revision,omitempty"`
+	CandidateSHA256 string     `json:"candidate_sha256,omitempty"`
+	ProxyKind       string     `json:"proxy_kind,omitempty"`
+	ProxyAddresses  []string   `json:"proxy_addresses,omitempty"`
+	Verified        bool       `json:"verified,omitempty"`
+	SourceID        string     `json:"source_id,omitempty"`
+	RefreshResult   string     `json:"refresh_result,omitempty"`
+	RefreshRoute    string     `json:"refresh_route,omitempty"`
+	NextRefreshAt   *time.Time `json:"next_refresh_at,omitempty"`
+	NotModified     bool       `json:"not_modified,omitempty"`
 }
 
 type OperationResponse struct {
@@ -171,26 +213,30 @@ type ProtocolError struct {
 }
 
 const (
-	ErrorInvalidRequest      = "invalid_request"
-	ErrorProtocolUnsupported = "protocol_unsupported"
-	ErrorUnauthorized        = "permission_denied"
-	ErrorRequestTooLarge     = "request_too_large"
-	ErrorAlreadyRunning      = "instance_conflict"
-	ErrorServiceUnavailable  = "service_unavailable"
-	ErrorRevisionConflict    = "revision_conflict"
-	ErrorRequestConflict     = "request_id_conflict"
-	ErrorBusy                = "busy"
-	ErrorNotFound            = "not_found"
-	ErrorNotCancellable      = "not_cancellable"
-	ErrorContentExpired      = "content_expired"
-	ErrorContentConsumed     = "content_consumed"
-	ErrorInternal            = "internal"
+	ErrorInvalidRequest       = "invalid_request"
+	ErrorProtocolUnsupported  = "protocol_unsupported"
+	ErrorUnauthorized         = "permission_denied"
+	ErrorRequestTooLarge      = "request_too_large"
+	ErrorAlreadyRunning       = "instance_conflict"
+	ErrorServiceUnavailable   = "service_unavailable"
+	ErrorRevisionConflict     = "revision_conflict"
+	ErrorRequestConflict      = "request_id_conflict"
+	ErrorBusy                 = "busy"
+	ErrorNotFound             = "not_found"
+	ErrorNotCancellable       = "not_cancellable"
+	ErrorContentExpired       = "content_expired"
+	ErrorContentConsumed      = "content_consumed"
+	ErrorSourceAuthentication = "source_authentication_failed"
+	ErrorInternal             = "internal"
 )
 
 const (
 	ActionApplyImportedConfig = "proxy.apply_import"
 	ActionStartProxy          = "proxy.start"
 	ActionStopProxy           = "proxy.stop"
+	ActionAddRemoteSource     = "source.add_remote"
+	ActionRefreshSource       = "source.refresh"
+	ActionApplySource         = "source.apply"
 
 	OperationQueued         = "queued"
 	OperationRunning        = "running"
@@ -198,6 +244,15 @@ const (
 	OperationFailed         = "failed"
 	OperationCancelled      = "cancelled"
 	OperationOutcomeUnknown = "outcome_unknown"
+)
+
+const (
+	SourceDraftContentType = "application/vnd.submux.runtime-source+json"
+
+	SourceTypeRemoteHTTP = "remote_http"
+
+	SourceRouteDirect = "direct"
+	SourceRouteMihomo = "mihomo"
 )
 
 func uint32String(value uint32) string {

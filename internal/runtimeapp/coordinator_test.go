@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,20 @@ import (
 type executorFunc struct {
 	execute func(context.Context, runtimeapi.Operation, StageReporter) (*runtimeapi.OperationResult, error)
 	verify  func(context.Context) (runtimeapi.ProxyVerification, error)
+}
+
+type scheduledExecutor struct {
+	executorFunc
+	action    runtimeapi.Action
+	delivered bool
+}
+
+func (e *scheduledExecutor) DueActions(time.Time) ([]runtimeapi.Action, error) {
+	if e.delivered {
+		return nil, nil
+	}
+	e.delivered = true
+	return []runtimeapi.Action{e.action}, nil
 }
 
 func (e executorFunc) Execute(
@@ -199,6 +214,65 @@ func TestClientContextEndingDoesNotCancelPersistedOperation(t *testing.T) {
 	close(release)
 	waitForOperationState(t, state, operation.ID, runtimeapi.OperationSucceeded)
 	cancelService()
+	if err := <-result; err != nil {
+		t.Fatalf("stop Runtime coordinator: %v", err)
+	}
+}
+
+func TestCoordinatorPersistsAndRunsDueSourceRefreshAsRuntimeCaller(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	sourceID := "src_0123456789abcdef0123456789abcdef"
+	executed := make(chan runtimeapi.Operation, 1)
+	executor := &scheduledExecutor{
+		action: runtimeapi.Action{
+			Kind: runtimeapi.ActionRefreshSource,
+			Params: runtimeapi.ActionParams{
+				SourceID: sourceID,
+			},
+		},
+	}
+	executor.execute = func(
+		_ context.Context,
+		operation runtimeapi.Operation,
+		report StageReporter,
+	) (*runtimeapi.OperationResult, error) {
+		if err := report("refreshing_source", 50, true); err != nil {
+			return nil, err
+		}
+		executed <- operation
+		return &runtimeapi.OperationResult{
+			SourceID:      sourceID,
+			RefreshResult: "not_modified",
+		}, nil
+	}
+	coordinator := &Coordinator{
+		State:    state,
+		Executor: executor,
+		Version:  "test",
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- coordinator.Run(ctx) }()
+
+	var operation runtimeapi.Operation
+	select {
+	case operation = <-executed:
+	case <-time.After(5 * time.Second):
+		cancel()
+		t.Fatal("due source refresh was not scheduled")
+	}
+	if operation.Action.Kind != runtimeapi.ActionRefreshSource ||
+		operation.CallerIdentity != "runtime:uid:0" ||
+		!strings.HasPrefix(operation.RequestID, "scheduled-") {
+		cancel()
+		t.Fatalf("scheduled operation = %#v", operation)
+	}
+	waitForOperationState(t, state, operation.ID, runtimeapi.OperationSucceeded)
+	cancel()
 	if err := <-result; err != nil {
 		t.Fatalf("stop Runtime coordinator: %v", err)
 	}

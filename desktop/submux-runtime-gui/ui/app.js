@@ -5,6 +5,7 @@ const state = {
   busy: false,
   contentId: "",
   lastOperationId: "",
+  currentSourceId: "",
 };
 
 const elements = {
@@ -31,14 +32,53 @@ const elements = {
   getOperation: document.querySelector("#get-operation"),
   wait: document.querySelector("#wait"),
   cancelOperation: document.querySelector("#cancel-operation"),
+  sourceCount: document.querySelector("#source-count"),
+  sourceList: document.querySelector("#source-list"),
+  sourceName: document.querySelector("#remote-source-name"),
+  sourceUrl: document.querySelector("#remote-source-url"),
+  sourceRoute: document.querySelector("#remote-source-route"),
+  sourceInterval: document.querySelector("#remote-source-interval"),
+  sourceTimeout: document.querySelector("#remote-source-timeout"),
+  sourceMaxBytes: document.querySelector("#remote-source-max-bytes"),
+  sourceUserAgent: document.querySelector("#remote-source-user-agent"),
+  sourceUsername: document.querySelector("#remote-source-username"),
+  sourcePassword: document.querySelector("#remote-source-password"),
+  sourceAuthorizedTarget: document.querySelector("#remote-source-authorized-target"),
+  sourceAllowPrivate: document.querySelector("#remote-source-allow-private"),
+  sourceAllowHttp: document.querySelector("#remote-source-allow-http"),
+  sourceSkipTls: document.querySelector("#remote-source-skip-tls"),
+  sourceCa: document.querySelector("#remote-source-ca"),
+  addRemoteSource: document.querySelector("#add-remote-source"),
+  applySource: document.querySelector("#apply-source"),
+  refreshSource: document.querySelector("#refresh-source"),
+  refreshSourceDirect: document.querySelector("#refresh-source-direct"),
+  refreshSourceMihomo: document.querySelector("#refresh-source-mihomo"),
 };
 
-const writeButtons = [elements.importPreview, elements.apply, elements.start, elements.stop];
+const writeButtons = [
+  elements.importPreview,
+  elements.apply,
+  elements.start,
+  elements.stop,
+  elements.addRemoteSource,
+  elements.applySource,
+  elements.refreshSource,
+  elements.refreshSourceDirect,
+  elements.refreshSourceMihomo,
+];
 
 function setBusy(busy, message = "") {
   state.busy = busy;
   for (const button of writeButtons) {
     button.disabled = busy || !state.compatible || (button === elements.apply && !state.contentId);
+  }
+  for (const button of [
+    elements.refreshSource,
+    elements.refreshSourceDirect,
+    elements.refreshSourceMihomo,
+    elements.applySource,
+  ]) {
+    button.disabled = busy || !state.compatible || !state.currentSourceId;
   }
   elements.wait.disabled = busy || !state.lastOperationId;
   elements.getOperation.disabled = busy || !state.lastOperationId;
@@ -73,6 +113,34 @@ function renderSnapshot(snapshot) {
   if (currentOperationId) {
     state.lastOperationId = currentOperationId;
     elements.operation.textContent = `当前运行操作：${currentOperationId}`;
+  }
+  renderSources(snapshot.sources || {});
+}
+
+function renderSources(sources) {
+  const items = Array.isArray(sources.items) ? sources.items : [];
+  state.currentSourceId = sources.current_source_id || "";
+  elements.sourceCount.textContent = `${items.length} 个来源`;
+  elements.sourceList.replaceChildren();
+  if (!items.length) {
+    elements.sourceList.textContent = "尚未添加远程来源。";
+    return;
+  }
+  for (const source of items) {
+    const item = document.createElement("div");
+    item.className = "source-item";
+    const title = document.createElement("strong");
+    title.textContent = `${source.name || source.id}${source.id === state.currentSourceId ? " · 当前" : ""}`;
+    const target = document.createElement("small");
+    target.textContent = `${source.redacted_target} · ${source.route} · ${source.last_refresh_result || "尚未刷新"}`;
+    item.append(title, target);
+    if (Array.isArray(source.high_risk_settings) && source.high_risk_settings.length) {
+      const risk = document.createElement("small");
+      risk.className = "source-risk";
+      risk.textContent = `高风险设置：${source.high_risk_settings.join("、")}`;
+      item.append(risk);
+    }
+    elements.sourceList.append(item);
   }
 }
 
@@ -138,6 +206,76 @@ async function applyCandidate() {
     renderOperation(await invoke("runtime_apply_candidate", { contentId: state.contentId }));
     state.contentId = "";
     setMessage("候选配置已经进入运行操作队列。Mihomo 停止时不会自动启动。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function sourceDraft() {
+  return {
+    name: elements.sourceName.value,
+    url: elements.sourceUrl.value,
+    route: elements.sourceRoute.value,
+    user_agent: elements.sourceUserAgent.value,
+    username: elements.sourceUsername.value,
+    password: elements.sourcePassword.value,
+    authorized_target: elements.sourceAuthorizedTarget.value,
+    allow_private: elements.sourceAllowPrivate.checked,
+    allow_http: elements.sourceAllowHttp.checked,
+    custom_ca_pem: elements.sourceCa.value,
+    skip_tls_verify: elements.sourceSkipTls.checked,
+    refresh_interval_seconds: Number(elements.sourceInterval.value),
+    timeout_seconds: Number(elements.sourceTimeout.value),
+    max_response_bytes: Number(elements.sourceMaxBytes.value),
+  };
+}
+
+async function addRemoteSource() {
+  const draft = sourceDraft();
+  if (!draft.name.trim() || !draft.url.trim()) {
+    setMessage("来源名称和地址不能为空。", true);
+    return;
+  }
+  setBusy(true, "正在下载并校验远程来源…");
+  try {
+    renderOperation(await invoke("runtime_add_remote_source", {
+      draftJson: JSON.stringify(draft),
+    }));
+    elements.sourcePassword.value = "";
+    setMessage("来源操作已经持久化；等待完成后会显示脱敏目标和刷新结果。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function refreshCurrentSource(route) {
+  if (!state.currentSourceId) return;
+  setBusy(true, "正在提交来源刷新操作…");
+  try {
+    renderOperation(await invoke("runtime_refresh_source", {
+      sourceId: state.currentSourceId,
+      route,
+    }));
+    setMessage("来源刷新已经进入 Runtime 运行操作队列，不会自动切换线路或来源。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function applyCurrentSource() {
+  if (!state.currentSourceId) return;
+  setBusy(true, "正在提交来源应用操作…");
+  try {
+    renderOperation(await invoke("runtime_apply_source", {
+      sourceId: state.currentSourceId,
+    }));
+    setMessage("来源应用已经进入 Runtime 队列；Mihomo 停止时仍需显式启动。");
   } catch (error) {
     setMessage(errorText(error), true);
   } finally {
@@ -242,5 +380,10 @@ elements.verify.addEventListener("click", verifyProxy);
 elements.getOperation.addEventListener("click", getOperation);
 elements.wait.addEventListener("click", waitOperation);
 elements.cancelOperation.addEventListener("click", cancelOperation);
+elements.addRemoteSource.addEventListener("click", addRemoteSource);
+elements.applySource.addEventListener("click", applyCurrentSource);
+elements.refreshSource.addEventListener("click", () => refreshCurrentSource(""));
+elements.refreshSourceDirect.addEventListener("click", () => refreshCurrentSource("direct"));
+elements.refreshSourceMihomo.addEventListener("click", () => refreshCurrentSource("mihomo"));
 
 handshake();

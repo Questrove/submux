@@ -15,6 +15,7 @@ type fakeClient struct {
 	snapshot        runtimeapi.Snapshot
 	actions         []runtimeapi.Action
 	uploaded        []byte
+	uploadedType    string
 	previewed       string
 	gotten          string
 	waited          string
@@ -27,8 +28,9 @@ func (f *fakeClient) Observe(context.Context) (runtimeapi.Snapshot, error) {
 	return f.snapshot, nil
 }
 
-func (f *fakeClient) UploadImport(_ context.Context, _ string, body []byte) (runtimeapi.ImportContent, error) {
+func (f *fakeClient) UploadImport(_ context.Context, contentType string, body []byte) (runtimeapi.ImportContent, error) {
 	f.uploaded = append([]byte(nil), body...)
+	f.uploadedType = contentType
 	return runtimeapi.ImportContent{ID: "content_0123456789abcdef0123456789abcdef"}, nil
 }
 
@@ -200,6 +202,93 @@ func TestQuitDoesNotSubmitStopOperation(t *testing.T) {
 	}
 	if len(client.actions) != 0 {
 		t.Fatalf("quitting TUI submitted actions: %#v", client.actions)
+	}
+}
+
+func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testing.T) {
+	sourceID := "src_" + strings.Repeat("a", 32)
+	client := &fakeClient{snapshot: runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        9,
+		Runtime:         runtimeapi.RuntimeStatus{Version: "dev", ServiceState: "running"},
+		Sources: runtimeapi.SourceStatus{
+			Count:           1,
+			CurrentSourceID: sourceID,
+			Items: []runtimeapi.SourceSummary{{
+				ID:                sourceID,
+				Type:              runtimeapi.SourceTypeRemoteHTTP,
+				Name:              "primary",
+				RedactedTarget:    "https://example.com:443/…",
+				Route:             runtimeapi.SourceRouteDirect,
+				LastRefreshResult: "validated",
+				HighRiskSettings:  []string{"skip_tls_verify"},
+			}},
+		},
+	}}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+
+	updated, _ = model.Update(keyPress('u'))
+	model = updated.(Model)
+	model.editor.SetValue(`{
+	  "name": "secondary",
+	  "url": "https://source.example/config.yaml",
+	  "route": "direct",
+	  "refresh_interval_seconds": 21600
+	}`)
+	updated, command := model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("source add did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if model.editing ||
+		client.uploadedType != runtimeapi.SourceDraftContentType ||
+		len(client.actions) != 1 ||
+		client.actions[0].Kind != runtimeapi.ActionAddRemoteSource {
+		t.Fatalf("source add state: editing=%v type=%q actions=%#v",
+			model.editing, client.uploadedType, client.actions)
+	}
+
+	for _, test := range []struct {
+		key   rune
+		route string
+	}{
+		{key: 'f', route: ""},
+		{key: 'd', route: runtimeapi.SourceRouteDirect},
+		{key: 'm', route: runtimeapi.SourceRouteMihomo},
+	} {
+		updated, command = model.Update(keyPress(test.key))
+		model = updated.(Model)
+		if command == nil {
+			t.Fatalf("source refresh key %q did not return a command", test.key)
+		}
+		updated, _ = model.Update(command())
+		model = updated.(Model)
+		action := client.actions[len(client.actions)-1]
+		if action.Kind != runtimeapi.ActionRefreshSource ||
+			action.Params.SourceID != sourceID ||
+			action.Params.Route != test.route {
+			t.Fatalf("source refresh action for %q = %#v", test.key, action)
+		}
+	}
+	updated, command = model.Update(keyPress('p'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("source apply did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	applied := client.actions[len(client.actions)-1]
+	if applied.Kind != runtimeapi.ActionApplySource || applied.Params.SourceID != sourceID {
+		t.Fatalf("source apply action = %#v", applied)
+	}
+	view := model.View().Content
+	if !strings.Contains(view, "https://example.com:443/…") ||
+		!strings.Contains(view, "skip_tls_verify") {
+		t.Fatalf("source view = %q", view)
 	}
 }
 

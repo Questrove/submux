@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,6 +19,7 @@ import (
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimecore"
 	"submux/internal/runtimeprocess"
+	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
 )
 
@@ -74,10 +78,107 @@ func TestMihomoExecutorWithOfficialBinary(t *testing.T) {
 		Platform:        runtime.GOOS,
 		Verifier:        verifier,
 	}
+	managerNow := time.Now().UTC()
+	executor.Sources = &runtimesource.Manager{
+		State: state,
+		Fetcher: &runtimesource.Fetcher{
+			MihomoAddress: fmt.Sprintf("127.0.0.1:%d", port),
+		},
+		Validator: executor,
+		Now:       func() time.Time { return managerNow },
+		Random:    func() float64 { return 0.5 },
+	}
 	defer process.Stop(context.Background())
 
 	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
 	source := []byte("proxies: []\nrules:\n  - MATCH,DIRECT\n")
+	var sourceRequests int
+	sourceServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		sourceRequests++
+		if request.Header.Get("If-None-Match") == `"integration-v1"` {
+			writer.WriteHeader(http.StatusNotModified)
+			return
+		}
+		writer.Header().Set("ETag", `"integration-v1"`)
+		_, _ = writer.Write(source)
+	}))
+	defer sourceServer.Close()
+	refreshInterval := int64(runtimesource.DefaultRefreshInterval / time.Second)
+	draft, err := json.Marshal(runtimeapi.RemoteSourceDraft{
+		Name:                   "integration-source",
+		URL:                    sourceServer.URL + "/config.yaml",
+		Route:                  runtimeapi.SourceRouteDirect,
+		RefreshIntervalSeconds: &refreshInterval,
+	})
+	if err != nil {
+		t.Fatalf("encode remote source draft: %v", err)
+	}
+	draftDigest := sha256.Sum256(draft)
+	draftContent, err := state.UploadImport(
+		peer,
+		runtimeapi.SourceDraftContentType,
+		int64(len(draft)),
+		hex.EncodeToString(draftDigest[:]),
+		draft,
+		managerNow,
+	)
+	if err != nil {
+		t.Fatalf("upload remote source draft: %v", err)
+	}
+	sourceResult, err := executor.Execute(
+		context.Background(),
+		runtimeapi.Operation{
+			ID:             "op_source_add",
+			CallerIdentity: peer.Key(),
+			Action: runtimeapi.Action{
+				Kind:   runtimeapi.ActionAddRemoteSource,
+				Params: runtimeapi.ActionParams{ContentID: draftContent.ID},
+			},
+		},
+		func(string, int, bool) error { return nil },
+	)
+	if err != nil || sourceResult == nil || sourceResult.SourceID == "" ||
+		sourceResult.RefreshResult != "validated" {
+		t.Fatalf("add validated remote source: result=%#v err=%v", sourceResult, err)
+	}
+	managerNow = managerNow.Add(runtimesource.ManualRefreshDebounce + time.Second)
+	refreshResult, err := executor.Execute(
+		context.Background(),
+		runtimeapi.Operation{
+			ID:             "op_source_refresh",
+			CallerIdentity: peer.Key(),
+			Action: runtimeapi.Action{
+				Kind: runtimeapi.ActionRefreshSource,
+				Params: runtimeapi.ActionParams{
+					SourceID: sourceResult.SourceID,
+				},
+			},
+		},
+		func(string, int, bool) error { return nil },
+	)
+	if err != nil || refreshResult == nil || !refreshResult.NotModified || sourceRequests != 2 {
+		t.Fatalf("conditional remote source refresh: result=%#v requests=%d err=%v", refreshResult, sourceRequests, err)
+	}
+	appliedSource, err := executor.Execute(
+		context.Background(),
+		runtimeapi.Operation{
+			ID:             "op_source_apply",
+			CallerIdentity: peer.Key(),
+			Action: runtimeapi.Action{
+				Kind:   runtimeapi.ActionApplySource,
+				Params: runtimeapi.ActionParams{SourceID: sourceResult.SourceID},
+			},
+		},
+		func(string, int, bool) error { return nil },
+	)
+	if err != nil || appliedSource == nil || appliedSource.SourceID != sourceResult.SourceID ||
+		appliedSource.Verified || len(appliedSource.ProxyAddresses) != 2 {
+		t.Fatalf("apply validated remote source: result=%#v err=%v", appliedSource, err)
+	}
+	if running, err := process.IsRunning(context.Background()); err != nil || running {
+		t.Fatalf("first applied remote source started Mihomo: running=%v err=%v", running, err)
+	}
+
 	sourceDigest := sha256.Sum256(source)
 	content, err := state.UploadImport(
 		peer,

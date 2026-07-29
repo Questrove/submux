@@ -8,10 +8,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +27,7 @@ import (
 	"submux/internal/runtimeipc"
 	"submux/internal/runtimepaths"
 	"submux/internal/runtimeprocess"
+	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
 	"submux/internal/runtimetui"
 )
@@ -70,7 +73,10 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "proxy" {
 		return runProxy(arguments[1:], stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|version|--version-json]")
+	if arguments[0] == "source" {
+		return runSource(arguments[1:], os.Stdin, stdout, stderr)
+	}
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|source|version|--version-json]")
 	return 2
 }
 
@@ -181,6 +187,13 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Platform:        runtime.GOOS,
 		Verifier:        verifier,
 	}
+	executor.Sources = &runtimesource.Manager{
+		State: state,
+		Fetcher: &runtimesource.Fetcher{
+			MihomoAddress: net.JoinHostPort("127.0.0.1", strconv.Itoa(*proxyPort)),
+		},
+		Validator: executor,
+	}
 	coordinator := &runtimeapp.Coordinator{
 		State:         state,
 		Executor:      executor,
@@ -266,6 +279,7 @@ func runStatus(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Mihomo: %s\n", snapshot.Mihomo.State)
 	fmt.Fprintf(stdout, "Revision: %d\n", snapshot.Revision)
 	fmt.Fprintf(stdout, "Latest event cursor: %d\n", snapshot.LatestEventCursor)
+	writeSourceStatus(stdout, snapshot.Sources)
 	return 0
 }
 
@@ -474,11 +488,344 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	return writeOperation(stdout, *jsonOutput, operation)
 }
 
+func runSource(
+	arguments []string,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|list|refresh]")
+		return 2
+	}
+	switch arguments[0] {
+	case "add":
+		return runSourceAdd(arguments[1:], stdin, stdout, stderr)
+	case "apply":
+		return runSourceApply(arguments[1:], stdout, stderr)
+	case "list":
+		return runSourceList(arguments[1:], stdout, stderr)
+	case "refresh":
+		return runSourceRefresh(arguments[1:], stdout, stderr)
+	default:
+		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|list|refresh]")
+		return 2
+	}
+}
+
+func runSourceAdd(
+	arguments []string,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("source add", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", true, "wait for the source operation to finish")
+	name := flags.String("name", "", "source display name")
+	sourceURL := flags.String("url", "", "HTTP(S) Mihomo configuration URL")
+	route := flags.String("route", runtimeapi.SourceRouteDirect, "download route: direct or mihomo")
+	userAgent := flags.String("user-agent", "", "optional HTTP User-Agent")
+	username := flags.String("username", "", "optional HTTP Basic username")
+	passwordStdin := flags.Bool("password-stdin", false, "read the HTTP Basic password from stdin")
+	authorizeTarget := flags.String("authorize-target", "", "exact normalized scheme://host:port for high-risk settings")
+	allowPrivate := flags.Bool("allow-private", false, "allow the authorized private target")
+	allowHTTP := flags.Bool("allow-http", false, "allow non-loopback HTTP for the authorized target")
+	customCAFile := flags.String("ca-file", "", "upload a PEM custom CA for the authorized HTTPS target")
+	skipTLSVerify := flags.Bool("skip-tls-verify", false, "persistently skip TLS verification for the authorized target")
+	refreshInterval := flags.Duration("refresh-interval", runtimesource.DefaultRefreshInterval, "automatic refresh interval; 0 disables it")
+	timeout := flags.Duration("timeout", runtimesource.DefaultFetchTimeout, "per-refresh hard timeout")
+	maxBytes := flags.Int64("max-bytes", runtimesource.DefaultResponseBytes, "maximum decoded response bytes")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 || *name == "" || *sourceURL == "" {
+		fmt.Fprintln(stderr, "source add requires --name and --url and accepts no positional arguments")
+		return 2
+	}
+	var password string
+	if *passwordStdin {
+		body, err := io.ReadAll(io.LimitReader(stdin, 4097))
+		if err != nil {
+			fmt.Fprintf(stderr, "read source password: %v\n", err)
+			return 1
+		}
+		if len(body) > 4096 {
+			fmt.Fprintln(stderr, "source password exceeds the allowed size")
+			return 1
+		}
+		password = strings.TrimSuffix(strings.TrimSuffix(string(body), "\n"), "\r")
+	}
+	var customCAPEM string
+	if *customCAFile != "" {
+		body, err := readSmallRegularFile(*customCAFile, runtimesource.MaximumCustomCABytes)
+		if err != nil {
+			fmt.Fprintf(stderr, "read source custom CA: %v\n", err)
+			return 1
+		}
+		customCAPEM = string(body)
+	}
+	intervalSeconds := int64(*refreshInterval / time.Second)
+	draft := runtimeapi.RemoteSourceDraft{
+		Name:                   *name,
+		URL:                    *sourceURL,
+		Route:                  *route,
+		UserAgent:              *userAgent,
+		Username:               *username,
+		Password:               password,
+		AuthorizedTarget:       *authorizeTarget,
+		AllowPrivate:           *allowPrivate,
+		AllowHTTP:              *allowHTTP,
+		CustomCAPEM:            customCAPEM,
+		SkipTLSVerify:          *skipTLSVerify,
+		RefreshIntervalSeconds: &intervalSeconds,
+		TimeoutSeconds:         int(*timeout / time.Second),
+		MaxResponseBytes:       *maxBytes,
+	}
+	if _, err := runtimesource.NormalizeDraft(draft); err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+		return 1
+	}
+	body, err := json.Marshal(draft)
+	if err != nil {
+		fmt.Fprintf(stderr, "encode source draft: %v\n", err)
+		return 1
+	}
+	return submitSourceDraft(
+		*endpoint,
+		body,
+		*wait,
+		*jsonOutput,
+		stdout,
+		stderr,
+	)
+}
+
+func runSourceList(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("source list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "source list does not accept positional arguments")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(stdout).Encode(snapshot.Sources)
+	} else {
+		writeSourceStatus(stdout, snapshot.Sources)
+	}
+	return 0
+}
+
+func runSourceRefresh(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("source refresh", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", true, "wait for the source operation to finish")
+	route := flags.String("route", "", "one-time route override: direct or mihomo")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: submux-runtime source refresh [options] <source-id>")
+		return 2
+	}
+	if *route != "" && *route != runtimeapi.SourceRouteDirect && *route != runtimeapi.SourceRouteMihomo {
+		fmt.Fprintln(stderr, "source refresh --route must be direct or mihomo")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionRefreshSource,
+			Params: runtimeapi.ActionParams{
+				SourceID: flags.Arg(0),
+				Route:    *route,
+			},
+		},
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(context.Background(), operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func runSourceApply(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("source apply", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", true, "wait for the source operation to finish")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: submux-runtime source apply [options] <source-id>")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionApplySource,
+			Params: runtimeapi.ActionParams{
+				SourceID: flags.Arg(0),
+			},
+		},
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(context.Background(), operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func submitSourceDraft(
+	endpoint string,
+	body []byte,
+	wait bool,
+	jsonOutput bool,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	client, err := runtimeipc.NewClient(endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	content, err := client.UploadImport(context.Background(), runtimeapi.SourceDraftContentType, body)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, jsonOutput, err)
+	}
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, jsonOutput, err)
+	}
+	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionAddRemoteSource,
+			Params: runtimeapi.ActionParams{
+				ContentID: content.ID,
+			},
+		},
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, jsonOutput, err)
+	}
+	if wait {
+		operation, err = client.WaitOperation(context.Background(), operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, jsonOutput, operation)
+}
+
+func writeSourceStatus(writer io.Writer, status runtimeapi.SourceStatus) {
+	fmt.Fprintf(writer, "Sources: %d", status.Count)
+	if status.CurrentSourceID != "" {
+		fmt.Fprintf(writer, " (current %s)", status.CurrentSourceID)
+	}
+	fmt.Fprintln(writer)
+	for _, source := range status.Items {
+		fmt.Fprintf(writer, "- %s %s via %s", source.ID, source.RedactedTarget, source.Route)
+		if source.LastRefreshResult != "" {
+			fmt.Fprintf(writer, " · %s", source.LastRefreshResult)
+		}
+		if len(source.HighRiskSettings) > 0 {
+			fmt.Fprintf(writer, " · high-risk: %s", strings.Join(source.HighRiskSettings, ","))
+		}
+		fmt.Fprintln(writer)
+	}
+}
+
+func readSmallRegularFile(path string, maximum int) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > int64(maximum) {
+		return nil, errors.New("file must be a small regular file without symbolic links")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	body, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 || len(body) > maximum {
+		return nil, errors.New("file size is outside the allowed range")
+	}
+	return body, nil
+}
+
 func writeOperation(stdout io.Writer, asJSON bool, operation runtimeapi.Operation) int {
 	if asJSON {
 		_ = json.NewEncoder(stdout).Encode(runtimeapi.OperationResponse{Operation: operation})
 	} else {
 		fmt.Fprintf(stdout, "%s %s %s\n", operation.ID, operation.State, operation.Stage)
+		if operation.Result != nil && operation.Result.SourceID != "" {
+			fmt.Fprintf(stdout, "source %s: %s via %s\n",
+				operation.Result.SourceID,
+				operation.Result.RefreshResult,
+				operation.Result.RefreshRoute)
+		}
 	}
 	switch operation.State {
 	case runtimeapi.OperationFailed, runtimeapi.OperationCancelled, runtimeapi.OperationOutcomeUnknown:

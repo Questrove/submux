@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,5 +190,38 @@ func TestPreparedConfigurationRemainsStoppedUntilExplicitStart(t *testing.T) {
 	}
 	if snapshot.Mihomo.State != "stopped" || snapshot.RunMode != "explicit" {
 		t.Fatalf("prepared Runtime snapshot = %#v", snapshot)
+	}
+
+	sourceOperation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+		RequestID:  "prepare-source",
+		IfRevision: snapshot.Revision,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionApplySource,
+			Params: runtimeapi.ActionParams{
+				SourceID: "src_" + strings.Repeat("a", 32),
+			},
+		},
+	}, 4, now)
+	if err != nil {
+		t.Fatalf("submit source prepare operation: %v", err)
+	}
+	if _, found, err := store.BeginNextOperation(now); err != nil || !found {
+		t.Fatalf("begin source prepare operation: found=%v err=%v", found, err)
+	}
+	if err := store.CompleteOperation(
+		sourceOperation.ID,
+		runtimeapi.OperationSucceeded,
+		&runtimeapi.OperationResult{SourceID: sourceOperation.Action.Params.SourceID, Verified: false},
+		nil,
+		now,
+	); err != nil {
+		t.Fatalf("complete source prepare operation: %v", err)
+	}
+	snapshot, err = store.Observe("test", now)
+	if err != nil {
+		t.Fatalf("observe source-prepared Runtime: %v", err)
+	}
+	if snapshot.Mihomo.State != "stopped" || snapshot.RunMode != "explicit" {
+		t.Fatalf("source-prepared Runtime snapshot = %#v", snapshot)
 	}
 }

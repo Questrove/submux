@@ -2,6 +2,7 @@ package runtimetui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +32,7 @@ type Model struct {
 	client        Client
 	editor        textarea.Model
 	editing       bool
+	editorMode    string
 	busy          bool
 	width         int
 	height        int
@@ -41,6 +43,11 @@ type Model struct {
 	status        string
 	err           error
 }
+
+const (
+	editorModeConfig = "config"
+	editorModeSource = "source"
+)
 
 type snapshotMsg struct {
 	snapshot runtimeapi.Snapshot
@@ -144,6 +151,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case operationMsg:
 		m.lastOperation = message.operation
 		m.busy = false
+		if m.editing && m.editorMode == editorModeSource {
+			m.editing = false
+			m.editor.Blur()
+		}
 		m.err = nil
 		m.status = fmt.Sprintf("运行操作 %s：%s / %s", message.operation.ID, message.operation.State, message.operation.Stage)
 		if operationTerminal(message.operation.State) {
@@ -183,6 +194,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.busy = true
+				if m.editorMode == editorModeSource {
+					var draft runtimeapi.RemoteSourceDraft
+					if err := json.Unmarshal(body, &draft); err != nil {
+						m.busy = false
+						m.err = errors.New("来源设置必须是有效 JSON")
+						m.status = m.err.Error()
+						return m, nil
+					}
+					m.status = "正在上传并添加远程来源…"
+					return m, m.addSourceCmd(body)
+				}
 				m.status = "正在上传并校验候选配置…"
 				return m, m.importPreviewCmd(body)
 			}
@@ -205,8 +227,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.observeCmd()
 		case "i":
 			m.editing = true
+			m.editorMode = editorModeConfig
 			m.err = nil
+			m.editor.SetValue("")
 			m.status = "粘贴配置后按 Ctrl+S 上传并预览，Esc 取消"
+			return m, m.editor.Focus()
+		case "u":
+			m.editing = true
+			m.editorMode = editorModeSource
+			m.err = nil
+			m.editor.SetValue(defaultSourceDraft())
+			m.status = "编辑来源 JSON 后按 Ctrl+S 添加，Esc 取消"
 			return m, m.editor.Focus()
 		case "a":
 			if m.preview.ContentID == "" {
@@ -271,6 +302,44 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在验证显式代理…"
 			return m, m.verifyCmd()
+		case "f", "d", "m":
+			sourceID := m.snapshot.Sources.CurrentSourceID
+			if sourceID == "" {
+				m.err = errors.New("当前没有可刷新的远程来源")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			route := ""
+			if key.String() == "d" {
+				route = runtimeapi.SourceRouteDirect
+			}
+			if key.String() == "m" {
+				route = runtimeapi.SourceRouteMihomo
+			}
+			m.busy = true
+			m.status = "正在提交来源刷新操作…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind: runtimeapi.ActionRefreshSource,
+				Params: runtimeapi.ActionParams{
+					SourceID: sourceID,
+					Route:    route,
+				},
+			})
+		case "p":
+			sourceID := m.snapshot.Sources.CurrentSourceID
+			if sourceID == "" {
+				m.err = errors.New("当前没有可应用的远程来源")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.busy = true
+			m.status = "正在提交来源应用操作…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind: runtimeapi.ActionApplySource,
+				Params: runtimeapi.ActionParams{
+					SourceID: sourceID,
+				},
+			})
 		}
 	}
 	return m, nil
@@ -278,9 +347,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) View() tea.View {
 	if m.editing {
+		editorTitle := "Submux Runtime · 导入本机配置副本"
+		editorHelp := "Ctrl+S 上传并预览 · Esc 取消"
+		if m.editorMode == editorModeSource {
+			editorTitle = "Submux Runtime · 添加远程配置来源"
+			editorHelp = "Ctrl+S 添加来源 · Esc 取消；高风险设置必须填写精确 authorized_target"
+		}
 		content := strings.Join([]string{
-			titleStyle.Render("Submux Runtime · 导入本机配置副本"),
-			mutedStyle.Render("Ctrl+S 上传并预览 · Esc 取消"),
+			titleStyle.Render(editorTitle),
+			mutedStyle.Render(editorHelp),
 			"",
 			m.editor.View(),
 			"",
@@ -314,11 +389,24 @@ func (m Model) View() tea.View {
 			fmt.Sprintf("%s · %s · %s · %d%%", m.lastOperation.ID, m.lastOperation.State, m.lastOperation.Stage, m.lastOperation.Progress),
 		)
 	}
+	if len(m.snapshot.Sources.Items) > 0 {
+		lines = append(lines, "", labelStyle.Render("配置来源"))
+		for _, source := range m.snapshot.Sources.Items {
+			line := fmt.Sprintf("%s · %s · %s", source.ID, source.RedactedTarget, source.Route)
+			if source.LastRefreshResult != "" {
+				line += " · " + source.LastRefreshResult
+			}
+			if len(source.HighRiskSettings) > 0 {
+				line += " · 高风险：" + strings.Join(source.HighRiskSettings, "、")
+			}
+			lines = append(lines, line)
+		}
+	}
 	lines = append(lines,
 		"",
 		renderStatus(m.status, m.err, m.busy),
 		"",
-		mutedStyle.Render("i 导入/预览 · a 应用 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新 · q 退出"),
+		mutedStyle.Render("i 导入/预览 · u 添加来源 · f 刷新来源 · d 直连刷新 · m Mihomo 刷新 · p 应用来源 · a 应用导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -344,6 +432,29 @@ func (m Model) importPreviewCmd(body []byte) tea.Cmd {
 			return errMsg{err: err}
 		}
 		return importPreviewMsg{content: content, preview: preview}
+	}
+}
+
+func (m Model) addSourceCmd(body []byte) tea.Cmd {
+	revision := m.snapshot.Revision
+	return func() tea.Msg {
+		content, err := m.client.UploadImport(m.ctx, runtimeapi.SourceDraftContentType, body)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		operation, err := m.client.Execute(m.ctx, runtimeapi.CreateOperationRequest{
+			IfRevision: revision,
+			Action: runtimeapi.Action{
+				Kind: runtimeapi.ActionAddRemoteSource,
+				Params: runtimeapi.ActionParams{
+					ContentID: content.ID,
+				},
+			},
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return operationMsg{operation: operation}
 	}
 }
 
@@ -455,4 +566,20 @@ func operationTerminal(state string) bool {
 	default:
 		return false
 	}
+}
+
+func defaultSourceDraft() string {
+	return `{
+  "name": "primary",
+  "url": "https://example.com/config.yaml",
+  "route": "direct",
+  "authorized_target": "",
+  "allow_private": false,
+  "allow_http": false,
+  "custom_ca_pem": "",
+  "skip_tls_verify": false,
+  "refresh_interval_seconds": 21600,
+  "timeout_seconds": 30,
+  "max_response_bytes": 8388608
+}`
 }

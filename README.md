@@ -73,7 +73,7 @@ Submux Runtime 是另行安装的机器级 Mihomo 管理程序。它可以读取
 
 Runtime 可以保存 submux 输出订阅、外部 HTTP(S) 完整配置和本机导入副本。来源原文之上可以应用本机高级覆盖，最后由 Runtime 强制写入监听、控制端点、TUN、路由、DNS、网关和数据路径等保留设置。来源不能扩大本机权限或引用任意文件。
 
-Runtime 正在实现。仓库目前已有 `submux-runtime` 服务、本机 IPC、单实例锁、单写者状态库、持久化运行操作、候选配置预览、双栈回环显式代理，以及共用本机 IPC 的 Bubble Tea TUI 和 Tauri GUI；远程来源、TUN/网关模式和安装器尚未完成，因此还不能用于正式部署。新的 Runtime 采用清理后重新安装，不读取或迁移任何已移除的远程运行端状态。
+Runtime 正在实现。仓库目前已有 `submux-runtime` 服务、本机 IPC、单实例锁、单写者状态库、持久化运行操作、候选配置预览、双栈回环显式代理、安全远程来源刷新，以及共用本机 IPC 的 Bubble Tea TUI 和 Tauri GUI；多来源切换、TUN/网关模式和安装器尚未完成，因此还不能用于正式部署。新的 Runtime 采用清理后重新安装，不读取或迁移任何已移除的远程运行端状态。
 
 开发环境中，在 Runtime 状态目录已经放置受信任 Mihomo 核心并启动服务后，可以先上传配置副本、预览并应用候选配置，再显式启动：
 
@@ -87,6 +87,18 @@ go run ./cmd/submux-runtime proxy stop --wait --json
 ```
 
 CLI 打开文件并上传字节，Runtime 不接收客户端文件路径。首次应用只保存经过静态校验的配置，不会启动 Mihomo；`proxy start` 是单独的运行操作。运行操作通过 `operation get`、`operation wait` 和 `operation cancel` 查询、等待或取消。交互终端可以运行 `submux-runtime tui`；Tauri 2 GUI 源码位于 `desktop/submux-runtime-gui`，WebView 只调用 Rust 本机 IPC 桥接。
+
+远程来源也由 Runtime 下载和校验，不由客户端直接请求：
+
+```bash
+go run ./cmd/submux-runtime source add --url https://example.com/config.yaml --wait --json
+go run ./cmd/submux-runtime source list --json
+go run ./cmd/submux-runtime source refresh <source_id> --wait --json
+go run ./cmd/submux-runtime source apply <source_id> --wait --json
+go run ./cmd/submux-runtime proxy start --wait --json
+```
+
+添加和刷新只保存通过当前 Mihomo 精确版本校验的不可变候选配置，不会自动应用或启动。HTTP、私网目标、自定义 CA 和跳过 TLS 校验需要与规范化目标精确绑定的明确授权；元数据与链路本地地址始终拒绝。当前阶段只支持第一个远程来源作为当前来源，多来源切换和删除将在后续实现。
 
 完整设计见：
 

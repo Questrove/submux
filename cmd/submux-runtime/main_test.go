@@ -41,7 +41,8 @@ func (e commandExecutor) Execute(
 	operation runtimeapi.Operation,
 	report runtimeapp.StageReporter,
 ) (*runtimeapi.OperationResult, error) {
-	if operation.Action.Kind == runtimeapi.ActionApplyImportedConfig {
+	if operation.Action.Kind == runtimeapi.ActionApplyImportedConfig ||
+		operation.Action.Kind == runtimeapi.ActionAddRemoteSource {
 		if _, _, err := e.state.ConsumeImport(
 			operation.Action.Params.ContentID,
 			operation.CallerIdentity,
@@ -54,12 +55,27 @@ func (e commandExecutor) Execute(
 	if err := report("committing", 70, false); err != nil {
 		return nil, err
 	}
-	return &runtimeapi.OperationResult{
+	result := &runtimeapi.OperationResult{
 		ConfigRevision: operation.ID,
 		ProxyKind:      "mixed",
 		ProxyAddresses: []string{"127.0.0.1:7890", "[::1]:7890"},
 		Verified:       true,
-	}, nil
+	}
+	if operation.Action.Kind == runtimeapi.ActionAddRemoteSource {
+		result.SourceID = "src_" + strings.Repeat("a", 32)
+		result.RefreshResult = "validated"
+		result.RefreshRoute = runtimeapi.SourceRouteDirect
+	}
+	if operation.Action.Kind == runtimeapi.ActionRefreshSource {
+		result.SourceID = operation.Action.Params.SourceID
+		result.RefreshResult = "not_modified"
+		result.RefreshRoute = operation.Action.Params.Route
+		result.NotModified = true
+	}
+	if operation.Action.Kind == runtimeapi.ActionApplySource {
+		result.SourceID = operation.Action.Params.SourceID
+	}
+	return result, nil
 }
 
 func (commandExecutor) Verify(context.Context) (runtimeapi.ProxyVerification, error) {
@@ -311,6 +327,65 @@ func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
 	if err := json.Unmarshal(verifyOut.Bytes(), &verification); err != nil || !verification.Available {
 		cancel()
 		t.Fatalf("CLI verification = %#v err=%v", verification, err)
+	}
+
+	var sourceAddOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runSourceAdd([]string{
+		"--endpoint", endpoint,
+		"--name", "local-source",
+		"--url", "http://127.0.0.1:8080/config.yaml?token=secret",
+		"--json",
+	}, strings.NewReader(""), &sourceAddOut, &stderr)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("source add exit=%d stdout=%s stderr=%s", exitCode, sourceAddOut.String(), stderr.String())
+	}
+	var sourceAddOperation runtimeapi.OperationResponse
+	if err := json.Unmarshal(sourceAddOut.Bytes(), &sourceAddOperation); err != nil ||
+		sourceAddOperation.Operation.Result == nil ||
+		sourceAddOperation.Operation.Result.SourceID == "" {
+		cancel()
+		t.Fatalf("source add operation = %#v err=%v", sourceAddOperation, err)
+	}
+
+	var sourceRefreshOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runSourceRefresh([]string{
+		"--endpoint", endpoint,
+		"--route", runtimeapi.SourceRouteMihomo,
+		"--json",
+		sourceAddOperation.Operation.Result.SourceID,
+	}, &sourceRefreshOut, &stderr)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("source refresh exit=%d stdout=%s stderr=%s", exitCode, sourceRefreshOut.String(), stderr.String())
+	}
+	var sourceRefreshOperation runtimeapi.OperationResponse
+	if err := json.Unmarshal(sourceRefreshOut.Bytes(), &sourceRefreshOperation); err != nil ||
+		sourceRefreshOperation.Operation.Result == nil ||
+		sourceRefreshOperation.Operation.Result.RefreshRoute != runtimeapi.SourceRouteMihomo {
+		cancel()
+		t.Fatalf("source refresh operation = %#v err=%v", sourceRefreshOperation, err)
+	}
+
+	var sourceApplyOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runSourceApply([]string{
+		"--endpoint", endpoint,
+		"--json",
+		sourceAddOperation.Operation.Result.SourceID,
+	}, &sourceApplyOut, &stderr)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("source apply exit=%d stdout=%s stderr=%s", exitCode, sourceApplyOut.String(), stderr.String())
+	}
+	var sourceApplyOperation runtimeapi.OperationResponse
+	if err := json.Unmarshal(sourceApplyOut.Bytes(), &sourceApplyOperation); err != nil ||
+		sourceApplyOperation.Operation.Result == nil ||
+		sourceApplyOperation.Operation.Result.SourceID != sourceAddOperation.Operation.Result.SourceID {
+		cancel()
+		t.Fatalf("source apply operation = %#v err=%v", sourceApplyOperation, err)
 	}
 
 	cancel()

@@ -40,6 +40,85 @@
       <section class="panel">
         <div class="panel-heading">
           <div>
+            <p class="eyebrow">REMOTE SOURCES</p>
+            <h2>远程配置来源</h2>
+          </div>
+          <span id="source-count" class="badge">0 个来源</span>
+        </div>
+        <div id="source-list" class="source-list muted">尚未添加远程来源。</div>
+        <div class="form-grid">
+          <label>
+            来源名称
+            <input id="remote-source-name" value="primary" maxlength="128" />
+          </label>
+          <label>
+            下载线路
+            <select id="remote-source-route">
+              <option value="direct">直连</option>
+              <option value="mihomo">当前 Mihomo</option>
+            </select>
+          </label>
+          <label class="wide">
+            HTTP(S) Mihomo 完整配置地址
+            <input id="remote-source-url" type="url" placeholder="https://example.com/config.yaml" />
+          </label>
+          <label>
+            自动刷新间隔（秒，0 表示关闭）
+            <input id="remote-source-interval" type="number" min="0" value="21600" />
+          </label>
+          <label>
+            下载超时（秒）
+            <input id="remote-source-timeout" type="number" min="5" max="120" value="30" />
+          </label>
+          <label>
+            最大响应字节数
+            <input id="remote-source-max-bytes" type="number" min="1024" max="10485760" value="8388608" />
+          </label>
+          <label>
+            User-Agent（可选）
+            <input id="remote-source-user-agent" maxlength="256" />
+          </label>
+        </div>
+        <details>
+          <summary>凭据和目标绑定的兼容设置</summary>
+          <div class="form-grid">
+            <label>
+              HTTP Basic 用户名
+              <input id="remote-source-username" maxlength="256" autocomplete="off" />
+            </label>
+            <label>
+              HTTP Basic 密码
+              <input id="remote-source-password" type="password" maxlength="4096" autocomplete="new-password" />
+            </label>
+            <label class="wide">
+              精确授权目标
+              <input id="remote-source-authorized-target" placeholder="https://example.com:443" />
+            </label>
+          </div>
+          <div class="check-grid">
+            <label><input id="remote-source-allow-private" type="checkbox" /> 允许该私网目标</label>
+            <label><input id="remote-source-allow-http" type="checkbox" /> 允许该非回环 HTTP 目标</label>
+            <label><input id="remote-source-skip-tls" type="checkbox" /> 跳过该目标的 TLS 校验（高风险）</label>
+          </div>
+          <label for="remote-source-ca">自定义 CA PEM（仅上传内容，不发送文件路径）</label>
+          <textarea id="remote-source-ca" class="compact" spellcheck="false"></textarea>
+          <p class="notice compact-notice">
+            私网、非回环 HTTP、自定义 CA 和跳过 TLS 必须绑定到规范化的 scheme、host 和 port。
+            云元数据与 link-local 目标始终拒绝。
+          </p>
+        </details>
+        <div class="actions">
+          <button id="add-remote-source">下载、校验并添加</button>
+          <button id="apply-source" disabled>应用当前来源</button>
+          <button id="refresh-source" class="secondary" disabled>按来源设置刷新</button>
+          <button id="refresh-source-direct" class="secondary" disabled>本次直连刷新</button>
+          <button id="refresh-source-mihomo" class="secondary" disabled>本次经 Mihomo 刷新</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
             <p class="eyebrow">CONFIGURATION</p>
             <h2>导入与候选配置</h2>
           </div>
