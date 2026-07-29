@@ -17,8 +17,6 @@ import (
 	"sync"
 	"time"
 
-	"gopkg.in/yaml.v3"
-
 	"submux/internal/safepath"
 )
 
@@ -58,63 +56,38 @@ type Deployer struct {
 }
 
 type DeploymentResult struct {
-	Revision         string `json:"revision"`
-	PreviousRevision string `json:"previous_revision,omitempty"`
-	SourceHash       string `json:"source_hash"`
-	CandidateHash    string `json:"candidate_hash,omitempty"`
-	Status           string `json:"status"`
-	Validation       string `json:"validation,omitempty"`
-	RolledBack       bool   `json:"rolled_back"`
-	Error            string `json:"error,omitempty"`
-	ProxyPort        int    `json:"proxy_port,omitempty"`
-	ProxyKind        string `json:"proxy_kind,omitempty"`
+	Revision         string   `json:"revision"`
+	PreviousRevision string   `json:"previous_revision,omitempty"`
+	SourceHash       string   `json:"source_hash"`
+	CandidateHash    string   `json:"candidate_hash,omitempty"`
+	Status           string   `json:"status"`
+	Validation       string   `json:"validation,omitempty"`
+	RolledBack       bool     `json:"rolled_back"`
+	Error            string   `json:"error,omitempty"`
+	ProxyPort        int      `json:"proxy_port,omitempty"`
+	ProxyKind        string   `json:"proxy_kind,omitempty"`
+	ProxyAddresses   []string `json:"proxy_addresses,omitempty"`
 }
 
 type deploymentMetadata struct {
-	Revision      string `json:"revision"`
-	SourceHash    string `json:"source_hash"`
-	CandidateHash string `json:"candidate_hash"`
-	AppliedAt     string `json:"applied_at"`
-	ProxyPort     int    `json:"proxy_port,omitempty"`
-	ProxyKind     string `json:"proxy_kind,omitempty"`
+	Revision       string   `json:"revision"`
+	SourceHash     string   `json:"source_hash"`
+	CandidateHash  string   `json:"candidate_hash"`
+	AppliedAt      string   `json:"applied_at"`
+	ProxyPort      int      `json:"proxy_port,omitempty"`
+	ProxyKind      string   `json:"proxy_kind,omitempty"`
+	ProxyAddresses []string `json:"proxy_addresses,omitempty"`
 }
 
 func ProxyEndpoint(config []byte) (int, string, error) {
-	var document yaml.Node
-	if err := yaml.Unmarshal(config, &document); err != nil {
-		return 0, "", fmt.Errorf("parse Mihomo proxy listener: %w", err)
+	listeners, err := ProxyListeners(config)
+	if err != nil {
+		return 0, "", err
 	}
-	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return 0, "", errors.New("Mihomo config must be a YAML mapping")
+	if len(listeners) == 0 {
+		return 0, "", nil
 	}
-	root := document.Content[0]
-	candidates := []struct {
-		key  string
-		kind string
-	}{
-		{key: "mixed-port", kind: "mixed"},
-		{key: "port", kind: "http"},
-		{key: "socks-port", kind: "socks5"},
-	}
-	for _, candidate := range candidates {
-		for index := 0; index+1 < len(root.Content); index += 2 {
-			if root.Content[index].Value != candidate.key {
-				continue
-			}
-			value := root.Content[index+1]
-			if value.Kind != yaml.ScalarNode {
-				return 0, "", fmt.Errorf("%s must be an integer port", candidate.key)
-			}
-			port, err := strconv.Atoi(value.Value)
-			if err != nil || port < 0 || port > 65535 {
-				return 0, "", fmt.Errorf("%s must be between 0 and 65535", candidate.key)
-			}
-			if port > 0 {
-				return port, candidate.kind, nil
-			}
-		}
-	}
-	return 0, "", nil
+	return listeners[0].Port, listeners[0].Kind, nil
 }
 
 func (d *Deployer) Apply(ctx context.Context, revision, expectedSourceHash string, source []byte) (DeploymentResult, error) {
@@ -146,9 +119,17 @@ func (d *Deployer) Apply(ctx context.Context, revision, expectedSourceHash strin
 	}
 	candidateHash := sha256.Sum256(candidate)
 	result.CandidateHash = hex.EncodeToString(candidateHash[:])
-	result.ProxyPort, result.ProxyKind, err = ProxyEndpoint(candidate)
+	listeners, err := ProxyListeners(candidate)
 	if err != nil {
 		return result, err
+	}
+	if len(listeners) == 0 {
+		return result, errors.New("candidate configuration does not contain an explicit proxy listener")
+	}
+	result.ProxyPort = listeners[0].Port
+	result.ProxyKind = listeners[0].Kind
+	for _, listener := range listeners {
+		result.ProxyAddresses = append(result.ProxyAddresses, listener.Address)
 	}
 
 	current := filepath.Join(root, "current")
@@ -181,12 +162,13 @@ func (d *Deployer) Apply(ctx context.Context, revision, expectedSourceHash strin
 		return result, err
 	}
 	metadata := deploymentMetadata{
-		Revision:      revision,
-		SourceHash:    result.SourceHash,
-		CandidateHash: result.CandidateHash,
-		AppliedAt:     time.Now().UTC().Format(time.RFC3339),
-		ProxyPort:     result.ProxyPort,
-		ProxyKind:     result.ProxyKind,
+		Revision:       revision,
+		SourceHash:     result.SourceHash,
+		CandidateHash:  result.CandidateHash,
+		AppliedAt:      time.Now().UTC().Format(time.RFC3339),
+		ProxyPort:      result.ProxyPort,
+		ProxyKind:      result.ProxyKind,
+		ProxyAddresses: append([]string(nil), result.ProxyAddresses...),
 	}
 	metadataJSON, err := json.Marshal(metadata)
 	if err != nil {
@@ -226,7 +208,7 @@ func (d *Deployer) Apply(ctx context.Context, revision, expectedSourceHash strin
 
 	activationErr := d.Service.ReloadOrRestart(ctx)
 	if activationErr == nil {
-		activationErr = d.Verifier.VerifyRuntime(ctx, loopbackProxyAddress(result.ProxyPort))
+		activationErr = verifyRuntimeAddresses(ctx, d.Verifier, result.ProxyAddresses)
 	}
 	if activationErr == nil {
 		result.Status = "active"
@@ -247,7 +229,7 @@ func (d *Deployer) Apply(ctx context.Context, revision, expectedSourceHash strin
 		}
 		rollbackErr := d.Service.ReloadOrRestart(ctx)
 		if rollbackErr == nil {
-			rollbackErr = d.Verifier.VerifyRuntime(ctx, loopbackProxyAddress(previous.ProxyPort))
+			rollbackErr = verifyRuntimeAddresses(ctx, d.Verifier, deploymentProxyAddresses(previous))
 		}
 		_ = removeManagedConfigDir(root, failed)
 		if rollbackErr != nil {
@@ -302,6 +284,7 @@ func (d *Deployer) Rollback(ctx context.Context) (DeploymentResult, error) {
 	result.CandidateHash = targetMetadata.CandidateHash
 	result.ProxyPort = targetMetadata.ProxyPort
 	result.ProxyKind = targetMetadata.ProxyKind
+	result.ProxyAddresses = deploymentProxyAddresses(targetMetadata)
 	result.Validation = "passed"
 
 	failed := filepath.Join(root, "failed")
@@ -317,7 +300,7 @@ func (d *Deployer) Rollback(ctx context.Context) (DeploymentResult, error) {
 	}
 	activationErr := d.Service.ReloadOrRestart(ctx)
 	if activationErr == nil {
-		activationErr = d.Verifier.VerifyRuntime(ctx, loopbackProxyAddress(result.ProxyPort))
+		activationErr = verifyRuntimeAddresses(ctx, d.Verifier, result.ProxyAddresses)
 	}
 	if activationErr != nil {
 		if err := os.Rename(current, previousGood); err != nil {
@@ -328,7 +311,7 @@ func (d *Deployer) Rollback(ctx context.Context) (DeploymentResult, error) {
 		}
 		restoreErr := d.Service.ReloadOrRestart(ctx)
 		if restoreErr == nil {
-			restoreErr = d.Verifier.VerifyRuntime(ctx, loopbackProxyAddress(currentMetadata.ProxyPort))
+			restoreErr = verifyRuntimeAddresses(ctx, d.Verifier, deploymentProxyAddresses(currentMetadata))
 		}
 		if restoreErr != nil {
 			return result, errors.Join(activationErr, restoreErr)
@@ -344,11 +327,26 @@ func (d *Deployer) Rollback(ctx context.Context) (DeploymentResult, error) {
 	return result, nil
 }
 
-func loopbackProxyAddress(port int) string {
-	if port <= 0 {
-		return ""
+func verifyRuntimeAddresses(ctx context.Context, verifier RuntimeVerifier, addresses []string) error {
+	if len(addresses) == 0 {
+		return errors.New("Mihomo explicit proxy listener is unavailable")
 	}
-	return net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	for _, address := range addresses {
+		if err := verifier.VerifyRuntime(ctx, address); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deploymentProxyAddresses(metadata deploymentMetadata) []string {
+	if len(metadata.ProxyAddresses) > 0 {
+		return append([]string(nil), metadata.ProxyAddresses...)
+	}
+	if metadata.ProxyPort <= 0 {
+		return nil
+	}
+	return []string{net.JoinHostPort("127.0.0.1", strconv.Itoa(metadata.ProxyPort))}
 }
 
 func (d *Deployer) safeRoot() (string, error) {

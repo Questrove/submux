@@ -1,0 +1,218 @@
+package runtimeprocess
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"submux/internal/safepath"
+)
+
+type Process struct {
+	BinaryPath string
+	ConfigPath string
+	DataDir    string
+
+	mu   sync.Mutex
+	cmd  *exec.Cmd
+	done chan error
+}
+
+func (p *Process) IsRunning(context.Context) (bool, error) {
+	if p == nil {
+		return false, nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshLocked()
+	return p.cmd != nil, nil
+}
+
+func (p *Process) Start(ctx context.Context) error {
+	if p == nil {
+		return errors.New("Mihomo process manager is unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.refreshLocked()
+	if p.cmd != nil {
+		return nil
+	}
+	if err := validateManagedExecutable(p.BinaryPath); err != nil {
+		return err
+	}
+	if err := validateManagedConfig(p.ConfigPath); err != nil {
+		return err
+	}
+	dataDir, err := prepareDataDir(p.DataDir)
+	if err != nil {
+		return err
+	}
+	command := exec.Command(p.BinaryPath, "-d", dataDir, "-f", p.ConfigPath)
+	command.Dir = dataDir
+	command.Env = sanitizedEnvironment()
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	configureCommand(command)
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("start Mihomo: %w", err)
+	}
+	done := make(chan error, 1)
+	p.cmd = command
+	p.done = done
+	go func() {
+		waitErr := command.Wait()
+		done <- waitErr
+		close(done)
+		p.mu.Lock()
+		if p.cmd == command {
+			p.cmd = nil
+			p.done = nil
+		}
+		p.mu.Unlock()
+	}()
+	return nil
+}
+
+func (p *Process) refreshLocked() {
+	if p.cmd == nil || p.done == nil {
+		return
+	}
+	select {
+	case <-p.done:
+		p.cmd = nil
+		p.done = nil
+	default:
+	}
+}
+
+func (p *Process) Stop(ctx context.Context) error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	command := p.cmd
+	done := p.done
+	p.mu.Unlock()
+	if command == nil {
+		return nil
+	}
+	if err := terminateProcess(command.Process); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("stop Mihomo: %w", err)
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		_ = command.Process.Kill()
+		<-done
+		return ctx.Err()
+	case <-time.After(10 * time.Second):
+		if err := command.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("force stop Mihomo: %w", err)
+		}
+		<-done
+		return nil
+	}
+}
+
+func (p *Process) ReloadOrRestart(ctx context.Context) error {
+	if err := p.Stop(ctx); err != nil {
+		return err
+	}
+	return p.Start(ctx)
+}
+
+func validateManagedExecutable(path string) error {
+	if path == "" || !filepath.IsAbs(path) {
+		return errors.New("Mihomo executable must use a fixed absolute path")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect Mihomo executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("Mihomo executable must be a regular non-linked file")
+	}
+	linked, err := safepath.ContainsLink(path)
+	if err != nil {
+		return fmt.Errorf("inspect Mihomo executable path: %w", err)
+	}
+	if linked {
+		return errors.New("Mihomo executable path must not contain symbolic or reparse links")
+	}
+	return nil
+}
+
+func validateManagedConfig(path string) error {
+	if path == "" || !filepath.IsAbs(path) {
+		return errors.New("Mihomo configuration must use a fixed absolute path")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect Mihomo configuration: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("Mihomo configuration must be a regular non-linked file")
+	}
+	linked, err := safepath.ContainsLink(path)
+	if err != nil {
+		return fmt.Errorf("inspect Mihomo configuration path: %w", err)
+	}
+	if linked {
+		return errors.New("Mihomo configuration path must not contain symbolic or reparse links")
+	}
+	return nil
+}
+
+func prepareDataDir(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", errors.New("Mihomo data directory must use a fixed absolute path")
+	}
+	if err := os.MkdirAll(path, 0700); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("Mihomo data directory must be a real directory")
+	}
+	linked, err := safepath.ContainsLink(path)
+	if err != nil {
+		return "", fmt.Errorf("inspect Mihomo data directory: %w", err)
+	}
+	if linked {
+		return "", errors.New("Mihomo data directory must not contain symbolic or reparse links")
+	}
+	if err := os.Chmod(path, 0700); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func sanitizedEnvironment() []string {
+	allowed := map[string]struct{}{
+		"LANG": {}, "LC_ALL": {}, "SSL_CERT_FILE": {}, "SSL_CERT_DIR": {},
+		"SYSTEMROOT": {}, "WINDIR": {}, "TEMP": {}, "TMP": {}, "TMPDIR": {},
+	}
+	var environment []string
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, keep := allowed[strings.ToUpper(key)]; keep {
+			environment = append(environment, entry)
+		}
+	}
+	return environment
+}

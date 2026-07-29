@@ -19,14 +19,19 @@ import (
 var (
 	metadataBucket = []byte("runtime_metadata")
 
-	revisionKey       = []byte("revision")
-	eventCursorKey    = []byte("event_cursor")
-	installationIDKey = []byte("installation_id")
-	createdAtKey      = []byte("created_at")
+	revisionKey              = []byte("revision")
+	eventCursorKey           = []byte("event_cursor")
+	installationIDKey        = []byte("installation_id")
+	createdAtKey             = []byte("created_at")
+	mihomoStateKey           = []byte("mihomo_state")
+	runModeKey               = []byte("run_mode")
+	currentOperationKey      = []byte("current_operation")
+	currentConfigRevisionKey = []byte("current_config_revision")
 )
 
 type Store struct {
-	db *bbolt.DB
+	db   *bbolt.DB
+	root string
 }
 
 func Open(root string) (*Store, error) {
@@ -43,7 +48,7 @@ func Open(root string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("secure Runtime state: %w", err)
 	}
-	store := &Store{db: db}
+	store := &Store{db: db, root: root}
 	if err := store.initialize(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -76,6 +81,18 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 		if err != nil {
 			return err
 		}
+		mihomoState := string(metadata.Get(mihomoStateKey))
+		if mihomoState == "" {
+			mihomoState = "not_installed"
+		}
+		runMode := string(metadata.Get(runModeKey))
+		if runMode == "" {
+			runMode = "unconfigured"
+		}
+		operations, err := operationSummary(transaction, string(metadata.Get(currentOperationKey)))
+		if err != nil {
+			return err
+		}
 		snapshot = runtimeapi.Snapshot{
 			ProtocolVersion: runtimeapi.ProtocolVersion,
 			Revision:        revision,
@@ -84,12 +101,12 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 				ServiceState: "running",
 			},
 			Mihomo: runtimeapi.MihomoStatus{
-				State:    "not_installed",
+				State:    mihomoState,
 				Recovery: "idle",
 			},
-			RunMode:           "unconfigured",
+			RunMode:           runMode,
 			Sources:           runtimeapi.SourceStatus{},
-			Operations:        runtimeapi.OperationStatus{},
+			Operations:        operations,
 			Updates:           runtimeapi.UpdateStatus{},
 			LatestEventCursor: eventCursor,
 			ObservedAt:        observedAt.UTC(),
@@ -150,6 +167,19 @@ func (s *Store) initialize() error {
 			if err := metadata.Put(createdAtKey, []byte(time.Now().UTC().Format(time.RFC3339Nano))); err != nil {
 				return err
 			}
+		}
+		if metadata.Get(mihomoStateKey) == nil {
+			if err := metadata.Put(mihomoStateKey, []byte("not_installed")); err != nil {
+				return err
+			}
+		}
+		if metadata.Get(runModeKey) == nil {
+			if err := metadata.Put(runModeKey, []byte("unconfigured")); err != nil {
+				return err
+			}
+		}
+		if err := createRuntimeBuckets(transaction); err != nil {
+			return err
 		}
 		return nil
 	})

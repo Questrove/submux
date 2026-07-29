@@ -14,8 +14,9 @@ func platformDefaults() Defaults {
 	}
 	stateRoot := filepath.Join(programData, "SubmuxRuntime")
 	return Defaults{
-		StateRoot: stateRoot,
-		Endpoint:  `\\.\pipe\submux-runtime`,
-		LockFile:  filepath.Join(stateRoot, "runtime.lock"),
+		StateRoot:       stateRoot,
+		Endpoint:        `\\.\pipe\submux-runtime`,
+		LockFile:        filepath.Join(stateRoot, "runtime.lock"),
+		ControlEndpoint: `\\.\pipe\submux-runtime-mihomo`,
 	}
 }

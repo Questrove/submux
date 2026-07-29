@@ -12,6 +12,8 @@ const (
 	HeaderRequestID       = "X-Submux-Request-ID"
 	HeaderProtocolVersion = "X-Submux-Protocol-Version"
 	HeaderClientVersion   = "X-Submux-Client-Version"
+	HeaderContentSize     = "X-Submux-Content-Size"
+	HeaderContentSHA256   = "X-Submux-Content-SHA256"
 
 	MaxRequestBytes  = 1 << 20
 	MaxResponseBytes = 4 << 20

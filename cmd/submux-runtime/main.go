@@ -10,14 +10,21 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
+	"time"
 
 	"submux/internal/buildinfo"
+	"submux/internal/mihomo"
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimeapp"
+	"submux/internal/runtimecore"
 	"submux/internal/runtimeinstance"
 	"submux/internal/runtimeipc"
 	"submux/internal/runtimepaths"
+	"submux/internal/runtimeprocess"
 	"submux/internal/runtimestate"
 )
 
@@ -44,7 +51,16 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "status" {
 		return runStatus(arguments[1:], stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|status|version|--version-json]")
+	if arguments[0] == "import" {
+		return runImport(arguments[1:], os.Stdin, stdout, stderr)
+	}
+	if arguments[0] == "operation" {
+		return runOperation(arguments[1:], stdout, stderr)
+	}
+	if arguments[0] == "proxy" {
+		return runProxy(arguments[1:], stdout, stderr)
+	}
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|status|import|operation|proxy|version|--version-json]")
 	return 2
 }
 
@@ -54,6 +70,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	stateRoot := flags.String("state-dir", defaults.StateRoot, "Runtime state directory")
 	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	proxyPort := flags.Int("proxy-port", mihomo.DefaultExplicitProxyPort, "loopback explicit proxy port")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -92,17 +109,62 @@ func runServe(arguments []string, stderr io.Writer) int {
 		writeCLIError(stderr, runtimeapi.ErrorUnauthorized, err.Error(), false)
 		return 1
 	}
-	service := &runtimeapp.Service{State: state, Version: buildinfo.Current().Version}
-	server, err := runtimeipc.NewServer(service, authorizer)
+	process := &runtimeprocess.Process{
+		ConfigPath: filepath.Join(*stateRoot, "config", "current", "config.yaml"),
+		DataDir:    filepath.Join(*stateRoot, "mihomo-data"),
+	}
+	core := &runtimecore.Store{
+		Root:       filepath.Join(*stateRoot, "core"),
+		Verifier:   runtimecore.CommandVerifier{},
+		Activation: process,
+	}
+	control := runtimeprocess.ControlProbe{Endpoint: defaults.ControlEndpoint}
+	verifier := &mihomo.RuntimeCheck{
+		Control:    control,
+		ProxyProbe: mihomo.LocalHTTPProxyProbe{},
+	}
+	executor := &runtimeapp.MihomoExecutor{
+		State:           state,
+		Core:            core,
+		Process:         process,
+		ConfigRoot:      filepath.Join(*stateRoot, "config"),
+		ControlEndpoint: defaults.ControlEndpoint,
+		ProxyPort:       *proxyPort,
+		Platform:        runtime.GOOS,
+		Verifier:        verifier,
+	}
+	coordinator := &runtimeapp.Coordinator{
+		State:         state,
+		Executor:      executor,
+		Version:       buildinfo.Current().Version,
+		QueueCapacity: runtimeapp.DefaultQueueCapacity,
+	}
+	server, err := runtimeipc.NewServer(coordinator, authorizer)
 	if err != nil {
 		writeCLIError(stderr, runtimeapi.ErrorInternal, err.Error(), false)
 		return 1
 	}
 
-	contextWithSignal, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	contextWithSignal, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignal()
+	serviceContext, stop := context.WithCancel(contextWithSignal)
 	defer stop()
 	log.New(stderr, "submux-runtime: ", log.LstdFlags).Printf("serving local IPC at %s", *endpoint)
-	if err := server.Serve(contextWithSignal, listener); err != nil {
+	workerResult := make(chan error, 1)
+	go func() {
+		workerErr := coordinator.Run(serviceContext)
+		workerResult <- workerErr
+		if workerErr != nil {
+			stop()
+		}
+	}()
+	serverErr := server.Serve(serviceContext, listener)
+	stop()
+	workerErr := <-workerResult
+	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	processErr := process.Stop(shutdownContext)
+	if err := errors.Join(serverErr, workerErr, processErr); err != nil {
 		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
 		return 1
 	}
@@ -159,6 +221,216 @@ func runStatus(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	return 0
 }
 
+func runImport(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("import", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	contentType := flags.String("content-type", "application/x-yaml", "imported content type")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: submux-runtime import [options] <file|->")
+		return 2
+	}
+	var reader io.Reader = stdin
+	var file *os.File
+	var err error
+	if flags.Arg(0) != "-" {
+		file, err = os.Open(flags.Arg(0))
+		if err != nil {
+			fmt.Fprintf(stderr, "open import file: %v\n", err)
+			return 1
+		}
+		defer file.Close()
+		reader = file
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, runtimestate.MaxImportBytes+1))
+	if err != nil {
+		fmt.Fprintf(stderr, "read import: %v\n", err)
+		return 1
+	}
+	if len(body) == 0 || len(body) > runtimestate.MaxImportBytes {
+		fmt.Fprintf(stderr, "import must contain 1 to %d bytes\n", runtimestate.MaxImportBytes)
+		return 1
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	content, err := client.UploadImport(context.Background(), *contentType, body)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(stdout).Encode(content)
+	} else {
+		fmt.Fprintln(stdout, content.ID)
+	}
+	return 0
+}
+
+func runOperation(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime operation [get|wait|cancel] <id>")
+		return 2
+	}
+	command := arguments[0]
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("operation "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "operation command requires one operation ID")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	id := flags.Arg(0)
+	var operation runtimeapi.Operation
+	switch command {
+	case "get":
+		operation, err = client.GetOperation(context.Background(), id)
+	case "wait":
+		operation, err = client.WaitOperation(context.Background(), id, 250*time.Millisecond)
+	case "cancel":
+		var snapshot runtimeapi.Snapshot
+		snapshot, err = client.Observe(context.Background())
+		if err == nil {
+			operation, err = client.CancelOperation(context.Background(), id, runtimeapi.CancelOperationRequest{
+				IfRevision: snapshot.Revision,
+			})
+		}
+	default:
+		fmt.Fprintln(stderr, "usage: submux-runtime operation [get|wait|cancel] <id>")
+		return 2
+	}
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime proxy [start|stop|verify]")
+		return 2
+	}
+	command := arguments[0]
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("proxy "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", false, "wait for the operation to finish")
+	contentID := flags.String("content-id", "", "uploaded Mihomo configuration content ID")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "proxy command does not accept positional arguments")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	if command == "verify" {
+		if *contentID != "" || *wait {
+			fmt.Fprintln(stderr, "proxy verify does not accept --content-id or --wait")
+			return 2
+		}
+		verification, err := client.VerifyProxy(context.Background())
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		if *jsonOutput {
+			_ = json.NewEncoder(stdout).Encode(verification)
+		} else if verification.Available {
+			fmt.Fprintf(stdout, "available via %s at %s\n", verification.Kind, strings.Join(verification.Addresses, ", "))
+		} else {
+			fmt.Fprintln(stdout, "unavailable")
+		}
+		if !verification.Available {
+			return 1
+		}
+		return 0
+	}
+	if command != "start" && command != "stop" {
+		fmt.Fprintln(stderr, "usage: submux-runtime proxy [start|stop|verify]")
+		return 2
+	}
+	if command == "stop" && *contentID != "" {
+		fmt.Fprintln(stderr, "proxy stop does not accept --content-id")
+		return 2
+	}
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	action := runtimeapi.Action{Kind: runtimeapi.ActionStartProxy}
+	if command == "stop" {
+		action.Kind = runtimeapi.ActionStopProxy
+	} else if *contentID != "" {
+		action.Kind = runtimeapi.ActionApplyImportedConfig
+		action.Params.ContentID = *contentID
+	}
+	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action:     action,
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(context.Background(), operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func writeOperation(stdout io.Writer, asJSON bool, operation runtimeapi.Operation) int {
+	if asJSON {
+		_ = json.NewEncoder(stdout).Encode(runtimeapi.OperationResponse{Operation: operation})
+	} else {
+		fmt.Fprintf(stdout, "%s %s %s\n", operation.ID, operation.State, operation.Stage)
+	}
+	switch operation.State {
+	case runtimeapi.OperationFailed, runtimeapi.OperationCancelled, runtimeapi.OperationOutcomeUnknown:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func writeClientFailure(stdout io.Writer, stderr io.Writer, asJSON bool, err error) int {
+	var clientError *runtimeipc.ClientError
+	if !errors.As(err, &clientError) {
+		clientError = &runtimeipc.ClientError{
+			Code:      runtimeapi.ErrorServiceUnavailable,
+			Message:   err.Error(),
+			Retryable: true,
+		}
+	}
+	return writeStatusError(stdout, stderr, asJSON, clientError)
+}
+
 func writeStatusError(stdout io.Writer, stderr io.Writer, asJSON bool, clientError *runtimeipc.ClientError) int {
 	if asJSON {
 		_ = json.NewEncoder(stdout).Encode(runtimeapi.ErrorEnvelope{
@@ -168,6 +440,7 @@ func writeStatusError(stdout io.Writer, stderr io.Writer, asJSON bool, clientErr
 				Message:   clientError.Message,
 				Retryable: clientError.Retryable,
 			},
+			CurrentRevision: clientError.CurrentRevision,
 		})
 	} else {
 		writeCLIError(stderr, clientError.Code, clientError.Message, clientError.Retryable)
@@ -177,6 +450,9 @@ func writeStatusError(stdout io.Writer, stderr io.Writer, asJSON bool, clientErr
 	}
 	if clientError.Code == runtimeapi.ErrorUnauthorized {
 		return 5
+	}
+	if clientError.Code == runtimeapi.ErrorRevisionConflict || clientError.Code == runtimeapi.ErrorRequestConflict {
+		return 6
 	}
 	return 1
 }

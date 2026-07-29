@@ -1,6 +1,7 @@
 package runtimeipc
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,30 @@ type observerFunc func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Sna
 
 func (function observerFunc) Observe(ctx context.Context, peer runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
 	return function(ctx, peer)
+}
+
+type operatorObserver struct {
+	observerFunc
+}
+
+func (operatorObserver) UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error) {
+	return runtimeapi.ImportContent{}, nil
+}
+
+func (operatorObserver) Execute(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error) {
+	return runtimeapi.Operation{}, false, nil
+}
+
+func (operatorObserver) GetOperation(context.Context, string) (runtimeapi.Operation, error) {
+	return runtimeapi.Operation{}, nil
+}
+
+func (operatorObserver) CancelOperation(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CancelOperationRequest) (runtimeapi.Operation, bool, error) {
+	return runtimeapi.Operation{}, false, nil
+}
+
+func (operatorObserver) VerifyProxy(context.Context) (runtimeapi.ProxyVerification, error) {
+	return runtimeapi.ProxyVerification{}, nil
 }
 
 func TestSnapshotHandlerValidatesProtocolAndPeer(t *testing.T) {
@@ -129,5 +154,34 @@ func TestSnapshotHandlerErrorsAreStable(t *testing.T) {
 				t.Fatalf("body = %s, want error code %q", recorder.Body.String(), test.errCode)
 			}
 		})
+	}
+}
+
+func TestOperationHandlerRejectsUnknownAndDuplicateJSONFields(t *testing.T) {
+	service := operatorObserver{observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+		return runtimeapi.Snapshot{}, nil
+	}}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	tests := []string{
+		`{"request_id":"request-1","request_id":"request-2","if_revision":1,"action":{"kind":"proxy.stop","params":{}}}`,
+		`{"request_id":"request-1","if_revision":1,"action":{"kind":"proxy.stop","params":{"unknown":true}}}`,
+	}
+	for _, body := range tests {
+		request := httptest.NewRequest(http.MethodPost, "/v1/operations", bytes.NewBufferString(body))
+		request.Header.Set(HeaderRequestID, "request-1")
+		request.Header.Set(HeaderProtocolVersion, "1")
+		request.Header.Set(HeaderClientVersion, "test")
+		request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status=%d response=%s", body, recorder.Code, recorder.Body.String())
+		}
+		if !strings.Contains(recorder.Body.String(), `"code":"invalid_request"`) {
+			t.Fatalf("body %s: response=%s", body, recorder.Body.String())
+		}
 	}
 }

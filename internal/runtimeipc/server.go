@@ -2,6 +2,7 @@ package runtimeipc
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,14 +13,24 @@ import (
 	"time"
 
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimestate"
 )
 
 type Observer interface {
 	Observe(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error)
 }
 
+type Operator interface {
+	UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error)
+	Execute(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error)
+	GetOperation(context.Context, string) (runtimeapi.Operation, error)
+	CancelOperation(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CancelOperationRequest) (runtimeapi.Operation, bool, error)
+	VerifyProxy(context.Context) (runtimeapi.ProxyVerification, error)
+}
+
 type Server struct {
 	observer   Observer
+	operator   Operator
 	authorizer Authorizer
 }
 
@@ -37,7 +48,8 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	if authorizer == nil {
 		return nil, errors.New("Runtime authorizer is required")
 	}
-	return &Server{observer: observer, authorizer: authorizer}, nil
+	operator, _ := observer.(Operator)
+	return &Server{observer: observer, operator: operator, authorizer: authorizer}, nil
 }
 
 func (s *Server) Serve(ctx context.Context, listener LocalListener) error {
@@ -87,6 +99,10 @@ func (s *Server) Serve(ctx context.Context, listener LocalListener) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/snapshot", s.handleSnapshot)
+	mux.HandleFunc("/v1/imports", s.handleImport)
+	mux.HandleFunc("/v1/operations", s.handleCreateOperation)
+	mux.HandleFunc("/v1/operations/", s.handleOperation)
+	mux.HandleFunc("/v1/proxy/verify", s.handleProxyVerification)
 	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
@@ -97,20 +113,24 @@ func (s *Server) handleSnapshot(writer http.ResponseWriter, request *http.Reques
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Content-Type", "application/json")
 
-	requestID, ok := s.validateRequest(writer, request)
+	requestID, _, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
-	peerValue, ok := request.Context().Value(peerContextKey{}).(peerContextValue)
-	if !ok || peerValue.err != nil {
-		s.writeError(writer, request, http.StatusForbidden, runtimeapi.ErrorUnauthorized, "Runtime could not verify the local peer identity", false)
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime snapshot only accepts GET", false)
 		return
 	}
-	if err := s.authorizer.Authorize(peerValue.identity); err != nil {
-		s.writeError(writer, request, http.StatusForbidden, runtimeapi.ErrorUnauthorized, "Runtime peer is not authorized", false)
+	if request.URL.RawQuery != "" || requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime snapshot does not accept query parameters or a request body", false)
 		return
 	}
-	snapshot, err := s.observer.Observe(request.Context(), peerValue.identity)
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	snapshot, err := s.observer.Observe(request.Context(), peer)
 	if err != nil {
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime state is temporarily unavailable", true)
 		return
@@ -121,44 +141,301 @@ func (s *Server) handleSnapshot(writer http.ResponseWriter, request *http.Reques
 	_ = json.NewEncoder(writer).Encode(snapshot)
 }
 
-func (s *Server) validateRequest(writer http.ResponseWriter, request *http.Request) (string, bool) {
-	if request.Method != http.MethodGet {
-		writer.Header().Set("Allow", http.MethodGet)
-		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime snapshot only accepts GET", false)
-		return "", false
+func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime imports only accept POST", false)
+		return
 	}
 	if request.URL.RawQuery != "" {
-		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime snapshot does not accept query parameters", false)
-		return "", false
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime imports do not accept query parameters", false)
+		return
 	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation service is unavailable", true)
+		return
+	}
+	size, err := strconv.ParseInt(request.Header.Get(HeaderContentSize), 10, 64)
+	if err != nil || size <= 0 || size > runtimestate.MaxImportBytes {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime import size is missing or invalid", false)
+		return
+	}
+	digest := request.Header.Get(HeaderContentSHA256)
+	decodedDigest, err := hex.DecodeString(digest)
+	if err != nil || len(decodedDigest) != 32 {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime import SHA-256 is missing or invalid", false)
+		return
+	}
+	contentType := request.Header.Get("Content-Type")
+	body, err := io.ReadAll(io.LimitReader(request.Body, runtimestate.MaxImportBytes+1))
+	if err != nil {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime import body could not be read", false)
+		return
+	}
+	if len(body) > runtimestate.MaxImportBytes {
+		s.writeError(writer, request, http.StatusRequestEntityTooLarge, runtimeapi.ErrorRequestTooLarge, "Runtime import exceeds the hard size limit", false)
+		return
+	}
+	if int64(len(body)) != size {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime import body does not match its declared size", false)
+		return
+	}
+	content, err := s.operator.UploadImport(request.Context(), peer, contentType, size, digest, body)
+	if err != nil {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime rejected the imported content", false)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusCreated, content)
+}
+
+func (s *Server) handleCreateOperation(writer http.ResponseWriter, request *http.Request) {
+	requestID, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime operations only accept POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime operations do not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation service is unavailable", true)
+		return
+	}
+	var operationRequest runtimeapi.CreateOperationRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &operationRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	if operationRequest.RequestID != requestID || !validAction(operationRequest.Action) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime operation request is invalid", false)
+		return
+	}
+	operation, _, err := s.operator.Execute(request.Context(), peer, clientVersion, operationRequest)
+	if err != nil {
+		s.writeOperationError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusAccepted, runtimeapi.OperationResponse{Operation: operation})
+}
+
+func (s *Server) handleOperation(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation service is unavailable", true)
+		return
+	}
+	suffix := strings.TrimPrefix(request.URL.Path, "/v1/operations/")
+	parts := strings.Split(suffix, "/")
+	if len(parts) == 0 || !validIdentifier(parts[0], 128) || !strings.HasPrefix(parts[0], "op_") {
+		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorNotFound, "Runtime operation was not found", false)
+		return
+	}
+	switch {
+	case len(parts) == 1 && request.Method == http.MethodGet:
+		if request.URL.RawQuery != "" || requestHasBody(request) {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime operation query is invalid", false)
+			return
+		}
+		operation, err := s.operator.GetOperation(request.Context(), parts[0])
+		if err != nil {
+			s.writeOperationError(writer, request, err)
+			return
+		}
+		writer.Header().Set(HeaderRequestID, requestID)
+		s.writeJSON(writer, http.StatusOK, runtimeapi.OperationResponse{Operation: operation})
+	case len(parts) == 2 && parts[1] == "cancel" && request.Method == http.MethodPost:
+		if request.URL.RawQuery != "" {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime cancellation query is invalid", false)
+			return
+		}
+		var cancellation runtimeapi.CancelOperationRequest
+		if err := decodeStrictJSON(request.Body, MaxRequestBytes, &cancellation); err != nil {
+			s.writeDecodeError(writer, request, err)
+			return
+		}
+		if cancellation.RequestID != requestID {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime cancellation request ID does not match its header", false)
+			return
+		}
+		operation, _, err := s.operator.CancelOperation(request.Context(), peer, parts[0], cancellation)
+		if err != nil {
+			s.writeOperationError(writer, request, err)
+			return
+		}
+		writer.Header().Set(HeaderRequestID, requestID)
+		s.writeJSON(writer, http.StatusOK, runtimeapi.OperationResponse{Operation: operation})
+	default:
+		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorNotFound, "Runtime operation endpoint was not found", false)
+	}
+}
+
+func (s *Server) handleProxyVerification(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodGet || request.URL.RawQuery != "" || requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime proxy verification only accepts an empty GET request", false)
+		return
+	}
+	if _, ok := s.authenticatedPeer(writer, request); !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation service is unavailable", true)
+		return
+	}
+	verification, err := s.operator.VerifyProxy(request.Context())
+	if err != nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime proxy verification is unavailable", true)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, verification)
+}
+
+func (s *Server) validateCommon(writer http.ResponseWriter, request *http.Request) (string, string, bool) {
 	requestID := request.Header.Get(HeaderRequestID)
 	if !validIdentifier(requestID, 128) {
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime request ID is missing or invalid", false)
-		return "", false
+		return "", "", false
 	}
 	versionText := request.Header.Get(HeaderProtocolVersion)
 	version, err := strconv.Atoi(versionText)
 	if err != nil || version != runtimeapi.ProtocolVersion {
 		s.writeError(writer, request, http.StatusUpgradeRequired, runtimeapi.ErrorProtocolUnsupported, "Runtime protocol version is not supported", false)
-		return "", false
+		return "", "", false
 	}
 	clientVersion := request.Header.Get(HeaderClientVersion)
 	if clientVersion == "" || len(clientVersion) > 128 || hasControlCharacter(clientVersion) {
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime client version is missing or invalid", false)
-		return "", false
+		return "", "", false
 	}
-	if request.ContentLength > 0 || len(request.TransferEncoding) > 0 {
-		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime snapshot does not accept a request body", false)
-		return "", false
+	return requestID, clientVersion, true
+}
+
+func (s *Server) authenticatedPeer(writer http.ResponseWriter, request *http.Request) (runtimeapi.PeerIdentity, bool) {
+	peerValue, ok := request.Context().Value(peerContextKey{}).(peerContextValue)
+	if !ok || peerValue.err != nil {
+		s.writeError(writer, request, http.StatusForbidden, runtimeapi.ErrorUnauthorized, "Runtime could not verify the local peer identity", false)
+		return runtimeapi.PeerIdentity{}, false
 	}
-	if request.Body != nil {
-		body, err := io.ReadAll(io.LimitReader(request.Body, 1))
-		if err != nil || len(body) != 0 {
-			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime snapshot does not accept a request body", false)
-			return "", false
-		}
+	if err := s.authorizer.Authorize(peerValue.identity); err != nil {
+		s.writeError(writer, request, http.StatusForbidden, runtimeapi.ErrorUnauthorized, "Runtime peer is not authorized", false)
+		return runtimeapi.PeerIdentity{}, false
 	}
-	return requestID, true
+	return peerValue.identity, true
+}
+
+func (s *Server) writeDecodeError(writer http.ResponseWriter, request *http.Request, err error) {
+	if errors.Is(err, ErrJSONTooLarge) {
+		s.writeError(writer, request, http.StatusRequestEntityTooLarge, runtimeapi.ErrorRequestTooLarge, "Runtime request exceeds the hard size limit", false)
+		return
+	}
+	s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime request JSON is invalid", false)
+}
+
+func (s *Server) writeOperationError(writer http.ResponseWriter, request *http.Request, err error) {
+	var revisionError *runtimestate.RevisionConflictError
+	switch {
+	case errors.As(err, &revisionError):
+		s.writeErrorEnvelope(writer, request, http.StatusConflict, runtimeapi.ErrorEnvelope{
+			ProtocolVersion: runtimeapi.ProtocolVersion,
+			Error: runtimeapi.ProtocolError{
+				Code:      runtimeapi.ErrorRevisionConflict,
+				Message:   "Runtime Snapshot revision has changed",
+				Retryable: false,
+			},
+			CurrentRevision: revisionError.Current,
+		})
+	case errors.Is(err, runtimestate.ErrRequestConflict):
+		s.writeError(writer, request, http.StatusConflict, runtimeapi.ErrorRequestConflict, "Runtime request ID is already used by another request", false)
+	case errors.Is(err, runtimestate.ErrBusy):
+		s.writeError(writer, request, http.StatusTooManyRequests, runtimeapi.ErrorBusy, "Runtime operation queue is full", true)
+	case errors.Is(err, runtimestate.ErrOperationNotFound):
+		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorNotFound, "Runtime operation was not found", false)
+	case errors.Is(err, runtimestate.ErrNotCancellable):
+		s.writeError(writer, request, http.StatusConflict, runtimeapi.ErrorNotCancellable, "Runtime operation is no longer cancellable", false)
+	case errors.Is(err, runtimestate.ErrImportNotFound):
+		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorNotFound, "Runtime imported content was not found", false)
+	case errors.Is(err, runtimestate.ErrImportExpired):
+		s.writeError(writer, request, http.StatusConflict, runtimeapi.ErrorContentExpired, "Runtime imported content has expired", false)
+	case errors.Is(err, runtimestate.ErrImportConsumed):
+		s.writeError(writer, request, http.StatusConflict, runtimeapi.ErrorContentConsumed, "Runtime imported content is already reserved or consumed", false)
+	case errors.Is(err, runtimestate.ErrImportOwner):
+		s.writeError(writer, request, http.StatusForbidden, runtimeapi.ErrorUnauthorized, "Runtime imported content belongs to another caller", false)
+	default:
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation state is temporarily unavailable", true)
+	}
+}
+
+func (s *Server) writeJSON(writer http.ResponseWriter, status int, value any) {
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+	writer.WriteHeader(status)
+	_ = json.NewEncoder(writer).Encode(value)
+}
+
+func (s *Server) writeErrorEnvelope(
+	writer http.ResponseWriter,
+	request *http.Request,
+	status int,
+	response runtimeapi.ErrorEnvelope,
+) {
+	requestID := request.Header.Get(HeaderRequestID)
+	if !validIdentifier(requestID, 128) {
+		requestID = ""
+	}
+	response.ProtocolVersion = runtimeapi.ProtocolVersion
+	response.RequestID = requestID
+	if response.Error.Code == runtimeapi.ErrorProtocolUnsupported {
+		response.SupportedVersions = []int{runtimeapi.ProtocolVersion}
+	}
+	s.writeJSON(writer, status, response)
+}
+
+func requestHasBody(request *http.Request) bool {
+	return request.ContentLength > 0 || len(request.TransferEncoding) > 0
+}
+
+func validAction(action runtimeapi.Action) bool {
+	switch action.Kind {
+	case runtimeapi.ActionApplyImportedConfig:
+		return strings.HasPrefix(action.Params.ContentID, "content_") &&
+			len(action.Params.ContentID) > len("content_") &&
+			len(action.Params.ContentID) <= len("content_")+64
+	case runtimeapi.ActionStartProxy, runtimeapi.ActionStopProxy:
+		return action.Params.ContentID == ""
+	default:
+		return false
+	}
 }
 
 func (s *Server) writeError(
@@ -169,27 +446,14 @@ func (s *Server) writeError(
 	message string,
 	retryable bool,
 ) {
-	requestID := request.Header.Get(HeaderRequestID)
-	if !validIdentifier(requestID, 128) {
-		requestID = ""
-	}
-	response := runtimeapi.ErrorEnvelope{
+	s.writeErrorEnvelope(writer, request, status, runtimeapi.ErrorEnvelope{
 		ProtocolVersion: runtimeapi.ProtocolVersion,
-		RequestID:       requestID,
 		Error: runtimeapi.ProtocolError{
 			Code:      code,
 			Message:   message,
 			Retryable: retryable,
 		},
-	}
-	if code == runtimeapi.ErrorProtocolUnsupported {
-		response.SupportedVersions = []int{runtimeapi.ProtocolVersion}
-	}
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Content-Type", "application/json")
-	writer.Header().Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(response)
+	})
 }
 
 func validIdentifier(value string, maximum int) bool {

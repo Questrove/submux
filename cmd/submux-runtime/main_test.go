@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimeapp"
 	"submux/internal/runtimeipc"
+	"submux/internal/runtimestate"
 )
 
 type commandObserver struct{}
@@ -26,6 +28,45 @@ func (commandObserver) Observe(_ context.Context, _ runtimeapi.PeerIdentity) (ru
 		RunMode:           "unconfigured",
 		LatestEventCursor: 12,
 		ObservedAt:        time.Now().UTC(),
+	}, nil
+}
+
+type commandExecutor struct {
+	state *runtimestate.Store
+}
+
+func (e commandExecutor) Execute(
+	_ context.Context,
+	operation runtimeapi.Operation,
+	report runtimeapp.StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if operation.Action.Kind == runtimeapi.ActionApplyImportedConfig {
+		if _, _, err := e.state.ConsumeImport(
+			operation.Action.Params.ContentID,
+			operation.CallerIdentity,
+			operation.ID,
+			time.Now().UTC(),
+		); err != nil {
+			return nil, err
+		}
+	}
+	if err := report("committing", 70, false); err != nil {
+		return nil, err
+	}
+	return &runtimeapi.OperationResult{
+		ConfigRevision: operation.ID,
+		ProxyKind:      "mixed",
+		ProxyAddresses: []string{"127.0.0.1:7890", "[::1]:7890"},
+		Verified:       true,
+	}, nil
+}
+
+func (commandExecutor) Verify(context.Context) (runtimeapi.ProxyVerification, error) {
+	return runtimeapi.ProxyVerification{
+		Available: true,
+		Kind:      "mixed",
+		Addresses: []string{"127.0.0.1:7890", "[::1]:7890"},
+		CheckedAt: time.Now().UTC(),
 	}, nil
 }
 
@@ -127,6 +168,115 @@ func TestServeLockFileCannotBeOverridden(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "flag provided but not defined") {
 		t.Fatalf("serve accepted lock override: %s", stderr.String())
+	}
+}
+
+func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	coordinator := &runtimeapp.Coordinator{
+		State:    state,
+		Executor: commandExecutor{state: state},
+		Version:  "test",
+	}
+	endpoint := commandTestEndpoint(t)
+	listener, err := runtimeipc.Listen(endpoint)
+	if err != nil {
+		t.Fatalf("listen on Runtime IPC: %v", err)
+	}
+	authorizer, err := runtimeipc.CurrentUserAuthorizer()
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("create Runtime authorizer: %v", err)
+	}
+	server, err := runtimeipc.NewServer(coordinator, authorizer)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("create Runtime server: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	workerResult := make(chan error, 1)
+	serverResult := make(chan error, 1)
+	go func() { workerResult <- coordinator.Run(ctx) }()
+	go func() { serverResult <- server.Serve(ctx, listener) }()
+
+	var importOut bytes.Buffer
+	var stderr bytes.Buffer
+	source := "proxies: []\nrules: []\n"
+	exitCode := runImport(
+		[]string{"--endpoint", endpoint, "--json", "-"},
+		strings.NewReader(source),
+		&importOut,
+		&stderr,
+	)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("import exit=%d stdout=%s stderr=%s", exitCode, importOut.String(), stderr.String())
+	}
+	var content runtimeapi.ImportContent
+	if err := json.Unmarshal(importOut.Bytes(), &content); err != nil {
+		cancel()
+		t.Fatalf("decode CLI import: %v", err)
+	}
+
+	var startOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runProxy([]string{
+		"start",
+		"--endpoint", endpoint,
+		"--content-id", content.ID,
+		"--wait",
+		"--json",
+	}, &startOut, &stderr)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("proxy start exit=%d stdout=%s stderr=%s", exitCode, startOut.String(), stderr.String())
+	}
+	var operationEnvelope runtimeapi.OperationResponse
+	if err := json.Unmarshal(startOut.Bytes(), &operationEnvelope); err != nil {
+		cancel()
+		t.Fatalf("decode CLI operation: %v", err)
+	}
+	if operationEnvelope.Operation.State != runtimeapi.OperationSucceeded {
+		cancel()
+		t.Fatalf("CLI operation = %#v", operationEnvelope.Operation)
+	}
+
+	var getOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runOperation([]string{
+		"get",
+		"--endpoint", endpoint,
+		"--json",
+		operationEnvelope.Operation.ID,
+	}, &getOut, &stderr)
+	if exitCode != 0 || !json.Valid(getOut.Bytes()) {
+		cancel()
+		t.Fatalf("operation get exit=%d stdout=%s stderr=%s", exitCode, getOut.String(), stderr.String())
+	}
+
+	var verifyOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runProxy([]string{"verify", "--endpoint", endpoint, "--json"}, &verifyOut, &stderr)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("proxy verify exit=%d stdout=%s stderr=%s", exitCode, verifyOut.String(), stderr.String())
+	}
+	var verification runtimeapi.ProxyVerification
+	if err := json.Unmarshal(verifyOut.Bytes(), &verification); err != nil || !verification.Available {
+		cancel()
+		t.Fatalf("CLI verification = %#v err=%v", verification, err)
+	}
+
+	cancel()
+	if err := <-serverResult; err != nil {
+		t.Fatalf("stop Runtime server: %v", err)
+	}
+	if err := <-workerResult; err != nil {
+		t.Fatalf("stop Runtime coordinator: %v", err)
 	}
 }
 

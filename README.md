@@ -73,7 +73,18 @@ Submux Runtime 是另行安装的机器级 Mihomo 管理程序。它可以读取
 
 Runtime 可以保存 submux 输出订阅、外部 HTTP(S) 完整配置和本机导入副本。来源原文之上可以应用本机高级覆盖，最后由 Runtime 强制写入监听、控制端点、TUN、路由、DNS、网关和数据路径等保留设置。来源不能扩大本机权限或引用任意文件。
 
-Runtime 正在实现。仓库目前已有 `submux-runtime` 服务骨架、本机只读 IPC、单实例锁和单写者状态库；配置操作、网络模式和安装器尚未完成，因此还不能用于正式部署。新的 Runtime 采用清理后重新安装，不读取或迁移任何已移除的远程运行端状态。
+Runtime 正在实现。仓库目前已有 `submux-runtime` 服务骨架、本机 IPC、单实例锁、单写者状态库、持久化运行操作，以及从本机配置副本启动双栈回环显式代理的流程；远程来源、TUN/网关模式和安装器尚未完成，因此还不能用于正式部署。新的 Runtime 采用清理后重新安装，不读取或迁移任何已移除的远程运行端状态。
+
+开发环境中，在 Runtime 状态目录已经放置受信任 Mihomo 核心并启动服务后，可以先上传配置副本，再用返回的 `content_id` 创建并等待运行操作：
+
+```bash
+go run ./cmd/submux-runtime import --json ./config.yaml
+go run ./cmd/submux-runtime proxy start --content-id <content_id> --wait --json
+go run ./cmd/submux-runtime proxy verify --json
+go run ./cmd/submux-runtime proxy stop --wait --json
+```
+
+CLI 打开文件并上传字节，Runtime 不接收客户端文件路径。运行操作通过 `operation get`、`operation wait` 和 `operation cancel` 查询、等待或取消。
 
 完整设计见：
 

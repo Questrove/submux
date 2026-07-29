@@ -19,8 +19,13 @@ type ControlProbe interface {
 type RuntimeCheck struct {
 	Control       ControlProbe
 	Dialer        *net.Dialer
+	ProxyProbe    ProxyProbe
 	ReadyTimeout  time.Duration
 	RetryInterval time.Duration
+}
+
+type ProxyProbe interface {
+	Probe(context.Context, string) error
 }
 
 func (v *RuntimeCheck) VerifyRuntime(ctx context.Context, proxyAddr string) error {
@@ -76,6 +81,9 @@ func (v *RuntimeCheck) verifyOnce(ctx context.Context, proxyAddr string) error {
 	}
 	if proxyAddr == "" {
 		return nil
+	}
+	if v.ProxyProbe != nil {
+		return v.ProxyProbe.Probe(ctx, proxyAddr)
 	}
 	dialer := v.Dialer
 	if dialer == nil {

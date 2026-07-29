@@ -1,9 +1,10 @@
 package runtimepaths
 
 type Defaults struct {
-	StateRoot string
-	Endpoint  string
-	LockFile  string
+	StateRoot       string
+	Endpoint        string
+	LockFile        string
+	ControlEndpoint string
 }
 
 func Current() Defaults {
