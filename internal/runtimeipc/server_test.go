@@ -29,6 +29,10 @@ func (operatorObserver) UploadImport(context.Context, runtimeapi.PeerIdentity, s
 	return runtimeapi.ImportContent{}, nil
 }
 
+func (operatorObserver) GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity) (runtimeapi.AdvancedOverrideDocument, error) {
+	return runtimeapi.AdvancedOverrideDocument{YAML: "{}\n"}, nil
+}
+
 func (operatorObserver) PreviewCandidate(
 	context.Context,
 	runtimeapi.PeerIdentity,
@@ -251,9 +255,58 @@ func TestCandidatePreviewUsesReadOnlyIPCEndpoint(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), `"validated":true`) {
 		t.Fatalf("response=%s", recorder.Body.String())
 	}
+
+	sourceRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/candidates/preview",
+		bytes.NewBufferString(`{"source_id":"src_0123456789abcdef0123456789abcdef"}`),
+	)
+	sourceRequest.Header = request.Header.Clone()
+	sourceRequest = withPeerContext(sourceRequest, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+	sourceRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(sourceRecorder, sourceRequest)
+	if sourceRecorder.Code != http.StatusOK {
+		t.Fatalf("source preview status=%d body=%s", sourceRecorder.Code, sourceRecorder.Body.String())
+	}
+
+	bothRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/candidates/preview",
+		bytes.NewBufferString(`{"content_id":"content_0123456789abcdef0123456789abcdef","source_id":"src_0123456789abcdef0123456789abcdef"}`),
+	)
+	bothRequest.Header = request.Header.Clone()
+	bothRequest = withPeerContext(bothRequest, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+	bothRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(bothRecorder, bothRequest)
+	if bothRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous preview status=%d body=%s", bothRecorder.Code, bothRecorder.Body.String())
+	}
 }
 
-func TestValidActionAcceptsOnlyWellFormedSourceOperations(t *testing.T) {
+func TestAdvancedOverrideUsesAuthenticatedReadOnlyEndpoint(t *testing.T) {
+	service := operatorObserver{observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+		return runtimeapi.Snapshot{}, nil
+	}}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/advanced-override", nil)
+	request.Header.Set(HeaderRequestID, "request-1")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientVersion, "old")
+	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"yaml":"{}\n"`) {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("Cache-Control = %q", recorder.Header().Get("Cache-Control"))
+	}
+}
+
+func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 	sourceID := "src_0123456789abcdef0123456789abcdef"
 	for _, action := range []runtimeapi.Action{
 		{
@@ -276,6 +329,20 @@ func TestValidActionAcceptsOnlyWellFormedSourceOperations(t *testing.T) {
 		{
 			Kind:   runtimeapi.ActionApplySource,
 			Params: runtimeapi.ActionParams{SourceID: sourceID},
+		},
+		{
+			Kind: runtimeapi.ActionAddManagedResource,
+			Params: runtimeapi.ActionParams{
+				ContentID:    "content_0123456789abcdef0123456789abcdef",
+				ResourceKind: runtimeapi.ResourceKindProxyProvider,
+				ResourceName: "provider.main",
+			},
+		},
+		{
+			Kind: runtimeapi.ActionSetAdvancedOverride,
+			Params: runtimeapi.ActionParams{
+				ContentID: "content_0123456789abcdef0123456789abcdef",
+			},
 		},
 	} {
 		if !validAction(action) {
@@ -305,6 +372,21 @@ func TestValidActionAcceptsOnlyWellFormedSourceOperations(t *testing.T) {
 			Params: runtimeapi.ActionParams{
 				SourceID:  sourceID,
 				ContentID: "content_forbidden",
+			},
+		},
+		{
+			Kind: runtimeapi.ActionAddManagedResource,
+			Params: runtimeapi.ActionParams{
+				ContentID:    "content_0123456789abcdef0123456789abcdef",
+				ResourceKind: "arbitrary-file",
+				ResourceName: "../provider",
+			},
+		},
+		{
+			Kind: runtimeapi.ActionSetAdvancedOverride,
+			Params: runtimeapi.ActionParams{
+				ContentID:    "content_0123456789abcdef0123456789abcdef",
+				ResourceName: "forbidden",
 			},
 		},
 	} {

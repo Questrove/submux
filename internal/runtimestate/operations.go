@@ -64,6 +64,7 @@ func createRuntimeBuckets(transaction *bbolt.Tx) error {
 		importsBucket,
 		eventsBucket,
 		sourcesBucket,
+		managedResourcesBucket,
 	} {
 		if _, err := transaction.CreateBucketIfNotExists(name); err != nil {
 			return err
@@ -191,7 +192,9 @@ func (s *Store) SubmitOperation(
 
 func actionConsumesImport(kind string) bool {
 	return kind == runtimeapi.ActionApplyImportedConfig ||
-		kind == runtimeapi.ActionAddRemoteSource
+		kind == runtimeapi.ActionAddRemoteSource ||
+		kind == runtimeapi.ActionAddManagedResource ||
+		kind == runtimeapi.ActionSetAdvancedOverride
 }
 
 func (s *Store) GetOperation(id string) (runtimeapi.Operation, error) {

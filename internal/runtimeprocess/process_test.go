@@ -1,7 +1,9 @@
 package runtimeprocess
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -14,6 +16,42 @@ func TestSanitizedEnvironmentRemovesMihomoPathExpansion(t *testing.T) {
 		if strings.HasPrefix(upper, "SAFE_PATHS=") || strings.HasPrefix(entry, "SUBMUX_SHOULD_NOT_LEAK=") {
 			t.Fatalf("unsafe environment entry retained: %q", entry)
 		}
+	}
+}
+
+func TestMihomoEnvironmentUsesOnlyRuntimeSafePaths(t *testing.T) {
+	t.Setenv("SAFE_PATHS", filepath.Join(t.TempDir(), "attacker"))
+	managed := filepath.Join(t.TempDir(), "managed-resources")
+	if err := os.MkdirAll(managed, 0700); err != nil {
+		t.Fatalf("create managed resources: %v", err)
+	}
+	environment, err := mihomoEnvironment([]string{managed, managed})
+	if err != nil {
+		t.Fatalf("build Mihomo environment: %v", err)
+	}
+	var safePaths []string
+	for _, entry := range environment {
+		if strings.HasPrefix(strings.ToUpper(entry), "SAFE_PATHS=") {
+			safePaths = append(safePaths, entry)
+		}
+	}
+	if len(safePaths) != 1 || safePaths[0] != "SAFE_PATHS="+managed {
+		t.Fatalf("SAFE_PATHS = %#v, want only %q", safePaths, managed)
+	}
+}
+
+func TestMihomoEnvironmentRejectsUnsafePaths(t *testing.T) {
+	tests := map[string]string{
+		"relative":        "managed-resources",
+		"filesystem root": filepath.VolumeName(t.TempDir()) + string(filepath.Separator),
+		"path list":       filepath.Join(t.TempDir(), "one") + string(os.PathListSeparator) + "two",
+	}
+	for name, path := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := mihomoEnvironment([]string{path}); err == nil {
+				t.Fatalf("accepted unsafe path %q", path)
+			}
+		})
 	}
 }
 

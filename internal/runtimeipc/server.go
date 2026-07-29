@@ -22,6 +22,7 @@ type Observer interface {
 
 type Operator interface {
 	UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error)
+	GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity) (runtimeapi.AdvancedOverrideDocument, error)
 	PreviewCandidate(context.Context, runtimeapi.PeerIdentity, runtimeapi.PreviewCandidateRequest) (runtimeapi.CandidatePreview, error)
 	Execute(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error)
 	GetOperation(context.Context, string) (runtimeapi.Operation, error)
@@ -111,6 +112,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/snapshot", s.handleSnapshot)
 	mux.HandleFunc("/v1/imports", s.handleImport)
+	mux.HandleFunc("/v1/advanced-override", s.handleAdvancedOverride)
 	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
 	mux.HandleFunc("/v1/operations", s.handleCreateOperation)
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
@@ -212,6 +214,37 @@ func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request)
 	s.writeJSON(writer, http.StatusCreated, content)
 }
 
+func (s *Server) handleAdvancedOverride(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime advanced override only accepts GET", false)
+		return
+	}
+	if request.URL.RawQuery != "" || requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime advanced override does not accept query parameters or a request body", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime advanced override service is unavailable", true)
+		return
+	}
+	document, err := s.operator.GetAdvancedOverride(request.Context(), peer)
+	if err != nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime advanced override is temporarily unavailable", true)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, document)
+}
+
 func (s *Server) handleCandidatePreview(writer http.ResponseWriter, request *http.Request) {
 	requestID, _, ok := s.validateCommon(writer, request)
 	if !ok {
@@ -239,7 +272,10 @@ func (s *Server) handleCandidatePreview(writer http.ResponseWriter, request *htt
 		s.writeDecodeError(writer, request, err)
 		return
 	}
-	if !validContentID(previewRequest.ContentID) {
+	hasContent := validContentID(previewRequest.ContentID)
+	hasSource := validSourceID(previewRequest.SourceID)
+	if hasContent == hasSource ||
+		(previewRequest.OverrideContentID != "" && !validContentID(previewRequest.OverrideContentID)) {
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime candidate preview request is invalid", false)
 		return
 	}
@@ -539,28 +575,68 @@ func validAction(action runtimeapi.Action) bool {
 	case runtimeapi.ActionApplyImportedConfig:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
-			action.Params.Route == ""
+			action.Params.Route == "" &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
 	case runtimeapi.ActionStartProxy, runtimeapi.ActionStopProxy:
 		return action.Params.ContentID == "" &&
 			action.Params.SourceID == "" &&
-			action.Params.Route == ""
+			action.Params.Route == "" &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
 	case runtimeapi.ActionAddRemoteSource:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
-			action.Params.Route == ""
+			action.Params.Route == "" &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
 	case runtimeapi.ActionRefreshSource:
 		return validSourceID(action.Params.SourceID) &&
 			action.Params.ContentID == "" &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == "" &&
 			(action.Params.Route == "" ||
 				action.Params.Route == runtimeapi.SourceRouteDirect ||
 				action.Params.Route == runtimeapi.SourceRouteMihomo)
 	case runtimeapi.ActionApplySource:
 		return validSourceID(action.Params.SourceID) &&
 			action.Params.ContentID == "" &&
-			action.Params.Route == ""
+			action.Params.Route == "" &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
+	case runtimeapi.ActionAddManagedResource:
+		return validContentID(action.Params.ContentID) &&
+			action.Params.SourceID == "" &&
+			action.Params.Route == "" &&
+			validResourceKind(action.Params.ResourceKind) &&
+			validResourceName(action.Params.ResourceName)
+	case runtimeapi.ActionSetAdvancedOverride:
+		return validContentID(action.Params.ContentID) &&
+			action.Params.SourceID == "" &&
+			action.Params.Route == "" &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
 	default:
 		return false
 	}
+}
+
+func validResourceKind(kind string) bool {
+	switch kind {
+	case runtimeapi.ResourceKindProxyProvider,
+		runtimeapi.ResourceKindRuleProvider,
+		runtimeapi.ResourceKindCertificate,
+		runtimeapi.ResourceKindPrivateKey:
+		return true
+	default:
+		return false
+	}
+}
+
+func validResourceName(name string) bool {
+	return len(name) <= 128 &&
+		validIdentifier(name, 128) &&
+		!strings.HasPrefix(name, ".")
 }
 
 func validSourceID(id string) bool {

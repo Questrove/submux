@@ -34,6 +34,10 @@ func (f *fakeClient) UploadImport(_ context.Context, contentType string, body []
 	return runtimeapi.ImportContent{ID: "content_0123456789abcdef0123456789abcdef"}, nil
 }
 
+func (f *fakeClient) GetAdvancedOverride(context.Context) (runtimeapi.AdvancedOverrideDocument, error) {
+	return runtimeapi.AdvancedOverrideDocument{YAML: "{}\n"}, nil
+}
+
 func (f *fakeClient) PreviewCandidate(_ context.Context, contentID string) (runtimeapi.CandidatePreview, error) {
 	f.previewed = contentID
 	return runtimeapi.CandidatePreview{
@@ -44,6 +48,17 @@ func (f *fakeClient) PreviewCandidate(_ context.Context, contentID string) (runt
 		ProxyAddresses:  []string{"127.0.0.1:7890", "[::1]:7890"},
 		Validated:       true,
 	}, nil
+}
+
+func (f *fakeClient) PreviewCandidateRequest(
+	_ context.Context,
+	request runtimeapi.PreviewCandidateRequest,
+) (runtimeapi.CandidatePreview, error) {
+	contentID := request.ContentID
+	if contentID == "" {
+		contentID = request.SourceID
+	}
+	return f.PreviewCandidate(context.Background(), contentID)
 }
 
 func (f *fakeClient) Execute(_ context.Context, request runtimeapi.CreateOperationRequest) (runtimeapi.Operation, error) {
@@ -289,6 +304,106 @@ func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testin
 	if !strings.Contains(view, "https://example.com:443/…") ||
 		!strings.Contains(view, "skip_tls_verify") {
 		t.Fatalf("source view = %q", view)
+	}
+}
+
+func TestModelManagesResourcesOverridesAndLayeredPreviewThroughRuntimeClient(t *testing.T) {
+	sourceID := "src_" + strings.Repeat("b", 32)
+	client := &fakeClient{snapshot: runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        12,
+		Runtime:         runtimeapi.RuntimeStatus{Version: "dev", ServiceState: "running"},
+		Sources: runtimeapi.SourceStatus{
+			CurrentSourceID: sourceID,
+		},
+		Resources: runtimeapi.ResourceStatus{
+			Count:      1,
+			TotalBytes: 14,
+			Items: []runtimeapi.ManagedResourceSummary{{
+				ID:     "res_" + strings.Repeat("c", 32),
+				Name:   "provider.main",
+				Kind:   runtimeapi.ResourceKindProxyProvider,
+				Size:   14,
+				SHA256: strings.Repeat("d", 64),
+			}},
+		},
+		AdvancedOverride: runtimeapi.OverrideStatus{
+			Present: true,
+			Size:    3,
+			SHA256:  strings.Repeat("e", 64),
+		},
+	}}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+
+	updated, command := model.Update(keyPress('y'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("source preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if client.previewed != sourceID || model.preview.CandidateSHA256 == "" {
+		t.Fatalf("source preview = %q / %#v", client.previewed, model.preview)
+	}
+
+	updated, _ = model.Update(keyPress('e'))
+	model = updated.(Model)
+	model.editor.SetValue(`{"name":"provider.main","kind":"proxy-provider-yaml","content":"proxies: []\n"}`)
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("resource add did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	resourceAction := client.actions[len(client.actions)-1]
+	if client.uploadedType != runtimeapi.ManagedResourceContentType ||
+		resourceAction.Kind != runtimeapi.ActionAddManagedResource ||
+		resourceAction.Params.ResourceName != "provider.main" ||
+		resourceAction.Params.ResourceKind != runtimeapi.ResourceKindProxyProvider {
+		t.Fatalf("resource operation = type %q action %#v", client.uploadedType, resourceAction)
+	}
+
+	updated, command = model.Update(keyPress('o'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("override read did not return a command")
+	}
+	updated, command = model.Update(command())
+	model = updated.(Model)
+	if !model.editing || model.editorMode != editorModeOverride {
+		t.Fatalf("override editor state = editing %v mode %q", model.editing, model.editorMode)
+	}
+	model.editor.SetValue("rules:\n  - MATCH,DIRECT\n")
+	updated, command = model.Update(ctrlKey('p'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("prospective override preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if !model.editing || model.preview.CandidateSHA256 == "" || client.previewed != sourceID {
+		t.Fatalf("prospective override preview = editing %v preview %#v source %q",
+			model.editing, model.preview, client.previewed)
+	}
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("override set did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	overrideAction := client.actions[len(client.actions)-1]
+	if client.uploadedType != "application/x-yaml" ||
+		overrideAction.Kind != runtimeapi.ActionSetAdvancedOverride {
+		t.Fatalf("override operation = type %q action %#v", client.uploadedType, overrideAction)
+	}
+
+	view := model.View().Content
+	if !strings.Contains(view, "provider.main") || !strings.Contains(view, "高级覆盖") {
+		t.Fatalf("layer view = %q", view)
 	}
 }
 

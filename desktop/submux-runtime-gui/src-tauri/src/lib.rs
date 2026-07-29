@@ -31,6 +31,23 @@ fn runtime_preview_candidate(
 }
 
 #[tauri::command]
+fn runtime_preview_source(
+    bridge: State<'_, RuntimeBridge>,
+    source_id: String,
+) -> Result<Value, BridgeError> {
+    bridge.preview_source(&source_id)
+}
+
+#[tauri::command]
+fn runtime_preview_override(
+    bridge: State<'_, RuntimeBridge>,
+    source_id: String,
+    content: String,
+) -> Result<Value, BridgeError> {
+    bridge.preview_override(&source_id, content.as_bytes())
+}
+
+#[tauri::command]
 fn runtime_apply_candidate(
     bridge: State<'_, RuntimeBridge>,
     content_id: String,
@@ -44,6 +61,29 @@ fn runtime_add_remote_source(
     draft_json: String,
 ) -> Result<Value, BridgeError> {
     bridge.add_remote_source(draft_json.as_bytes())
+}
+
+#[tauri::command]
+fn runtime_get_advanced_override(bridge: State<'_, RuntimeBridge>) -> Result<Value, BridgeError> {
+    bridge.get_advanced_override()
+}
+
+#[tauri::command]
+fn runtime_set_advanced_override(
+    bridge: State<'_, RuntimeBridge>,
+    content: String,
+) -> Result<Value, BridgeError> {
+    bridge.set_advanced_override(content.as_bytes())
+}
+
+#[tauri::command]
+fn runtime_add_managed_resource(
+    bridge: State<'_, RuntimeBridge>,
+    name: String,
+    kind: String,
+    content: String,
+) -> Result<Value, BridgeError> {
+    bridge.add_managed_resource(&name, &kind, content.as_bytes())
 }
 
 #[tauri::command]
@@ -112,8 +152,13 @@ pub fn run() {
             runtime_observe,
             runtime_import_config,
             runtime_preview_candidate,
+            runtime_preview_source,
+            runtime_preview_override,
             runtime_apply_candidate,
             runtime_add_remote_source,
+            runtime_get_advanced_override,
+            runtime_set_advanced_override,
+            runtime_add_managed_resource,
             runtime_refresh_source,
             runtime_apply_source,
             runtime_start_proxy,

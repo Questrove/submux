@@ -1,6 +1,6 @@
 # Submux Runtime 本机 IPC
 
-本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传、候选配置预览、远程来源添加与刷新、持久化运行操作和 Tauri GUI 桥接；事件流仍按本文继续开发。
+本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传、分层候选配置预览、托管资源、本机高级覆盖、远程来源添加与刷新、持久化运行操作和 Tauri GUI 桥接；事件流仍按本文继续开发。
 
 ## 传输
 
@@ -69,6 +69,7 @@ Snapshot 至少包含：
 - Mihomo 安装版本、运行状态和崩溃恢复状态；
 - 当前运行方式及脱敏的网络设置；
 - 配置来源摘要、当前来源和最近刷新结果；
+- 托管资源的类型、摘要和总量，以及本机高级覆盖的摘要；
 - 当前或排队中的运行操作；
 - 产品与核心更新状态；
 - 最新事件游标。
@@ -87,6 +88,8 @@ POST /v1/imports
 
 远程来源的 URL、凭据和兼容设置使用 `application/vnd.submux.runtime-source+json` 上传。客户端随后只能把返回的 `content_id` 交给固定的 `source.add_remote` Action；URL 和凭据不会进入 Action、Operation、Snapshot 或事件。Runtime 消费暂存内容后自行规范化目标、执行地址策略检查、下载、生成候选配置并用当前 Mihomo 精确版本校验。
 
+托管资源使用 `application/vnd.submux.managed-resource` 上传，随后由 `resource.add` 声明固定资源类型和安全名称。高级覆盖使用 YAML 上传，随后由 `override.set` 消费。两者都不能把客户端文件路径提交给 Runtime。
+
 ### 预览候选配置
 
 ```http
@@ -94,7 +97,15 @@ POST /v1/candidates/preview
 Content-Type: application/json
 ```
 
-请求只包含当前调用者尚未消费的 `content_id`。Runtime 使用当前本机运行设置覆盖保留字段，并用准备运行的 Mihomo 精确版本完成静态校验；响应返回最终候选配置、摘要、显式代理监听以及由 Runtime 接管的字段。预览不消费导入内容、不创建运行操作、不切换当前配置，也不启动 Mihomo。响应使用 `Cache-Control: no-store`，因为候选配置可能包含来源秘密。
+请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的远程 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回最终候选配置、摘要、显式代理监听、引用的托管资源，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不切换当前配置，也不启动 Mihomo。响应使用 `Cache-Control: no-store`，因为候选配置可能包含来源秘密。
+
+### 读取本机高级覆盖
+
+```http
+GET /v1/advanced-override
+```
+
+该接口只向已经通过操作系统身份校验的 Runtime 操作员返回当前 YAML 正文和摘要，并始终禁止缓存。修改仍必须上传 YAML，再创建 `override.set` Operation。
 
 ### 创建运行操作
 
@@ -127,6 +138,11 @@ Action 使用固定 `kind` 和严格参数结构，不能承载 Shell、argv、�
 - `source.add_remote` 只接受来源草稿的 `content_id`；
 - `source.refresh` 只接受 `source_id` 和可选的一次性 `direct` 或 `mihomo` 线路；
 - `source.apply` 只接受当前来源的 `source_id`。
+
+本机配置层当前使用以下 Action：
+
+- `resource.add` 只接受资源内容的 `content_id`、固定 `resource_kind` 和安全 `resource_name`；
+- `override.set` 只接受 YAML 的 `content_id`。
 
 添加和刷新只保存通过校验的不可变来源版本，不切换运行配置，也不启动 Mihomo。`source.apply` 应用当前来源的最近有效版本；Mihomo 原先停止时仍保持停止，原先运行时必须完成健康检查后才提交。
 

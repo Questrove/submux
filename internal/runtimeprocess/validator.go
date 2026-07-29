@@ -17,6 +17,7 @@ type ConfigValidator struct {
 	DataDir      string
 	ExactVersion string
 	OutputLimit  int
+	SafePaths    []string
 }
 
 func (v ConfigValidator) ValidateConfig(ctx context.Context, configPath string) error {
@@ -38,7 +39,10 @@ func (v ConfigValidator) ValidateConfig(ctx context.Context, configPath string) 
 	}
 	command := exec.CommandContext(ctx, v.BinaryPath, "-t", "-d", dataDir, "-f", configPath)
 	command.Dir = dataDir
-	command.Env = sanitizedEnvironment()
+	command.Env, err = mihomoEnvironment(v.SafePaths)
+	if err != nil {
+		return err
+	}
 	limit := v.OutputLimit
 	if limit <= 0 {
 		limit = 64 << 10

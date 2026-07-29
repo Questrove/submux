@@ -29,6 +29,8 @@ type Snapshot struct {
 	Mihomo            MihomoStatus    `json:"mihomo"`
 	RunMode           string          `json:"run_mode"`
 	Sources           SourceStatus    `json:"sources"`
+	Resources         ResourceStatus  `json:"resources"`
+	AdvancedOverride  OverrideStatus  `json:"advanced_override"`
 	Operations        OperationStatus `json:"operations"`
 	Updates           UpdateStatus    `json:"updates"`
 	LatestEventCursor uint64          `json:"latest_event_cursor"`
@@ -92,6 +94,33 @@ type RemoteSourceDraft struct {
 	MaxResponseBytes       int64  `json:"max_response_bytes,omitempty"`
 }
 
+type ResourceStatus struct {
+	Count      int                      `json:"count"`
+	TotalBytes int64                    `json:"total_bytes"`
+	Items      []ManagedResourceSummary `json:"items,omitempty"`
+}
+
+type ManagedResourceSummary struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	Size      int64     `json:"size"`
+	SHA256    string    `json:"sha256"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type OverrideStatus struct {
+	Present   bool       `json:"present"`
+	Size      int64      `json:"size,omitempty"`
+	SHA256    string     `json:"sha256,omitempty"`
+	UpdatedAt *time.Time `json:"updated_at,omitempty"`
+}
+
+type AdvancedOverrideDocument struct {
+	YAML   string `json:"yaml"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
 type OperationStatus struct {
 	CurrentOperationID string `json:"current_operation_id,omitempty"`
 	Queued             int    `json:"queued"`
@@ -106,17 +135,30 @@ type ImportContent struct {
 }
 
 type PreviewCandidateRequest struct {
-	ContentID string `json:"content_id"`
+	ContentID         string `json:"content_id,omitempty"`
+	SourceID          string `json:"source_id,omitempty"`
+	OverrideContentID string `json:"override_content_id,omitempty"`
 }
 
 type CandidatePreview struct {
-	ContentID          string   `json:"content_id"`
-	CandidateYAML      string   `json:"candidate_yaml"`
-	CandidateSHA256    string   `json:"candidate_sha256"`
-	ProxyKind          string   `json:"proxy_kind"`
-	ProxyAddresses     []string `json:"proxy_addresses"`
-	RuntimeOwnedFields []string `json:"runtime_owned_fields"`
-	Validated          bool     `json:"validated"`
+	ContentID           string                 `json:"content_id"`
+	CandidateYAML       string                 `json:"candidate_yaml"`
+	CandidateSHA256     string                 `json:"candidate_sha256"`
+	ProxyKind           string                 `json:"proxy_kind"`
+	ProxyAddresses      []string               `json:"proxy_addresses"`
+	RuntimeOwnedFields  []string               `json:"runtime_owned_fields"`
+	FieldOrigins        []CandidateFieldOrigin `json:"field_origins"`
+	ReferencedResources []string               `json:"referenced_resources,omitempty"`
+	SourceSHA256        string                 `json:"source_sha256"`
+	OverrideSHA256      string                 `json:"override_sha256,omitempty"`
+	Validated           bool                   `json:"validated"`
+}
+
+type CandidateFieldOrigin struct {
+	Path           string `json:"path"`
+	Origin         string `json:"origin"`
+	Status         string `json:"status"`
+	ReplacedOrigin string `json:"replaced_origin,omitempty"`
 }
 
 type Action struct {
@@ -125,9 +167,11 @@ type Action struct {
 }
 
 type ActionParams struct {
-	ContentID string `json:"content_id,omitempty"`
-	SourceID  string `json:"source_id,omitempty"`
-	Route     string `json:"route,omitempty"`
+	ContentID    string `json:"content_id,omitempty"`
+	SourceID     string `json:"source_id,omitempty"`
+	Route        string `json:"route,omitempty"`
+	ResourceKind string `json:"resource_kind,omitempty"`
+	ResourceName string `json:"resource_name,omitempty"`
 }
 
 type CreateOperationRequest struct {
@@ -159,16 +203,19 @@ type Operation struct {
 }
 
 type OperationResult struct {
-	ConfigRevision  string     `json:"config_revision,omitempty"`
-	CandidateSHA256 string     `json:"candidate_sha256,omitempty"`
-	ProxyKind       string     `json:"proxy_kind,omitempty"`
-	ProxyAddresses  []string   `json:"proxy_addresses,omitempty"`
-	Verified        bool       `json:"verified,omitempty"`
-	SourceID        string     `json:"source_id,omitempty"`
-	RefreshResult   string     `json:"refresh_result,omitempty"`
-	RefreshRoute    string     `json:"refresh_route,omitempty"`
-	NextRefreshAt   *time.Time `json:"next_refresh_at,omitempty"`
-	NotModified     bool       `json:"not_modified,omitempty"`
+	ConfigRevision         string     `json:"config_revision,omitempty"`
+	CandidateSHA256        string     `json:"candidate_sha256,omitempty"`
+	ProxyKind              string     `json:"proxy_kind,omitempty"`
+	ProxyAddresses         []string   `json:"proxy_addresses,omitempty"`
+	Verified               bool       `json:"verified,omitempty"`
+	SourceID               string     `json:"source_id,omitempty"`
+	RefreshResult          string     `json:"refresh_result,omitempty"`
+	RefreshRoute           string     `json:"refresh_route,omitempty"`
+	NextRefreshAt          *time.Time `json:"next_refresh_at,omitempty"`
+	NotModified            bool       `json:"not_modified,omitempty"`
+	ResourceID             string     `json:"resource_id,omitempty"`
+	ResourceKind           string     `json:"resource_kind,omitempty"`
+	AdvancedOverrideSHA256 string     `json:"advanced_override_sha256,omitempty"`
 }
 
 type OperationResponse struct {
@@ -237,6 +284,8 @@ const (
 	ActionAddRemoteSource     = "source.add_remote"
 	ActionRefreshSource       = "source.refresh"
 	ActionApplySource         = "source.apply"
+	ActionAddManagedResource  = "resource.add"
+	ActionSetAdvancedOverride = "override.set"
 
 	OperationQueued         = "queued"
 	OperationRunning        = "running"
@@ -253,6 +302,23 @@ const (
 
 	SourceRouteDirect = "direct"
 	SourceRouteMihomo = "mihomo"
+
+	ManagedResourceContentType = "application/vnd.submux.managed-resource"
+
+	ResourceKindProxyProvider = "proxy-provider-yaml"
+	ResourceKindRuleProvider  = "rule-provider-yaml"
+	ResourceKindCertificate   = "certificate-pem"
+	ResourceKindPrivateKey    = "private-key-pem"
+
+	FieldOriginSource   = "source"
+	FieldOriginOverride = "advanced_override"
+	FieldOriginRuntime  = "runtime"
+
+	FieldStatusKept       = "kept"
+	FieldStatusAdded      = "added"
+	FieldStatusOverridden = "overridden"
+	FieldStatusReplaced   = "replaced"
+	FieldStatusRemoved    = "removed"
 )
 
 func uint32String(value uint32) string {

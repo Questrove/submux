@@ -40,6 +40,52 @@
       <section class="panel">
         <div class="panel-heading">
           <div>
+            <p class="eyebrow">LOCAL LAYERS</p>
+            <h2>托管资源与高级覆盖</h2>
+          </div>
+          <span id="resource-count" class="badge">0 个资源</span>
+        </div>
+        <div id="resource-list" class="source-list muted">尚未添加托管资源。</div>
+        <div class="form-grid">
+          <label>
+            资源名称
+            <input id="managed-resource-name" value="provider" maxlength="128" />
+          </label>
+          <label>
+            资源类型
+            <select id="managed-resource-kind">
+              <option value="proxy-provider-yaml">代理提供者 YAML</option>
+              <option value="rule-provider-yaml">规则提供者 YAML</option>
+              <option value="certificate-pem">证书 PEM</option>
+              <option value="private-key-pem">私钥 PEM</option>
+            </select>
+          </label>
+        </div>
+        <label for="managed-resource-content">资源内容（只上传内容，不发送本机路径）</label>
+        <textarea id="managed-resource-content" spellcheck="false" placeholder="proxies:&#10;  - name: example&#10;    type: socks5&#10;    server: 127.0.0.1&#10;    port: 1080"></textarea>
+        <div class="actions">
+          <button id="add-managed-resource">校验并添加资源</button>
+        </div>
+        <hr />
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">ADVANCED OVERRIDE</p>
+            <h3>高级覆盖</h3>
+          </div>
+          <span id="override-state" class="badge">尚未配置</span>
+        </div>
+        <textarea id="advanced-override" spellcheck="false" placeholder="proxy-groups:&#10;  - name: 手动选择&#10;    type: select&#10;    proxies: [DIRECT]"></textarea>
+        <div class="actions">
+          <button id="load-advanced-override" class="secondary">读取当前覆盖</button>
+          <button id="preview-advanced-override" class="secondary" disabled>预览尚未保存的覆盖</button>
+          <button id="save-advanced-override">校验并保存覆盖</button>
+        </div>
+        <p class="muted">Runtime 保留的监听、认证、控制、网络、核心和更新字段不能由来源或高级覆盖修改。</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
             <p class="eyebrow">REMOTE SOURCES</p>
             <h2>远程配置来源</h2>
           </div>
@@ -128,6 +174,7 @@
         <textarea id="source-yaml" spellcheck="false" placeholder="粘贴配置内容。文件路径不会发送给 Runtime。"></textarea>
         <div class="actions">
           <button id="import-preview">上传并预览</button>
+          <button id="preview-current-source" class="secondary" disabled>预览当前来源</button>
           <button id="apply" disabled>应用候选配置</button>
         </div>
         <details>
@@ -135,6 +182,10 @@
           <pre id="candidate-yaml">尚未生成候选配置。</pre>
         </details>
         <p id="owned-fields" class="muted"></p>
+        <details>
+          <summary>查看字段来源</summary>
+          <pre id="field-origins">尚未生成字段来源。</pre>
+        </details>
       </section>
 
       <section class="panel">

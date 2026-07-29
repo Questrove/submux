@@ -19,6 +19,7 @@ const elements = {
   candidateState: document.querySelector("#candidate-state"),
   candidateYaml: document.querySelector("#candidate-yaml"),
   ownedFields: document.querySelector("#owned-fields"),
+  fieldOrigins: document.querySelector("#field-origins"),
   sourceYaml: document.querySelector("#source-yaml"),
   operation: document.querySelector("#operation"),
   proxyVerification: document.querySelector("#proxy-verification"),
@@ -53,6 +54,18 @@ const elements = {
   refreshSource: document.querySelector("#refresh-source"),
   refreshSourceDirect: document.querySelector("#refresh-source-direct"),
   refreshSourceMihomo: document.querySelector("#refresh-source-mihomo"),
+  previewCurrentSource: document.querySelector("#preview-current-source"),
+  resourceCount: document.querySelector("#resource-count"),
+  resourceList: document.querySelector("#resource-list"),
+  resourceName: document.querySelector("#managed-resource-name"),
+  resourceKind: document.querySelector("#managed-resource-kind"),
+  resourceContent: document.querySelector("#managed-resource-content"),
+  addManagedResource: document.querySelector("#add-managed-resource"),
+  overrideState: document.querySelector("#override-state"),
+  advancedOverride: document.querySelector("#advanced-override"),
+  loadAdvancedOverride: document.querySelector("#load-advanced-override"),
+  previewAdvancedOverride: document.querySelector("#preview-advanced-override"),
+  saveAdvancedOverride: document.querySelector("#save-advanced-override"),
 };
 
 const writeButtons = [
@@ -65,6 +78,9 @@ const writeButtons = [
   elements.refreshSource,
   elements.refreshSourceDirect,
   elements.refreshSourceMihomo,
+  elements.addManagedResource,
+  elements.saveAdvancedOverride,
+  elements.previewAdvancedOverride,
 ];
 
 function setBusy(busy, message = "") {
@@ -77,6 +93,8 @@ function setBusy(busy, message = "") {
     elements.refreshSourceDirect,
     elements.refreshSourceMihomo,
     elements.applySource,
+    elements.previewCurrentSource,
+    elements.previewAdvancedOverride,
   ]) {
     button.disabled = busy || !state.compatible || !state.currentSourceId;
   }
@@ -85,6 +103,7 @@ function setBusy(busy, message = "") {
   elements.cancelOperation.disabled = busy || !state.compatible || !state.lastOperationId;
   elements.refresh.disabled = busy;
   elements.verify.disabled = busy;
+  elements.loadAdvancedOverride.disabled = busy;
   if (message) {
     setMessage(message);
   }
@@ -115,6 +134,11 @@ function renderSnapshot(snapshot) {
     elements.operation.textContent = `当前运行操作：${currentOperationId}`;
   }
   renderSources(snapshot.sources || {});
+  renderResources(snapshot.resources || {});
+  const advancedOverride = snapshot.advanced_override || {};
+  elements.overrideState.textContent = advancedOverride.present
+    ? `${String(advancedOverride.sha256 || "").slice(0, 12)} · ${advancedOverride.size || 0} 字节`
+    : "尚未配置";
 }
 
 function renderSources(sources) {
@@ -141,6 +165,26 @@ function renderSources(sources) {
       item.append(risk);
     }
     elements.sourceList.append(item);
+  }
+}
+
+function renderResources(resources) {
+  const items = Array.isArray(resources.items) ? resources.items : [];
+  elements.resourceCount.textContent = `${items.length} 个资源 · ${resources.total_bytes || 0} 字节`;
+  elements.resourceList.replaceChildren();
+  if (!items.length) {
+    elements.resourceList.textContent = "尚未添加托管资源。";
+    return;
+  }
+  for (const resource of items) {
+    const item = document.createElement("div");
+    item.className = "source-item";
+    const title = document.createElement("strong");
+    title.textContent = `${resource.name} · ${resource.kind}`;
+    const detail = document.createElement("small");
+    detail.textContent = `${resource.id} · ${resource.size} 字节 · ${resource.sha256.slice(0, 12)}`;
+    item.append(title, detail);
+    elements.resourceList.append(item);
   }
 }
 
@@ -180,13 +224,39 @@ async function importAndPreview() {
     state.contentId = imported.content_id;
     setMessage("正在生成并校验候选配置…");
     const preview = await invoke("runtime_preview_candidate", { contentId: state.contentId });
-    elements.candidateYaml.textContent = preview.candidate_yaml;
-    elements.candidateState.textContent = `已校验 · ${preview.candidate_sha256.slice(0, 12)}`;
-    elements.ownedFields.textContent =
-      `Runtime 保留字段：${preview.runtime_owned_fields.join("、")}`;
+    renderCandidatePreview(preview);
     setMessage(`候选配置可应用；监听 ${preview.proxy_addresses.join("、")}。`);
   } catch (error) {
     state.contentId = "";
+    elements.candidateState.textContent = "预览失败";
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function renderCandidatePreview(preview) {
+  elements.candidateYaml.textContent = preview.candidate_yaml;
+  elements.candidateState.textContent = `已校验 · ${preview.candidate_sha256.slice(0, 12)}`;
+  elements.ownedFields.textContent =
+    `Runtime 保留字段：${preview.runtime_owned_fields.join("、")}`;
+  const origins = Array.isArray(preview.field_origins) ? preview.field_origins : [];
+  elements.fieldOrigins.textContent = origins.length
+    ? origins.map((entry) => `${entry.path}\t${entry.origin}\t${entry.status}`).join("\n")
+    : "最终候选配置没有可显示的字段来源。";
+}
+
+async function previewCurrentSource() {
+  if (!state.currentSourceId) return;
+  state.contentId = "";
+  setBusy(true, "正在生成当前来源的最终候选配置…");
+  try {
+    const preview = await invoke("runtime_preview_source", {
+      sourceId: state.currentSourceId,
+    });
+    renderCandidatePreview(preview);
+    setMessage(`当前来源候选配置已校验；监听 ${preview.proxy_addresses.join("、")}。`);
+  } catch (error) {
     elements.candidateState.textContent = "预览失败";
     setMessage(errorText(error), true);
   } finally {
@@ -277,6 +347,83 @@ async function applyCurrentSource() {
     }));
     setMessage("来源应用已经进入 Runtime 队列；Mihomo 停止时仍需显式启动。");
   } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function addManagedResource() {
+  const name = elements.resourceName.value.trim();
+  const kind = elements.resourceKind.value;
+  const content = elements.resourceContent.value;
+  if (!name || !content.trim()) {
+    setMessage("资源名称和内容不能为空。", true);
+    return;
+  }
+  setBusy(true, "正在上传并校验托管资源…");
+  try {
+    renderOperation(await invoke("runtime_add_managed_resource", {
+      name,
+      kind,
+      content,
+    }));
+    setMessage("资源操作已经进入 Runtime 队列；内容会保存到托管目录。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function loadAdvancedOverride() {
+  setBusy(true, "正在读取高级覆盖…");
+  try {
+    const document = await invoke("runtime_get_advanced_override");
+    elements.advancedOverride.value = document.yaml || "{}\n";
+    setMessage("高级覆盖已读取。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function saveAdvancedOverride() {
+  const content = elements.advancedOverride.value;
+  if (!content.trim()) {
+    setMessage("高级覆盖不能为空；如需清空，请填写 {}。", true);
+    return;
+  }
+  setBusy(true, "正在校验并保存高级覆盖…");
+  try {
+    renderOperation(await invoke("runtime_set_advanced_override", { content }));
+    setMessage("高级覆盖操作已经进入 Runtime 队列。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function previewAdvancedOverride() {
+  if (!state.currentSourceId) return;
+  const content = elements.advancedOverride.value;
+  if (!content.trim()) {
+    setMessage("高级覆盖不能为空。", true);
+    return;
+  }
+  state.contentId = "";
+  setBusy(true, "正在预览尚未保存的高级覆盖…");
+  try {
+    const preview = await invoke("runtime_preview_override", {
+      sourceId: state.currentSourceId,
+      content,
+    });
+    renderCandidatePreview(preview);
+    setMessage("尚未保存的高级覆盖已通过最终候选配置校验。");
+  } catch (error) {
+    elements.candidateState.textContent = "预览失败";
     setMessage(errorText(error), true);
   } finally {
     setBusy(false);
@@ -385,5 +532,10 @@ elements.applySource.addEventListener("click", applyCurrentSource);
 elements.refreshSource.addEventListener("click", () => refreshCurrentSource(""));
 elements.refreshSourceDirect.addEventListener("click", () => refreshCurrentSource("direct"));
 elements.refreshSourceMihomo.addEventListener("click", () => refreshCurrentSource("mihomo"));
+elements.previewCurrentSource.addEventListener("click", previewCurrentSource);
+elements.addManagedResource.addEventListener("click", addManagedResource);
+elements.loadAdvancedOverride.addEventListener("click", loadAdvancedOverride);
+elements.previewAdvancedOverride.addEventListener("click", previewAdvancedOverride);
+elements.saveAdvancedOverride.addEventListener("click", saveAdvancedOverride);
 
 handshake();

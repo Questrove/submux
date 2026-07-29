@@ -21,6 +21,7 @@ var explicitRuntimeOwnedFields = []string{
 	"tproxy-port",
 	"allow-lan",
 	"bind-address",
+	"ipv6",
 	"authentication",
 	"skip-auth-prefixes",
 	"lan-allowed-ips",
@@ -43,6 +44,8 @@ var explicitRuntimeOwnedFields = []string{
 	"interface-name",
 	"routing-mark",
 	"tun",
+	"tunnels",
+	"ntp",
 	"dns.listen",
 }
 
@@ -53,77 +56,32 @@ type ExplicitCandidateBuilder struct {
 }
 
 func (b ExplicitCandidateBuilder) BuildCandidate(source []byte) ([]byte, error) {
+	result, err := b.BuildDetailed(source, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	return result.YAML, nil
+}
+
+func (b ExplicitCandidateBuilder) runtimeSettings() (int, string, error) {
 	port := b.Port
 	if port == 0 {
 		port = DefaultExplicitProxyPort
 	}
 	if port < 1 || port > 65535 {
-		return nil, errors.New("explicit proxy port must be between 1 and 65535")
+		return 0, "", errors.New("explicit proxy port must be between 1 and 65535")
 	}
 	platform := b.Platform
 	if platform == "" {
 		platform = runtime.GOOS
 	}
 	if b.ControlEndpoint == "" {
-		return nil, errors.New("Mihomo local control endpoint is required")
+		return 0, "", errors.New("Mihomo local control endpoint is required")
 	}
 	if platform != "windows" && platform != "linux" && platform != "darwin" {
-		return nil, fmt.Errorf("unsupported Mihomo Runtime platform %q", platform)
+		return 0, "", fmt.Errorf("unsupported Mihomo Runtime platform %q", platform)
 	}
-
-	var document yaml.Node
-	if err := yaml.Unmarshal(source, &document); err != nil {
-		return nil, fmt.Errorf("parse imported Mihomo configuration: %w", err)
-	}
-	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
-		return nil, errors.New("imported Mihomo configuration must be a YAML mapping")
-	}
-	if err := validateRuntimeYAML(document.Content[0], 0, new(int)); err != nil {
-		return nil, err
-	}
-	root := document.Content[0]
-	if err := validateManagedProviders(root); err != nil {
-		return nil, err
-	}
-
-	for _, key := range explicitRuntimeOwnedFields {
-		if strings.Contains(key, ".") {
-			continue
-		}
-		removeMappingKey(root, key)
-	}
-	if dns := mappingValue(root, "dns"); dns != nil && dns.Kind == yaml.MappingNode {
-		removeMappingKey(dns, "listen")
-	}
-	if err := prependRuntimeHealthRules(root); err != nil {
-		return nil, err
-	}
-
-	setMappingScalar(root, "mixed-port", "0", "!!int")
-	setMappingScalar(root, "port", "0", "!!int")
-	setMappingScalar(root, "socks-port", "0", "!!int")
-	setMappingScalar(root, "redir-port", "0", "!!int")
-	setMappingScalar(root, "tproxy-port", "0", "!!int")
-	setMappingScalar(root, "allow-lan", "false", "!!bool")
-	setMappingScalar(root, "bind-address", "127.0.0.1", "!!str")
-	setMappingScalar(root, "ipv6", "true", "!!bool")
-	setMappingScalar(root, "secret", "", "!!str")
-	setMappingNode(root, "authentication", &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"})
-	setMappingNode(root, "tun", mappingNode(map[string]*yaml.Node{
-		"enable": scalarNode("false", "!!bool"),
-	}))
-	if platform == "windows" {
-		setMappingScalar(root, "external-controller-pipe", b.ControlEndpoint, "!!str")
-	} else {
-		setMappingScalar(root, "external-controller-unix", b.ControlEndpoint, "!!str")
-	}
-	setMappingNode(root, "listeners", explicitListeners(port))
-
-	candidate, err := yaml.Marshal(root)
-	if err != nil {
-		return nil, fmt.Errorf("encode Runtime-owned Mihomo configuration: %w", err)
-	}
-	return candidate, nil
+	return port, platform, nil
 }
 
 func ExplicitRuntimeOwnedFields() []string {

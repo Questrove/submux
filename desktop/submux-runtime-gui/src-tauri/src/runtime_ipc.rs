@@ -11,6 +11,8 @@ const PROTOCOL_VERSION: u64 = 1;
 const MAX_RESPONSE_BYTES: usize = 12 << 20;
 const MAX_IMPORT_BYTES: usize = 8 << 20;
 const MAX_SOURCE_DRAFT_BYTES: usize = 512 << 10;
+const MAX_MANAGED_RESOURCE_BYTES: usize = 4 << 20;
+const MAX_ADVANCED_OVERRIDE_BYTES: usize = 1 << 20;
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 300_000;
 
 #[cfg(target_os = "windows")]
@@ -98,23 +100,86 @@ impl RuntimeBridge {
 
     pub fn import_config(&self, content: &[u8]) -> Result<Value, BridgeError> {
         self.ensure_compatible()?;
-        if content.is_empty() || content.len() > MAX_IMPORT_BYTES {
-            return Err(BridgeError::request(
-                "Imported configuration is empty or exceeds the Runtime limit",
-            ));
+        self.upload_content(
+            "application/x-yaml",
+            content,
+            MAX_IMPORT_BYTES,
+            "Imported configuration",
+        )
+    }
+
+    fn upload_content(
+        &self,
+        content_type: &str,
+        content: &[u8],
+        maximum: usize,
+        description: &str,
+    ) -> Result<Value, BridgeError> {
+        if content.is_empty() || content.len() > maximum {
+            return Err(BridgeError::request(&format!(
+                "{description} is empty or exceeds the Runtime limit"
+            )));
         }
         let digest = hex::encode(Sha256::digest(content));
         let size = content.len().to_string();
         self.call_json(
             "POST",
             "/v1/imports",
-            Some("application/x-yaml"),
+            Some(content_type),
             &[
                 ("X-Submux-Content-Size", size.as_str()),
                 ("X-Submux-Content-SHA256", digest.as_str()),
             ],
             content,
             None,
+        )
+    }
+
+    pub fn get_advanced_override(&self) -> Result<Value, BridgeError> {
+        self.call_json("GET", "/v1/advanced-override", None, &[], &[], None)
+    }
+
+    pub fn set_advanced_override(&self, content: &[u8]) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        let imported = self.upload_content(
+            "application/x-yaml",
+            content,
+            MAX_ADVANCED_OVERRIDE_BYTES,
+            "Advanced override",
+        )?;
+        let content_id = imported
+            .get("content_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::service("Runtime override upload response is invalid"))?;
+        self.execute_action_with_params("override.set", json!({ "content_id": content_id }))
+    }
+
+    pub fn add_managed_resource(
+        &self,
+        name: &str,
+        kind: &str,
+        content: &[u8],
+    ) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        validate_resource_name(name)?;
+        validate_resource_kind(kind)?;
+        let imported = self.upload_content(
+            "application/vnd.submux.managed-resource",
+            content,
+            MAX_MANAGED_RESOURCE_BYTES,
+            "Managed resource",
+        )?;
+        let content_id = imported
+            .get("content_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::service("Runtime resource upload response is invalid"))?;
+        self.execute_action_with_params(
+            "resource.add",
+            json!({
+                "content_id": content_id,
+                "resource_name": name,
+                "resource_kind": kind,
+            }),
         )
     }
 
@@ -164,8 +229,35 @@ impl RuntimeBridge {
     }
 
     pub fn preview_candidate(&self, content_id: &str) -> Result<Value, BridgeError> {
-        let body = serde_json::to_vec(&json!({ "content_id": content_id }))
-            .map_err(BridgeError::internal)?;
+        self.preview_candidate_request(json!({ "content_id": content_id }))
+    }
+
+    pub fn preview_source(&self, source_id: &str) -> Result<Value, BridgeError> {
+        validate_source_id(source_id)?;
+        self.preview_candidate_request(json!({ "source_id": source_id }))
+    }
+
+    pub fn preview_override(&self, source_id: &str, content: &[u8]) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        validate_source_id(source_id)?;
+        let imported = self.upload_content(
+            "application/x-yaml",
+            content,
+            MAX_ADVANCED_OVERRIDE_BYTES,
+            "Advanced override",
+        )?;
+        let content_id = imported
+            .get("content_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::service("Runtime override upload response is invalid"))?;
+        self.preview_candidate_request(json!({
+            "source_id": source_id,
+            "override_content_id": content_id,
+        }))
+    }
+
+    fn preview_candidate_request(&self, request: Value) -> Result<Value, BridgeError> {
+        let body = serde_json::to_vec(&request).map_err(BridgeError::internal)?;
         self.call_json(
             "POST",
             "/v1/candidates/preview",
@@ -627,6 +719,35 @@ fn validate_source_id(source_id: &str) -> Result<(), BridgeError> {
     }
 }
 
+fn validate_resource_kind(kind: &str) -> Result<(), BridgeError> {
+    if matches!(
+        kind,
+        "proxy-provider-yaml" | "rule-provider-yaml" | "certificate-pem" | "private-key-pem"
+    ) {
+        Ok(())
+    } else {
+        Err(BridgeError::request(
+            "Runtime managed resource kind is invalid",
+        ))
+    }
+}
+
+fn validate_resource_name(name: &str) -> Result<(), BridgeError> {
+    let valid = !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte));
+    if valid {
+        Ok(())
+    } else {
+        Err(BridgeError::request(
+            "Runtime managed resource name is invalid",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,5 +796,14 @@ mod tests {
         assert!(validate_source_id("src_0123456789ABCDEF0123456789ABCDEF").is_ok());
         assert!(validate_source_id("src_with/slash").is_err());
         assert!(validate_source_id("src_0123456789abcdef").is_err());
+    }
+
+    #[test]
+    fn managed_resource_metadata_is_allowlisted() {
+        assert!(validate_resource_name("provider.main").is_ok());
+        assert!(validate_resource_name("../provider").is_err());
+        assert!(validate_resource_name("provider/name").is_err());
+        assert!(validate_resource_kind("proxy-provider-yaml").is_ok());
+        assert!(validate_resource_kind("arbitrary-file").is_err());
     }
 }

@@ -168,6 +168,26 @@ func (c *Coordinator) PreviewCandidate(
 	return previewer.PreviewCandidate(ctx, peer, request)
 }
 
+func (c *Coordinator) GetAdvancedOverride(
+	ctx context.Context,
+	_ runtimeapi.PeerIdentity,
+) (runtimeapi.AdvancedOverrideDocument, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.AdvancedOverrideDocument{}, err
+	}
+	if c == nil || c.State == nil {
+		return runtimeapi.AdvancedOverrideDocument{}, errors.New("Runtime state is unavailable")
+	}
+	body, record, err := c.State.AdvancedOverride()
+	if err != nil {
+		return runtimeapi.AdvancedOverrideDocument{}, err
+	}
+	return runtimeapi.AdvancedOverrideDocument{
+		YAML:   string(body),
+		SHA256: record.SHA256,
+	}, nil
+}
+
 func (c *Coordinator) CancelOperation(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -332,7 +352,9 @@ func (c *Coordinator) processNext(serviceContext context.Context) (bool, error) 
 		}
 	}
 	if (operation.Action.Kind == runtimeapi.ActionApplyImportedConfig ||
-		operation.Action.Kind == runtimeapi.ActionAddRemoteSource) &&
+		operation.Action.Kind == runtimeapi.ActionAddRemoteSource ||
+		operation.Action.Kind == runtimeapi.ActionAddManagedResource ||
+		operation.Action.Kind == runtimeapi.ActionSetAdvancedOverride) &&
 		operation.Action.Params.ContentID != "" {
 		if err := c.State.RemoveImport(operation.Action.Params.ContentID); err != nil {
 			return true, fmt.Errorf("remove consumed Runtime import: %w", err)
@@ -360,22 +382,33 @@ func validateAction(action runtimeapi.Action) error {
 		if !validContentID(action.Params.ContentID) {
 			return errors.New("proxy.apply_import requires a valid content_id")
 		}
-		if action.Params.SourceID != "" || action.Params.Route != "" {
+		if action.Params.SourceID != "" ||
+			action.Params.Route != "" ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
 			return errors.New("proxy.apply_import accepts only content_id")
 		}
 	case runtimeapi.ActionStartProxy, runtimeapi.ActionStopProxy:
-		if action.Params.ContentID != "" || action.Params.SourceID != "" || action.Params.Route != "" {
+		if action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.Route != "" ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
 			return errors.New("proxy start and stop do not accept parameters")
 		}
 	case runtimeapi.ActionAddRemoteSource:
 		if !validContentID(action.Params.ContentID) ||
 			action.Params.SourceID != "" ||
-			action.Params.Route != "" {
+			action.Params.Route != "" ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
 			return errors.New("source.add_remote requires only a valid content_id")
 		}
 	case runtimeapi.ActionRefreshSource:
 		if !validSourceID(action.Params.SourceID) ||
 			action.Params.ContentID != "" ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" ||
 			(action.Params.Route != "" &&
 				action.Params.Route != runtimeapi.SourceRouteDirect &&
 				action.Params.Route != runtimeapi.SourceRouteMihomo) {
@@ -384,8 +417,26 @@ func validateAction(action runtimeapi.Action) error {
 	case runtimeapi.ActionApplySource:
 		if !validSourceID(action.Params.SourceID) ||
 			action.Params.ContentID != "" ||
-			action.Params.Route != "" {
+			action.Params.Route != "" ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
 			return errors.New("source.apply requires only a valid source_id")
+		}
+	case runtimeapi.ActionAddManagedResource:
+		if !validContentID(action.Params.ContentID) ||
+			action.Params.SourceID != "" ||
+			action.Params.Route != "" ||
+			!validResourceKind(action.Params.ResourceKind) ||
+			!validResourceName(action.Params.ResourceName) {
+			return errors.New("resource.add requires content_id, resource_kind, and resource_name")
+		}
+	case runtimeapi.ActionSetAdvancedOverride:
+		if !validContentID(action.Params.ContentID) ||
+			action.Params.SourceID != "" ||
+			action.Params.Route != "" ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("override.set requires only a valid content_id")
 		}
 	default:
 		return fmt.Errorf("Runtime action %q is not supported", action.Kind)
@@ -411,6 +462,30 @@ func validContentID(id string) bool {
 	return err == nil
 }
 
+func validResourceKind(kind string) bool {
+	switch kind {
+	case runtimeapi.ResourceKindProxyProvider,
+		runtimeapi.ResourceKindRuleProvider,
+		runtimeapi.ResourceKindCertificate,
+		runtimeapi.ResourceKindPrivateKey:
+		return true
+	default:
+		return false
+	}
+}
+
+func validResourceName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for _, character := range name {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func publicExecutionMessage(kind string) string {
 	switch kind {
 	case runtimeapi.ActionApplyImportedConfig:
@@ -425,6 +500,10 @@ func publicExecutionMessage(kind string) string {
 		return "Runtime could not refresh the remote configuration source"
 	case runtimeapi.ActionApplySource:
 		return "Runtime could not apply the current remote configuration source"
+	case runtimeapi.ActionAddManagedResource:
+		return "Runtime could not import the managed resource"
+	case runtimeapi.ActionSetAdvancedOverride:
+		return "Runtime could not save the advanced override"
 	default:
 		return "Runtime operation failed"
 	}

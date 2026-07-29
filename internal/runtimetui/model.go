@@ -19,7 +19,9 @@ import (
 type Client interface {
 	Observe(context.Context) (runtimeapi.Snapshot, error)
 	UploadImport(context.Context, string, []byte) (runtimeapi.ImportContent, error)
+	GetAdvancedOverride(context.Context) (runtimeapi.AdvancedOverrideDocument, error)
 	PreviewCandidate(context.Context, string) (runtimeapi.CandidatePreview, error)
+	PreviewCandidateRequest(context.Context, runtimeapi.PreviewCandidateRequest) (runtimeapi.CandidatePreview, error)
 	Execute(context.Context, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, error)
 	GetOperation(context.Context, string) (runtimeapi.Operation, error)
 	WaitOperation(context.Context, string, time.Duration) (runtimeapi.Operation, error)
@@ -45,9 +47,17 @@ type Model struct {
 }
 
 const (
-	editorModeConfig = "config"
-	editorModeSource = "source"
+	editorModeConfig   = "config"
+	editorModeSource   = "source"
+	editorModeResource = "resource"
+	editorModeOverride = "override"
 )
+
+type resourceDraft struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Content string `json:"content"`
+}
 
 type snapshotMsg struct {
 	snapshot runtimeapi.Snapshot
@@ -64,6 +74,14 @@ type operationMsg struct {
 
 type verificationMsg struct {
 	verification runtimeapi.ProxyVerification
+}
+
+type overrideDocumentMsg struct {
+	document runtimeapi.AdvancedOverrideDocument
+}
+
+type overridePreviewMsg struct {
+	preview runtimeapi.CandidatePreview
 }
 
 type errMsg struct {
@@ -151,7 +169,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case operationMsg:
 		m.lastOperation = message.operation
 		m.busy = false
-		if m.editing && m.editorMode == editorModeSource {
+		if m.editing {
 			m.editing = false
 			m.editor.Blur()
 		}
@@ -169,6 +187,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "显式代理当前不可用"
 		}
+	case overrideDocumentMsg:
+		m.busy = false
+		m.editing = true
+		m.editorMode = editorModeOverride
+		m.err = nil
+		m.editor.SetValue(message.document.YAML)
+		m.status = "编辑高级覆盖后按 Ctrl+S 校验并保存，Esc 取消"
+		return m, m.editor.Focus()
+	case overridePreviewMsg:
+		m.preview = message.preview
+		m.busy = false
+		m.err = nil
+		m.status = fmt.Sprintf("高级覆盖预览已校验：%s；Ctrl+S 保存", shortDigest(message.preview.CandidateSHA256))
 	case errMsg:
 		m.busy = false
 		m.err = message.err
@@ -205,8 +236,44 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = "正在上传并添加远程来源…"
 					return m, m.addSourceCmd(body)
 				}
+				if m.editorMode == editorModeResource {
+					var draft resourceDraft
+					if err := json.Unmarshal(body, &draft); err != nil ||
+						strings.TrimSpace(draft.Name) == "" ||
+						strings.TrimSpace(draft.Content) == "" {
+						m.busy = false
+						m.err = errors.New("托管资源必须是包含 name、kind 和 content 的有效 JSON")
+						m.status = m.err.Error()
+						return m, nil
+					}
+					m.status = "正在上传并添加托管资源…"
+					return m, m.addResourceCmd(draft)
+				}
+				if m.editorMode == editorModeOverride {
+					m.status = "正在校验并保存高级覆盖…"
+					return m, m.setOverrideCmd(body)
+				}
 				m.status = "正在上传并校验候选配置…"
 				return m, m.importPreviewCmd(body)
+			case "ctrl+p":
+				if m.editorMode != editorModeOverride || m.busy {
+					return m, nil
+				}
+				sourceID := m.snapshot.Sources.CurrentSourceID
+				if sourceID == "" {
+					m.err = errors.New("当前没有可用于预览的远程来源")
+					m.status = m.err.Error()
+					return m, nil
+				}
+				body := []byte(m.editor.Value())
+				if len(strings.TrimSpace(string(body))) == 0 {
+					m.err = errors.New("高级覆盖不能为空")
+					m.status = m.err.Error()
+					return m, nil
+				}
+				m.busy = true
+				m.status = "正在生成尚未保存的高级覆盖预览…"
+				return m, m.previewOverrideCmd(sourceID, body)
 			}
 		}
 		var command tea.Cmd
@@ -239,6 +306,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor.SetValue(defaultSourceDraft())
 			m.status = "编辑来源 JSON 后按 Ctrl+S 添加，Esc 取消"
 			return m, m.editor.Focus()
+		case "e":
+			m.editing = true
+			m.editorMode = editorModeResource
+			m.err = nil
+			m.editor.SetValue(defaultResourceDraft())
+			m.status = "编辑资源 JSON 后按 Ctrl+S 添加，Esc 取消"
+			return m, m.editor.Focus()
+		case "o":
+			m.busy = true
+			m.status = "正在读取高级覆盖…"
+			return m, m.getOverrideCmd()
 		case "a":
 			if m.preview.ContentID == "" {
 				m.err = errors.New("请先导入并预览配置")
@@ -302,6 +380,16 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在验证显式代理…"
 			return m, m.verifyCmd()
+		case "y":
+			sourceID := m.snapshot.Sources.CurrentSourceID
+			if sourceID == "" {
+				m.err = errors.New("当前没有可预览的远程来源")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.busy = true
+			m.status = "正在生成当前来源的最终候选配置…"
+			return m, m.previewSourceCmd(sourceID)
 		case "f", "d", "m":
 			sourceID := m.snapshot.Sources.CurrentSourceID
 			if sourceID == "" {
@@ -352,6 +440,12 @@ func (m Model) View() tea.View {
 		if m.editorMode == editorModeSource {
 			editorTitle = "Submux Runtime · 添加远程配置来源"
 			editorHelp = "Ctrl+S 添加来源 · Esc 取消；高风险设置必须填写精确 authorized_target"
+		} else if m.editorMode == editorModeResource {
+			editorTitle = "Submux Runtime · 添加托管资源"
+			editorHelp = "Ctrl+S 上传内容并添加 · Esc 取消；只接受约定的资源类型"
+		} else if m.editorMode == editorModeOverride {
+			editorTitle = "Submux Runtime · 高级覆盖"
+			editorHelp = "Ctrl+P 预览 · Ctrl+S 校验并保存 · Esc 取消；Runtime 保留字段不能覆盖"
 		}
 		content := strings.Join([]string{
 			titleStyle.Render(editorTitle),
@@ -375,12 +469,15 @@ func (m Model) View() tea.View {
 		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("Mihomo"), mihomoState, labelStyle.Render("运行方式"), runMode),
 		fmt.Sprintf("%s %d  %s %d", labelStyle.Render("Revision"), m.snapshot.Revision, labelStyle.Render("队列"), m.snapshot.Operations.Queued),
 	}
-	if m.preview.ContentID != "" {
+	if m.preview.CandidateSHA256 != "" {
 		lines = append(lines,
 			"",
 			labelStyle.Render("候选配置"),
 			fmt.Sprintf("%s · %s · %s", shortDigest(m.preview.CandidateSHA256), m.preview.ProxyKind, strings.Join(m.preview.ProxyAddresses, ", ")),
 		)
+		for _, origin := range m.preview.FieldOrigins {
+			lines = append(lines, fmt.Sprintf("%s · %s · %s", origin.Path, origin.Origin, origin.Status))
+		}
 	}
 	if m.lastOperation.ID != "" {
 		lines = append(lines,
@@ -402,11 +499,29 @@ func (m Model) View() tea.View {
 			lines = append(lines, line)
 		}
 	}
+	if len(m.snapshot.Resources.Items) > 0 {
+		lines = append(lines, "", labelStyle.Render("托管资源"))
+		for _, resource := range m.snapshot.Resources.Items {
+			lines = append(lines, fmt.Sprintf("%s · %s · %s · %d 字节",
+				resource.ID,
+				resource.Kind,
+				resource.Name,
+				resource.Size,
+			))
+		}
+	}
+	if m.snapshot.AdvancedOverride.Present {
+		lines = append(lines, "", fmt.Sprintf("%s %s · %d 字节",
+			labelStyle.Render("高级覆盖"),
+			shortDigest(m.snapshot.AdvancedOverride.SHA256),
+			m.snapshot.AdvancedOverride.Size,
+		))
+	}
 	lines = append(lines,
 		"",
 		renderStatus(m.status, m.err, m.busy),
 		"",
-		mutedStyle.Render("i 导入/预览 · u 添加来源 · f 刷新来源 · d 直连刷新 · m Mihomo 刷新 · p 应用来源 · a 应用导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		mutedStyle.Render("i 导入/预览 · u 添加来源 · y 预览当前来源 · e 添加资源 · o 编辑高级覆盖 · f/d/m 刷新来源 · p 应用来源 · a 应用导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -455,6 +570,97 @@ func (m Model) addSourceCmd(body []byte) tea.Cmd {
 			return errMsg{err: err}
 		}
 		return operationMsg{operation: operation}
+	}
+}
+
+func (m Model) addResourceCmd(draft resourceDraft) tea.Cmd {
+	revision := m.snapshot.Revision
+	return func() tea.Msg {
+		content, err := m.client.UploadImport(
+			m.ctx,
+			runtimeapi.ManagedResourceContentType,
+			[]byte(draft.Content),
+		)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		operation, err := m.client.Execute(m.ctx, runtimeapi.CreateOperationRequest{
+			IfRevision: revision,
+			Action: runtimeapi.Action{
+				Kind: runtimeapi.ActionAddManagedResource,
+				Params: runtimeapi.ActionParams{
+					ContentID:    content.ID,
+					ResourceKind: draft.Kind,
+					ResourceName: draft.Name,
+				},
+			},
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return operationMsg{operation: operation}
+	}
+}
+
+func (m Model) getOverrideCmd() tea.Cmd {
+	return func() tea.Msg {
+		document, err := m.client.GetAdvancedOverride(m.ctx)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return overrideDocumentMsg{document: document}
+	}
+}
+
+func (m Model) setOverrideCmd(body []byte) tea.Cmd {
+	revision := m.snapshot.Revision
+	return func() tea.Msg {
+		content, err := m.client.UploadImport(m.ctx, "application/x-yaml", body)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		operation, err := m.client.Execute(m.ctx, runtimeapi.CreateOperationRequest{
+			IfRevision: revision,
+			Action: runtimeapi.Action{
+				Kind: runtimeapi.ActionSetAdvancedOverride,
+				Params: runtimeapi.ActionParams{
+					ContentID: content.ID,
+				},
+			},
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return operationMsg{operation: operation}
+	}
+}
+
+func (m Model) previewSourceCmd(sourceID string) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := m.client.PreviewCandidateRequest(m.ctx, runtimeapi.PreviewCandidateRequest{
+			SourceID: sourceID,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return importPreviewMsg{preview: preview}
+	}
+}
+
+func (m Model) previewOverrideCmd(sourceID string, body []byte) tea.Cmd {
+	return func() tea.Msg {
+		content, err := m.client.UploadImport(m.ctx, "application/x-yaml", body)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		preview, err := m.client.PreviewCandidateRequest(m.ctx, runtimeapi.PreviewCandidateRequest{
+			SourceID:          sourceID,
+			OverrideContentID: content.ID,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return overridePreviewMsg{preview: preview}
 	}
 }
 
@@ -581,5 +787,13 @@ func defaultSourceDraft() string {
   "refresh_interval_seconds": 21600,
   "timeout_seconds": 30,
   "max_response_bytes": 8388608
+}`
+}
+
+func defaultResourceDraft() string {
+	return `{
+  "name": "provider",
+  "kind": "proxy-provider-yaml",
+  "content": "proxies:\n  - name: example\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n"
 }`
 }

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -140,6 +141,86 @@ func TestMihomoExecutorWithOfficialBinary(t *testing.T) {
 	if err != nil || sourceResult == nil || sourceResult.SourceID == "" ||
 		sourceResult.RefreshResult != "validated" {
 		t.Fatalf("add validated remote source: result=%#v err=%v", sourceResult, err)
+	}
+	resourceBody := []byte("proxies:\n  - name: local-socks\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n")
+	resourceDigest := sha256.Sum256(resourceBody)
+	resourceContent, err := state.UploadImport(
+		peer,
+		runtimeapi.ManagedResourceContentType,
+		int64(len(resourceBody)),
+		hex.EncodeToString(resourceDigest[:]),
+		resourceBody,
+		managerNow,
+	)
+	if err != nil {
+		t.Fatalf("upload managed resource: %v", err)
+	}
+	resourceResult, err := executor.Execute(
+		context.Background(),
+		runtimeapi.Operation{
+			ID:             "op_resource_add",
+			CallerIdentity: peer.Key(),
+			Action: runtimeapi.Action{
+				Kind: runtimeapi.ActionAddManagedResource,
+				Params: runtimeapi.ActionParams{
+					ContentID:    resourceContent.ID,
+					ResourceKind: runtimeapi.ResourceKindProxyProvider,
+					ResourceName: "integration-provider",
+				},
+			},
+		},
+		func(string, int, bool) error { return nil },
+	)
+	if err != nil || resourceResult == nil || resourceResult.ResourceID == "" {
+		t.Fatalf("add managed resource: result=%#v err=%v", resourceResult, err)
+	}
+	override := []byte(fmt.Sprintf(
+		"proxy-providers:\n  managed:\n    type: file\n    path: resource://%s\n    health-check:\n      enable: false\n",
+		resourceResult.ResourceID,
+	))
+	overrideDigest := sha256.Sum256(override)
+	overrideContent, err := state.UploadImport(
+		peer,
+		"application/x-yaml",
+		int64(len(override)),
+		hex.EncodeToString(overrideDigest[:]),
+		override,
+		managerNow,
+	)
+	if err != nil {
+		t.Fatalf("upload advanced override: %v", err)
+	}
+	overrideResult, err := executor.Execute(
+		context.Background(),
+		runtimeapi.Operation{
+			ID:             "op_override_set",
+			CallerIdentity: peer.Key(),
+			Action: runtimeapi.Action{
+				Kind: runtimeapi.ActionSetAdvancedOverride,
+				Params: runtimeapi.ActionParams{
+					ContentID: overrideContent.ID,
+				},
+			},
+		},
+		func(string, int, bool) error { return nil },
+	)
+	if err != nil || overrideResult == nil || overrideResult.AdvancedOverrideSHA256 == "" {
+		t.Fatalf(
+			"set advanced override: result=%#v err=%v cause=%v",
+			overrideResult,
+			err,
+			errors.Unwrap(err),
+		)
+	}
+	sourcePreview, err := executor.PreviewCandidate(
+		context.Background(),
+		peer,
+		runtimeapi.PreviewCandidateRequest{SourceID: sourceResult.SourceID},
+	)
+	if err != nil || len(sourcePreview.ReferencedResources) != 1 ||
+		sourcePreview.ReferencedResources[0] != resourceResult.ResourceID ||
+		len(sourcePreview.FieldOrigins) == 0 {
+		t.Fatalf("preview layered remote source: preview=%#v err=%v", sourcePreview, err)
 	}
 	managerNow = managerNow.Add(runtimesource.ManualRefreshDebounce + time.Second)
 	refreshResult, err := executor.Execute(

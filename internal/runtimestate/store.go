@@ -97,6 +97,14 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 		if err != nil {
 			return err
 		}
+		resources, err := managedResourceSummary(transaction)
+		if err != nil {
+			return err
+		}
+		override, err := advancedOverrideSummary(transaction)
+		if err != nil {
+			return err
+		}
 		snapshot = runtimeapi.Snapshot{
 			ProtocolVersion: runtimeapi.ProtocolVersion,
 			Revision:        revision,
@@ -110,6 +118,8 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 			},
 			RunMode:           runMode,
 			Sources:           sources,
+			Resources:         resources,
+			AdvancedOverride:  override,
 			Operations:        operations,
 			Updates:           runtimeapi.UpdateStatus{},
 			LatestEventCursor: eventCursor,

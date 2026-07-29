@@ -1,6 +1,6 @@
 # Submux Runtime 目标设计
 
-> 状态：已接受的目标架构，正在实现。仓库已经包含 Runtime 的核心部署基础、本机 IPC、单实例锁、单写者状态库、持久化运行操作、候选配置预览、显式代理配置应用、安全远程来源刷新、Bubble Tea TUI 和 Tauri GUI；多来源切换、TUN/网关模式、安装脚本和发布产物仍在开发中，当前代码不能作为可部署的 Runtime 实现。
+> 状态：已接受的目标架构，正在实现。仓库已经包含 Runtime 的核心部署基础、本机 IPC、单实例锁、单写者状态库、持久化运行操作、分层候选配置预览、托管资源、本机高级覆盖、显式代理配置应用、安全远程来源刷新、Bubble Tea TUI 和 Tauri GUI；多来源切换、TUN/网关模式、安装脚本和发布产物仍在开发中，当前代码不能作为可部署的 Runtime 实现。
 
 ## 定位
 
@@ -47,6 +47,9 @@ submux-runtime serve
 submux-runtime tui
 submux-runtime status --json
 submux-runtime source add <url>
+submux-runtime resource add --name provider --kind proxy-provider-yaml <file>
+submux-runtime override set <file>
+submux-runtime proxy preview --source-id <source-id> [--override-content-id <content-id>]
 submux-runtime operation wait <id>
 ```
 
@@ -108,13 +111,13 @@ Runtime 保留至少以下字段：
 
 文件引用遵循以下规则：
 
-1. provider 路径改写到当前来源的受管目录；
+1. provider 路径改写到 Runtime 的托管资源目录；
 2. `type: file`、证书、密钥和其他文件引用只能指向 Runtime 操作员明确导入的托管资源；
 3. `external-ui`、`external-ui-url`、任意核心更新地址和任意写路径被拒绝；
 4. 未知的新路径、监听或下载字段默认拒绝，只有 Runtime 的版本化安全策略明确支持后才允许；
 5. 来源和高级覆盖不能修改 Runtime 保留字段。
 
-托管资源按内容保存，具有硬性单文件和总量上限。导入时拒绝符号链接、Windows reparse point、路径穿越和类型不符的文件。
+托管资源按内容保存，具有硬性单文件和总量上限。导入时拒绝符号链接、Windows reparse point、路径穿越和类型不符的文件。Runtime 不继承进程环境里的 `SAFE_PATHS`；静态校验和启动 Mihomo 时，只把重新验证过的托管资源目录加入该变量。
 
 ## 来源下载
 
@@ -149,7 +152,7 @@ Runtime 保留至少以下字段：
 
 失败后的重试间隔依次为 1 分钟、5 分钟、15 分钟和 1 小时，并且不超过正常刷新间隔。合理的 `Retry-After` 优先。手动刷新绕过失败退避，但仍受本机短时间防抖限制。网络恢复后加入随机延迟，避免大量机器同时请求。
 
-当前实现已经支持安全添加第一个远程来源、按保存线路或一次性线路刷新，以及把当前来源最近一次通过校验的候选配置显式应用到 Mihomo。添加和刷新不会应用配置或启动 Mihomo；首次应用仍保持停止，操作员需要另行执行启动。多来源的当前来源切换、编辑和删除继续按下述规则实现。
+当前实现已经支持安全添加第一个远程来源、按保存线路或一次性线路刷新、导入托管资源、保存本机高级覆盖、查看分层字段来源，以及把当前来源最近一次通过校验的候选配置显式应用到 Mihomo。添加、刷新、资源导入和覆盖编辑不会应用配置或启动 Mihomo；首次应用仍保持停止，操作员需要另行执行启动。多来源的当前来源切换、编辑和删除继续按下述规则实现。
 
 切换当前来源时：
 

@@ -40,15 +40,13 @@ func (e *MihomoExecutor) PreviewCandidate(
 	if e == nil || e.State == nil || e.Core == nil || e.Process == nil {
 		return runtimeapi.CandidatePreview{}, errors.New("Mihomo Runtime previewer is incomplete")
 	}
-	body, content, err := e.State.PeekImport(request.ContentID, peer.Key(), e.now())
+	body, contentID, sourceDigest, err := e.previewSource(peer, request)
 	if err != nil {
 		return runtimeapi.CandidatePreview{}, err
 	}
-	if !isYAMLContentType(content.ContentType) {
-		return runtimeapi.CandidatePreview{}, &PublicError{
-			Code:    runtimeapi.ErrorInvalidRequest,
-			Message: "The uploaded content is not a Mihomo YAML configuration",
-		}
+	override, overrideDigest, err := e.previewOverride(peer, request)
+	if err != nil {
+		return runtimeapi.CandidatePreview{}, err
 	}
 	binaryPath, exactVersion, err := e.currentCore()
 	if err != nil {
@@ -58,12 +56,7 @@ func (e *MihomoExecutor) PreviewCandidate(
 			Cause:   err,
 		}
 	}
-	builder := mihomo.ExplicitCandidateBuilder{
-		Port:            e.ProxyPort,
-		ControlEndpoint: e.ControlEndpoint,
-		Platform:        e.Platform,
-	}
-	candidate, err := builder.BuildCandidate(body)
+	detailed, err := e.buildDetailedCandidate(body, override)
 	if err != nil {
 		return runtimeapi.CandidatePreview{}, &PublicError{
 			Code:    runtimeapi.ErrorInvalidRequest,
@@ -71,33 +64,37 @@ func (e *MihomoExecutor) PreviewCandidate(
 			Cause:   err,
 		}
 	}
-	listeners, err := mihomo.ProxyListeners(candidate)
+	listeners, err := mihomo.ProxyListeners(detailed.YAML)
 	if err != nil {
 		return runtimeapi.CandidatePreview{}, err
 	}
 	if len(listeners) == 0 {
 		return runtimeapi.CandidatePreview{}, errors.New("candidate configuration has no explicit proxy listeners")
 	}
-	if err := validatePreviewCandidate(ctx, e.ConfigRoot, runtimeprocess.ConfigValidator{
-		BinaryPath:   binaryPath,
-		DataDir:      e.Process.DataDir,
-		ExactVersion: exactVersion,
-	}, candidate); err != nil {
+	validator, err := e.configValidator(binaryPath, exactVersion)
+	if err != nil {
+		return runtimeapi.CandidatePreview{}, err
+	}
+	if err := validatePreviewCandidate(ctx, e.ConfigRoot, validator, detailed.YAML); err != nil {
 		return runtimeapi.CandidatePreview{}, &PublicError{
 			Code:    runtimeapi.ErrorInvalidRequest,
 			Message: "Mihomo rejected the candidate configuration",
 			Cause:   err,
 		}
 	}
-	digest := sha256.Sum256(candidate)
+	digest := sha256.Sum256(detailed.YAML)
 	return runtimeapi.CandidatePreview{
-		ContentID:          content.ID,
-		CandidateYAML:      string(candidate),
-		CandidateSHA256:    hex.EncodeToString(digest[:]),
-		ProxyKind:          listeners[0].Kind,
-		ProxyAddresses:     listenerAddresses(listeners),
-		RuntimeOwnedFields: mihomo.ExplicitRuntimeOwnedFields(),
-		Validated:          true,
+		ContentID:           contentID,
+		CandidateYAML:       string(detailed.YAML),
+		CandidateSHA256:     hex.EncodeToString(digest[:]),
+		ProxyKind:           listeners[0].Kind,
+		ProxyAddresses:      listenerAddresses(listeners),
+		RuntimeOwnedFields:  mihomo.ExplicitRuntimeOwnedFields(),
+		FieldOrigins:        runtimeFieldOrigins(detailed.FieldOrigins),
+		ReferencedResources: append([]string(nil), detailed.ReferencedResources...),
+		SourceSHA256:        sourceDigest,
+		OverrideSHA256:      overrideDigest,
+		Validated:           true,
 	}, nil
 }
 
@@ -118,6 +115,10 @@ func (e *MihomoExecutor) Execute(
 		return e.start(ctx, report)
 	case runtimeapi.ActionStopProxy:
 		return e.stop(ctx, report)
+	case runtimeapi.ActionAddManagedResource:
+		return e.addManagedResource(operation, report)
+	case runtimeapi.ActionSetAdvancedOverride:
+		return e.setAdvancedOverride(ctx, operation, report)
 	case runtimeapi.ActionAddRemoteSource, runtimeapi.ActionRefreshSource:
 		if e.Sources == nil {
 			return nil, errors.New("Runtime source manager is unavailable")
@@ -190,12 +191,11 @@ func (e *MihomoExecutor) applyImport(
 	if err := report("validating_candidate", 25, true); err != nil {
 		return nil, err
 	}
-	builder := mihomo.ExplicitCandidateBuilder{
-		Port:            e.ProxyPort,
-		ControlEndpoint: e.ControlEndpoint,
-		Platform:        e.Platform,
+	override, _, err := e.State.AdvancedOverride()
+	if err != nil {
+		return nil, err
 	}
-	candidate, err := builder.BuildCandidate(body)
+	detailed, err := e.buildDetailedCandidate(body, override)
 	if err != nil {
 		return nil, &PublicError{
 			Code:    runtimeapi.ErrorInvalidRequest,
@@ -203,7 +203,7 @@ func (e *MihomoExecutor) applyImport(
 			Cause:   err,
 		}
 	}
-	return e.deployCandidate(ctx, operation.ID, content.SHA256, body, candidate, "", report)
+	return e.deployCandidate(ctx, operation.ID, content.SHA256, body, detailed.YAML, "", report)
 }
 
 func (e *MihomoExecutor) applySource(
@@ -233,12 +233,11 @@ func (e *MihomoExecutor) applySource(
 	if err := report("validating_candidate", 25, true); err != nil {
 		return nil, err
 	}
-	builder := mihomo.ExplicitCandidateBuilder{
-		Port:            e.ProxyPort,
-		ControlEndpoint: e.ControlEndpoint,
-		Platform:        e.Platform,
+	override, _, err := e.State.AdvancedOverride()
+	if err != nil {
+		return nil, err
 	}
-	candidate, err := builder.BuildCandidate(body)
+	detailed, err := e.buildDetailedCandidate(body, override)
 	if err != nil {
 		return nil, &PublicError{
 			Code:    runtimeapi.ErrorInvalidRequest,
@@ -251,7 +250,7 @@ func (e *MihomoExecutor) applySource(
 		operation.ID,
 		record.RawSHA256,
 		body,
-		candidate,
+		detailed.YAML,
 		record.ID,
 		report,
 	)
@@ -276,6 +275,11 @@ func (e *MihomoExecutor) deployCandidate(
 	}
 	e.Process.BinaryPath = binaryPath
 	e.Process.ConfigPath = filepath.Join(e.ConfigRoot, "current", "config.yaml")
+	validator, err := e.configValidator(binaryPath, exactVersion)
+	if err != nil {
+		return nil, err
+	}
+	e.Process.SafePaths = append([]string(nil), validator.SafePaths...)
 	running, err := e.Process.IsRunning(ctx)
 	if err != nil {
 		return nil, err
@@ -289,13 +293,9 @@ func (e *MihomoExecutor) deployCandidate(
 		Builder: mihomo.CandidateBuilderFunc(func([]byte) ([]byte, error) {
 			return append([]byte(nil), candidate...), nil
 		}),
-		Validator: runtimeprocess.ConfigValidator{
-			BinaryPath:   binaryPath,
-			DataDir:      e.Process.DataDir,
-			ExactVersion: exactVersion,
-		},
-		Service:  service,
-		Verifier: e.Verifier,
+		Validator: validator,
+		Service:   service,
+		Verifier:  e.Verifier,
 	}
 	var deployment mihomo.DeploymentResult
 	if running {
@@ -329,34 +329,266 @@ func (e *MihomoExecutor) ValidateSourceCandidate(
 	ctx context.Context,
 	body []byte,
 ) (runtimesource.ValidatedCandidate, error) {
-	if e == nil || e.Core == nil || e.Process == nil {
+	if e == nil || e.State == nil || e.Core == nil || e.Process == nil {
 		return runtimesource.ValidatedCandidate{}, errors.New("Mihomo Runtime source validator is incomplete")
 	}
 	binaryPath, exactVersion, err := e.currentCore()
 	if err != nil {
 		return runtimesource.ValidatedCandidate{}, err
 	}
+	override, _, err := e.State.AdvancedOverride()
+	if err != nil {
+		return runtimesource.ValidatedCandidate{}, err
+	}
+	detailed, err := e.buildDetailedCandidate(body, override)
+	if err != nil {
+		return runtimesource.ValidatedCandidate{}, err
+	}
+	validator, err := e.configValidator(binaryPath, exactVersion)
+	if err != nil {
+		return runtimesource.ValidatedCandidate{}, err
+	}
+	if err := validatePreviewCandidate(ctx, e.ConfigRoot, validator, detailed.YAML); err != nil {
+		return runtimesource.ValidatedCandidate{}, err
+	}
+	digest := sha256.Sum256(detailed.YAML)
+	return runtimesource.ValidatedCandidate{
+		YAML:   detailed.YAML,
+		SHA256: hex.EncodeToString(digest[:]),
+	}, nil
+}
+
+func (e *MihomoExecutor) previewSource(
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.PreviewCandidateRequest,
+) ([]byte, string, string, error) {
+	if (request.ContentID == "") == (request.SourceID == "") {
+		return nil, "", "", &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Candidate preview requires exactly one imported configuration or remote source",
+		}
+	}
+	if request.ContentID != "" {
+		body, content, err := e.State.PeekImport(request.ContentID, peer.Key(), e.now())
+		if err != nil {
+			return nil, "", "", err
+		}
+		if !isYAMLContentType(content.ContentType) {
+			return nil, "", "", &PublicError{
+				Code:    runtimeapi.ErrorInvalidRequest,
+				Message: "The uploaded content is not a Mihomo YAML configuration",
+			}
+		}
+		return body, content.ID, content.SHA256, nil
+	}
+	record, err := e.State.GetRemoteSource(request.SourceID)
+	if err != nil {
+		return nil, "", "", &PublicError{
+			Code:    runtimeapi.ErrorNotFound,
+			Message: "The requested remote source is unavailable",
+			Cause:   err,
+		}
+	}
+	body, _, err := e.State.ReadRemoteSourceRevision(record)
+	if err != nil {
+		return nil, "", "", &PublicError{
+			Code:    runtimeapi.ErrorServiceUnavailable,
+			Message: "The requested remote source revision is unavailable",
+			Cause:   err,
+		}
+	}
+	return body, "", record.RawSHA256, nil
+}
+
+func (e *MihomoExecutor) previewOverride(
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.PreviewCandidateRequest,
+) ([]byte, string, error) {
+	if request.OverrideContentID == "" {
+		body, record, err := e.State.AdvancedOverride()
+		return body, record.SHA256, err
+	}
+	body, content, err := e.State.PeekImport(request.OverrideContentID, peer.Key(), e.now())
+	if err != nil {
+		return nil, "", err
+	}
+	if !isYAMLContentType(content.ContentType) {
+		return nil, "", &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The uploaded advanced override is not YAML",
+		}
+	}
+	return body, content.SHA256, nil
+}
+
+func (e *MihomoExecutor) buildDetailedCandidate(
+	source []byte,
+	override []byte,
+) (mihomo.DetailedCandidate, error) {
+	resources, err := e.State.ManagedResources()
+	if err != nil {
+		return mihomo.DetailedCandidate{}, err
+	}
+	managed := make([]mihomo.ManagedResource, 0, len(resources))
+	for _, resource := range resources {
+		managed = append(managed, mihomo.ManagedResource{
+			ID:   resource.ID,
+			Kind: resource.Kind,
+			Path: resource.Path,
+		})
+	}
 	builder := mihomo.ExplicitCandidateBuilder{
 		Port:            e.ProxyPort,
 		ControlEndpoint: e.ControlEndpoint,
 		Platform:        e.Platform,
 	}
-	candidate, err := builder.BuildCandidate(body)
+	return builder.BuildDetailed(source, override, managed)
+}
+
+func (e *MihomoExecutor) addManagedResource(
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if err := report("reading_managed_resource", 10, true); err != nil {
+		return nil, err
+	}
+	body, content, err := e.State.ConsumeImport(
+		operation.Action.Params.ContentID,
+		operation.CallerIdentity,
+		operation.ID,
+		e.now(),
+	)
 	if err != nil {
-		return runtimesource.ValidatedCandidate{}, err
+		return nil, &PublicError{
+			Code:    importErrorCode(err),
+			Message: "The uploaded managed resource is unavailable or no longer usable",
+			Cause:   err,
+		}
 	}
-	if err := validatePreviewCandidate(ctx, e.ConfigRoot, runtimeprocess.ConfigValidator{
-		BinaryPath:   binaryPath,
-		DataDir:      e.Process.DataDir,
-		ExactVersion: exactVersion,
-	}, candidate); err != nil {
-		return runtimesource.ValidatedCandidate{}, err
+	if normalizedContentType(content.ContentType) != runtimeapi.ManagedResourceContentType {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The uploaded content is not a Runtime managed resource",
+		}
 	}
-	digest := sha256.Sum256(candidate)
-	return runtimesource.ValidatedCandidate{
-		YAML:   candidate,
-		SHA256: hex.EncodeToString(digest[:]),
+	if err := report("validating_managed_resource", 45, true); err != nil {
+		return nil, err
+	}
+	if err := mihomo.ValidateManagedResource(operation.Action.Params.ResourceKind, body); err != nil {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The managed resource content does not match its declared type",
+			Cause:   err,
+		}
+	}
+	if err := report("saving_managed_resource", 80, false); err != nil {
+		return nil, err
+	}
+	record, err := e.State.CreateManagedResource(
+		operation.Action.Params.ResourceName,
+		operation.Action.Params.ResourceKind,
+		body,
+		operation.ID,
+		e.now(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return &runtimeapi.OperationResult{
+		ResourceID:   record.ID,
+		ResourceKind: record.Kind,
 	}, nil
+}
+
+func (e *MihomoExecutor) setAdvancedOverride(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if err := report("reading_advanced_override", 10, true); err != nil {
+		return nil, err
+	}
+	body, content, err := e.State.ConsumeImport(
+		operation.Action.Params.ContentID,
+		operation.CallerIdentity,
+		operation.ID,
+		e.now(),
+	)
+	if err != nil {
+		return nil, &PublicError{
+			Code:    importErrorCode(err),
+			Message: "The uploaded advanced override is unavailable or no longer usable",
+			Cause:   err,
+		}
+	}
+	if !isYAMLContentType(content.ContentType) {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The advanced override must be YAML",
+		}
+	}
+	source := []byte("{}\n")
+	if current, currentErr := e.State.CurrentRemoteSource(); currentErr == nil {
+		source, _, err = e.State.ReadRemoteSourceRevision(current)
+		if err != nil {
+			return nil, err
+		}
+	} else if !errors.Is(currentErr, runtimestate.ErrSourceNotFound) {
+		return nil, currentErr
+	}
+	if err := report("validating_advanced_override", 45, true); err != nil {
+		return nil, err
+	}
+	detailed, err := e.buildDetailedCandidate(source, body)
+	if err != nil {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The advanced override is outside the Runtime safety policy",
+			Cause:   err,
+		}
+	}
+	binaryPath, exactVersion, err := e.currentCore()
+	if err != nil {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorServiceUnavailable,
+			Message: "A verified Mihomo core must be installed before saving an advanced override",
+			Cause:   err,
+		}
+	}
+	validator, err := e.configValidator(binaryPath, exactVersion)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePreviewCandidate(ctx, e.ConfigRoot, validator, detailed.YAML); err != nil {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Mihomo rejected the configuration produced by the advanced override",
+			Cause:   err,
+		}
+	}
+	if err := report("saving_advanced_override", 85, false); err != nil {
+		return nil, err
+	}
+	record, err := e.State.SetAdvancedOverride(body, operation.ID, e.now())
+	if err != nil {
+		return nil, err
+	}
+	return &runtimeapi.OperationResult{
+		AdvancedOverrideSHA256: record.SHA256,
+	}, nil
+}
+
+func runtimeFieldOrigins(fields []mihomo.CandidateFieldOrigin) []runtimeapi.CandidateFieldOrigin {
+	result := make([]runtimeapi.CandidateFieldOrigin, 0, len(fields))
+	for _, field := range fields {
+		result = append(result, runtimeapi.CandidateFieldOrigin{
+			Path:           field.Path,
+			Origin:         field.Origin,
+			Status:         field.Status,
+			ReplacedOrigin: field.ReplacedOrigin,
+		})
+	}
+	return result
 }
 
 func (e *MihomoExecutor) DueActions(now time.Time) ([]runtimeapi.Action, error) {
@@ -385,6 +617,11 @@ func (e *MihomoExecutor) start(ctx context.Context, report StageReporter) (*runt
 	}
 	e.Process.BinaryPath = binaryPath
 	e.Process.ConfigPath = filepath.Join(e.ConfigRoot, "current", "config.yaml")
+	safePaths, err := e.mihomoSafePaths()
+	if err != nil {
+		return nil, err
+	}
+	e.Process.SafePaths = safePaths
 	running, err := e.Process.IsRunning(ctx)
 	if err != nil {
 		return nil, err
@@ -436,6 +673,30 @@ func (e *MihomoExecutor) currentCore() (string, string, error) {
 		return "", "", err
 	}
 	return path, status.Version, nil
+}
+
+func (e *MihomoExecutor) configValidator(
+	binaryPath string,
+	exactVersion string,
+) (runtimeprocess.ConfigValidator, error) {
+	safePaths, err := e.mihomoSafePaths()
+	if err != nil {
+		return runtimeprocess.ConfigValidator{}, err
+	}
+	return runtimeprocess.ConfigValidator{
+		BinaryPath:   binaryPath,
+		DataDir:      e.Process.DataDir,
+		ExactVersion: exactVersion,
+		SafePaths:    safePaths,
+	}, nil
+}
+
+func (e *MihomoExecutor) mihomoSafePaths() ([]string, error) {
+	root, err := e.State.ManagedResourceRoot()
+	if err != nil {
+		return nil, err
+	}
+	return []string{root}, nil
 }
 
 func (e *MihomoExecutor) currentListeners() ([]mihomo.ProxyListener, error) {
@@ -499,12 +760,16 @@ func importErrorCode(err error) string {
 }
 
 func isYAMLContentType(contentType string) bool {
-	switch strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0])) {
+	switch normalizedContentType(contentType) {
 	case "application/yaml", "application/x-yaml", "text/yaml":
 		return true
 	default:
 		return false
 	}
+}
+
+func normalizedContentType(contentType string) string {
+	return strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
 }
 
 func validatePreviewCandidate(

@@ -76,7 +76,13 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "source" {
 		return runSource(arguments[1:], os.Stdin, stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|source|version|--version-json]")
+	if arguments[0] == "resource" {
+		return runResource(arguments[1:], os.Stdin, stdout, stderr)
+	}
+	if arguments[0] == "override" {
+		return runOverride(arguments[1:], os.Stdin, stdout, stderr)
+	}
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|source|resource|override|version|--version-json]")
 	return 2
 }
 
@@ -280,6 +286,12 @@ func runStatus(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Revision: %d\n", snapshot.Revision)
 	fmt.Fprintf(stdout, "Latest event cursor: %d\n", snapshot.LatestEventCursor)
 	writeSourceStatus(stdout, snapshot.Sources)
+	writeResourceStatus(stdout, snapshot.Resources)
+	if snapshot.AdvancedOverride.Present {
+		fmt.Fprintf(stdout, "Advanced override: %s (%d bytes)\n", snapshot.AdvancedOverride.SHA256, snapshot.AdvancedOverride.Size)
+	} else {
+		fmt.Fprintln(stdout, "Advanced override: not configured")
+	}
 	return 0
 }
 
@@ -398,6 +410,8 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	jsonOutput := flags.Bool("json", false, "print stable JSON")
 	wait := flags.Bool("wait", false, "wait for the operation to finish")
 	contentID := flags.String("content-id", "", "uploaded Mihomo configuration content ID")
+	sourceID := flags.String("source-id", "", "stored remote source ID")
+	overrideContentID := flags.String("override-content-id", "", "uploaded prospective advanced override content ID")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return 2
 	}
@@ -412,11 +426,15 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	defer client.CloseIdleConnections()
 	if command == "preview" {
-		if *contentID == "" || *wait {
-			fmt.Fprintln(stderr, "proxy preview requires --content-id and does not accept --wait")
+		if (*contentID == "") == (*sourceID == "") || *wait {
+			fmt.Fprintln(stderr, "proxy preview requires exactly one of --content-id or --source-id and does not accept --wait")
 			return 2
 		}
-		preview, err := client.PreviewCandidate(context.Background(), *contentID)
+		preview, err := client.PreviewCandidateRequest(context.Background(), runtimeapi.PreviewCandidateRequest{
+			ContentID:         *contentID,
+			SourceID:          *sourceID,
+			OverrideContentID: *overrideContentID,
+		})
 		if err != nil {
 			return writeClientFailure(stdout, stderr, *jsonOutput, err)
 		}
@@ -424,13 +442,16 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			_ = json.NewEncoder(stdout).Encode(preview)
 		} else {
 			fmt.Fprintf(stdout, "validated %s via %s at %s\n", preview.CandidateSHA256, preview.ProxyKind, strings.Join(preview.ProxyAddresses, ", "))
+			for _, origin := range preview.FieldOrigins {
+				fmt.Fprintf(stdout, "%s\t%s\t%s\n", origin.Path, origin.Origin, origin.Status)
+			}
 			fmt.Fprintln(stdout, preview.CandidateYAML)
 		}
 		return 0
 	}
 	if command == "verify" {
-		if *contentID != "" || *wait {
-			fmt.Fprintln(stderr, "proxy verify does not accept --content-id or --wait")
+		if *contentID != "" || *sourceID != "" || *overrideContentID != "" || *wait {
+			fmt.Fprintln(stderr, "proxy verify does not accept content, source, override or wait options")
 			return 2
 		}
 		verification, err := client.VerifyProxy(context.Background())
@@ -457,6 +478,14 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "proxy apply requires --content-id")
 		return 2
 	}
+	if command != "preview" && *sourceID != "" {
+		fmt.Fprintf(stderr, "proxy %s does not accept --source-id\n", command)
+		return 2
+	}
+	if command != "preview" && *overrideContentID != "" {
+		fmt.Fprintf(stderr, "proxy %s does not accept --override-content-id\n", command)
+		return 2
+	}
 	if command != "apply" && *contentID != "" {
 		fmt.Fprintf(stderr, "proxy %s does not accept --content-id\n", command)
 		return 2
@@ -475,6 +504,225 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
 		IfRevision: snapshot.Revision,
 		Action:     action,
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(context.Background(), operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func runResource(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime resource [add|list]")
+		return 2
+	}
+	switch arguments[0] {
+	case "add":
+		return runResourceAdd(arguments[1:], stdin, stdout, stderr)
+	case "list":
+		return runResourceList(arguments[1:], stdout, stderr)
+	default:
+		fmt.Fprintln(stderr, "usage: submux-runtime resource [add|list]")
+		return 2
+	}
+}
+
+func runResourceAdd(
+	arguments []string,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("resource add", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", true, "wait for the resource operation to finish")
+	name := flags.String("name", "", "managed resource name")
+	kind := flags.String("kind", "", "proxy-provider-yaml, rule-provider-yaml, certificate-pem, or private-key-pem")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 || *name == "" || !validResourceKind(*kind) {
+		fmt.Fprintln(stderr, "resource add requires --name, a valid --kind, and one <file|-> argument")
+		return 2
+	}
+	body, err := readContentArgument(flags.Arg(0), stdin, runtimestate.MaxManagedResourceBytes)
+	if err != nil {
+		fmt.Fprintf(stderr, "read managed resource: %v\n", err)
+		return 1
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	content, err := client.UploadImport(context.Background(), runtimeapi.ManagedResourceContentType, body)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionAddManagedResource,
+			Params: runtimeapi.ActionParams{
+				ContentID:    content.ID,
+				ResourceKind: *kind,
+				ResourceName: *name,
+			},
+		},
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(context.Background(), operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func runResourceList(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("resource list", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "resource list does not accept positional arguments")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(stdout).Encode(snapshot.Resources)
+	} else {
+		writeResourceStatus(stdout, snapshot.Resources)
+	}
+	return 0
+}
+
+func runOverride(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime override [get|set]")
+		return 2
+	}
+	switch arguments[0] {
+	case "get":
+		return runOverrideGet(arguments[1:], stdout, stderr)
+	case "set":
+		return runOverrideSet(arguments[1:], stdin, stdout, stderr)
+	default:
+		fmt.Fprintln(stderr, "usage: submux-runtime override [get|set]")
+		return 2
+	}
+}
+
+func runOverrideGet(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("override get", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "override get does not accept positional arguments")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	document, err := client.GetAdvancedOverride(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(stdout).Encode(document)
+	} else {
+		fmt.Fprint(stdout, document.YAML)
+		if !strings.HasSuffix(document.YAML, "\n") {
+			fmt.Fprintln(stdout)
+		}
+	}
+	return 0
+}
+
+func runOverrideSet(
+	arguments []string,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("override set", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", true, "wait for the override operation to finish")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: submux-runtime override set [options] <file|->")
+		return 2
+	}
+	body, err := readContentArgument(flags.Arg(0), stdin, runtimestate.MaxAdvancedOverrideBytes)
+	if err != nil {
+		fmt.Fprintf(stderr, "read advanced override: %v\n", err)
+		return 1
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	content, err := client.UploadImport(context.Background(), "application/x-yaml", body)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionSetAdvancedOverride,
+			Params: runtimeapi.ActionParams{
+				ContentID: content.ID,
+			},
+		},
 	})
 	if err != nil {
 		return writeClientFailure(stdout, stderr, *jsonOutput, err)
@@ -792,6 +1040,45 @@ func writeSourceStatus(writer io.Writer, status runtimeapi.SourceStatus) {
 	}
 }
 
+func writeResourceStatus(writer io.Writer, status runtimeapi.ResourceStatus) {
+	fmt.Fprintf(writer, "Managed resources: %d (%d bytes)\n", status.Count, status.TotalBytes)
+	for _, resource := range status.Items {
+		fmt.Fprintf(writer, "- %s %s %s %d bytes %s\n",
+			resource.ID,
+			resource.Kind,
+			resource.Name,
+			resource.Size,
+			resource.SHA256,
+		)
+	}
+}
+
+func validResourceKind(kind string) bool {
+	switch kind {
+	case runtimeapi.ResourceKindProxyProvider,
+		runtimeapi.ResourceKindRuleProvider,
+		runtimeapi.ResourceKindCertificate,
+		runtimeapi.ResourceKindPrivateKey:
+		return true
+	default:
+		return false
+	}
+}
+
+func readContentArgument(path string, stdin io.Reader, maximum int) ([]byte, error) {
+	if path != "-" {
+		return readSmallRegularFile(path, maximum)
+	}
+	body, err := io.ReadAll(io.LimitReader(stdin, int64(maximum)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 0 || len(body) > maximum {
+		return nil, errors.New("content size is outside the allowed range")
+	}
+	return body, nil
+}
+
 func readSmallRegularFile(path string, maximum int) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -805,6 +1092,13 @@ func readSmallRegularFile(path string, maximum int) ([]byte, error) {
 		return nil, err
 	}
 	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOpenedSmallRegularFile(info, openedInfo, maximum); err != nil {
+		return nil, err
+	}
 	body, err := io.ReadAll(io.LimitReader(file, int64(maximum)+1))
 	if err != nil {
 		return nil, err
@@ -815,16 +1109,36 @@ func readSmallRegularFile(path string, maximum int) ([]byte, error) {
 	return body, nil
 }
 
+func validateOpenedSmallRegularFile(pathInfo, openedInfo os.FileInfo, maximum int) error {
+	if !openedInfo.Mode().IsRegular() ||
+		openedInfo.Size() > int64(maximum) ||
+		!os.SameFile(pathInfo, openedInfo) {
+		return errors.New("file changed while it was being opened")
+	}
+	return nil
+}
+
 func writeOperation(stdout io.Writer, asJSON bool, operation runtimeapi.Operation) int {
 	if asJSON {
 		_ = json.NewEncoder(stdout).Encode(runtimeapi.OperationResponse{Operation: operation})
 	} else {
 		fmt.Fprintf(stdout, "%s %s %s\n", operation.ID, operation.State, operation.Stage)
-		if operation.Result != nil && operation.Result.SourceID != "" {
-			fmt.Fprintf(stdout, "source %s: %s via %s\n",
-				operation.Result.SourceID,
-				operation.Result.RefreshResult,
-				operation.Result.RefreshRoute)
+		if operation.Result != nil {
+			if operation.Result.SourceID != "" {
+				fmt.Fprintf(stdout, "source %s: %s via %s\n",
+					operation.Result.SourceID,
+					operation.Result.RefreshResult,
+					operation.Result.RefreshRoute)
+			}
+			if operation.Result.ResourceID != "" {
+				fmt.Fprintf(stdout, "resource %s: %s\n",
+					operation.Result.ResourceID,
+					operation.Result.ResourceKind)
+			}
+			if operation.Result.AdvancedOverrideSHA256 != "" {
+				fmt.Fprintf(stdout, "advanced override: %s\n",
+					operation.Result.AdvancedOverrideSHA256)
+			}
 		}
 	}
 	switch operation.State {

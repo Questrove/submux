@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -41,14 +42,19 @@ func (e commandExecutor) Execute(
 	operation runtimeapi.Operation,
 	report runtimeapp.StageReporter,
 ) (*runtimeapi.OperationResult, error) {
+	var imported []byte
 	if operation.Action.Kind == runtimeapi.ActionApplyImportedConfig ||
-		operation.Action.Kind == runtimeapi.ActionAddRemoteSource {
-		if _, _, err := e.state.ConsumeImport(
+		operation.Action.Kind == runtimeapi.ActionAddRemoteSource ||
+		operation.Action.Kind == runtimeapi.ActionAddManagedResource ||
+		operation.Action.Kind == runtimeapi.ActionSetAdvancedOverride {
+		var err error
+		imported, _, err = e.state.ConsumeImport(
 			operation.Action.Params.ContentID,
 			operation.CallerIdentity,
 			operation.ID,
 			time.Now().UTC(),
-		); err != nil {
+		)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -74,6 +80,27 @@ func (e commandExecutor) Execute(
 	}
 	if operation.Action.Kind == runtimeapi.ActionApplySource {
 		result.SourceID = operation.Action.Params.SourceID
+	}
+	if operation.Action.Kind == runtimeapi.ActionAddManagedResource {
+		record, err := e.state.CreateManagedResource(
+			operation.Action.Params.ResourceName,
+			operation.Action.Params.ResourceKind,
+			imported,
+			operation.ID,
+			time.Now().UTC(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		result.ResourceID = record.ID
+		result.ResourceKind = record.Kind
+	}
+	if operation.Action.Kind == runtimeapi.ActionSetAdvancedOverride {
+		record, err := e.state.SetAdvancedOverride(imported, operation.ID, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		result.AdvancedOverrideSHA256 = record.SHA256
 	}
 	return result, nil
 }
@@ -388,12 +415,105 @@ func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
 		t.Fatalf("source apply operation = %#v err=%v", sourceApplyOperation, err)
 	}
 
+	var sourcePreviewOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runProxy([]string{
+		"preview",
+		"--endpoint", endpoint,
+		"--source-id", sourceAddOperation.Operation.Result.SourceID,
+		"--override-content-id", content.ID,
+		"--json",
+	}, &sourcePreviewOut, &stderr)
+	if exitCode != 0 || !json.Valid(sourcePreviewOut.Bytes()) {
+		cancel()
+		t.Fatalf("source preview exit=%d stdout=%s stderr=%s", exitCode, sourcePreviewOut.String(), stderr.String())
+	}
+
+	var resourceAddOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runResourceAdd([]string{
+		"--endpoint", endpoint,
+		"--name", "provider.main",
+		"--kind", runtimeapi.ResourceKindProxyProvider,
+		"--json",
+		"-",
+	}, strings.NewReader("proxies:\n  - name: local\n"), &resourceAddOut, &stderr)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("resource add exit=%d stdout=%s stderr=%s", exitCode, resourceAddOut.String(), stderr.String())
+	}
+	var resourceOperation runtimeapi.OperationResponse
+	if err := json.Unmarshal(resourceAddOut.Bytes(), &resourceOperation); err != nil ||
+		resourceOperation.Operation.Result == nil ||
+		resourceOperation.Operation.Result.ResourceID == "" {
+		cancel()
+		t.Fatalf("resource add operation = %#v err=%v", resourceOperation, err)
+	}
+	var resourceListOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runResourceList(
+		[]string{"--endpoint", endpoint, "--json"},
+		&resourceListOut,
+		&stderr,
+	)
+	var resourceStatus runtimeapi.ResourceStatus
+	if exitCode != 0 || json.Unmarshal(resourceListOut.Bytes(), &resourceStatus) != nil ||
+		resourceStatus.Count != 1 {
+		cancel()
+		t.Fatalf("resource list exit=%d status=%#v stdout=%s stderr=%s",
+			exitCode, resourceStatus, resourceListOut.String(), stderr.String())
+	}
+
+	var overrideSetOut bytes.Buffer
+	stderr.Reset()
+	overrideYAML := "rules:\n  - MATCH,DIRECT\n"
+	exitCode = runOverrideSet(
+		[]string{"--endpoint", endpoint, "--json", "-"},
+		strings.NewReader(overrideYAML),
+		&overrideSetOut,
+		&stderr,
+	)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("override set exit=%d stdout=%s stderr=%s", exitCode, overrideSetOut.String(), stderr.String())
+	}
+	var overrideGetOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runOverrideGet([]string{"--endpoint", endpoint}, &overrideGetOut, &stderr)
+	if exitCode != 0 || overrideGetOut.String() != overrideYAML {
+		cancel()
+		t.Fatalf("override get exit=%d stdout=%q stderr=%s", exitCode, overrideGetOut.String(), stderr.String())
+	}
+
 	cancel()
 	if err := <-serverResult; err != nil {
 		t.Fatalf("stop Runtime server: %v", err)
 	}
 	if err := <-workerResult; err != nil {
 		t.Fatalf("stop Runtime coordinator: %v", err)
+	}
+}
+
+func TestOpenedContentFileMustMatchInspectedFile(t *testing.T) {
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first.yaml")
+	secondPath := filepath.Join(root, "second.yaml")
+	if err := os.WriteFile(firstPath, []byte("rules: []\n"), 0600); err != nil {
+		t.Fatalf("write first content file: %v", err)
+	}
+	if err := os.WriteFile(secondPath, []byte("proxies: []\n"), 0600); err != nil {
+		t.Fatalf("write second content file: %v", err)
+	}
+	first, err := os.Lstat(firstPath)
+	if err != nil {
+		t.Fatalf("inspect first content file: %v", err)
+	}
+	second, err := os.Stat(secondPath)
+	if err != nil {
+		t.Fatalf("inspect second content file: %v", err)
+	}
+	if err := validateOpenedSmallRegularFile(first, second, 1024); err == nil {
+		t.Fatal("accepted a content file that changed while opening")
 	}
 }
 

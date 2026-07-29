@@ -323,7 +323,11 @@ func validateImportForCaller(record importRecord, caller, operationID string, no
 
 func allowedImportContentType(contentType string) bool {
 	switch strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0])) {
-	case "application/yaml", "application/x-yaml", "text/yaml", runtimeapi.SourceDraftContentType:
+	case "application/yaml",
+		"application/x-yaml",
+		"text/yaml",
+		runtimeapi.SourceDraftContentType,
+		runtimeapi.ManagedResourceContentType:
 		return true
 	default:
 		return false

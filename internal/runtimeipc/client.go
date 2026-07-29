@@ -194,16 +194,47 @@ func (c *Client) UploadImport(
 	return content, nil
 }
 
+func (c *Client) GetAdvancedOverride(ctx context.Context) (runtimeapi.AdvancedOverrideDocument, error) {
+	var document runtimeapi.AdvancedOverrideDocument
+	requestID, err := newRequestID()
+	if err != nil {
+		return document, err
+	}
+	request, err := c.newRequest(ctx, http.MethodGet, "/v1/advanced-override", nil, requestID)
+	if err != nil {
+		return document, err
+	}
+	response, err := c.do(request)
+	if err != nil {
+		return document, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return document, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, &document); err != nil {
+		return document, invalidResponseError("advanced override response", err)
+	}
+	return document, nil
+}
+
 func (c *Client) PreviewCandidate(
 	ctx context.Context,
 	contentID string,
+) (runtimeapi.CandidatePreview, error) {
+	return c.PreviewCandidateRequest(ctx, runtimeapi.PreviewCandidateRequest{ContentID: contentID})
+}
+
+func (c *Client) PreviewCandidateRequest(
+	ctx context.Context,
+	requestValue runtimeapi.PreviewCandidateRequest,
 ) (runtimeapi.CandidatePreview, error) {
 	var preview runtimeapi.CandidatePreview
 	requestID, err := newRequestID()
 	if err != nil {
 		return preview, err
 	}
-	body, err := json.Marshal(runtimeapi.PreviewCandidateRequest{ContentID: contentID})
+	body, err := json.Marshal(requestValue)
 	if err != nil {
 		return preview, err
 	}

@@ -19,6 +19,7 @@ type Process struct {
 	BinaryPath string
 	ConfigPath string
 	DataDir    string
+	SafePaths  []string
 
 	mu   sync.Mutex
 	cmd  *exec.Cmd
@@ -60,7 +61,10 @@ func (p *Process) Start(ctx context.Context) error {
 	}
 	command := exec.Command(p.BinaryPath, "-d", dataDir, "-f", p.ConfigPath)
 	command.Dir = dataDir
-	command.Env = sanitizedEnvironment()
+	command.Env, err = mihomoEnvironment(p.SafePaths)
+	if err != nil {
+		return err
+	}
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	configureCommand(command)
@@ -215,4 +219,55 @@ func sanitizedEnvironment() []string {
 		}
 	}
 	return environment
+}
+
+func mihomoEnvironment(safePaths []string) ([]string, error) {
+	environment := sanitizedEnvironment()
+	if len(safePaths) == 0 {
+		return environment, nil
+	}
+	normalized := make([]string, 0, len(safePaths))
+	seen := make(map[string]struct{}, len(safePaths))
+	for _, path := range safePaths {
+		path, err := validateMihomoSafePath(path)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		normalized = append(normalized, path)
+	}
+	return append(
+		environment,
+		"SAFE_PATHS="+strings.Join(normalized, string(os.PathListSeparator)),
+	), nil
+}
+
+func validateMihomoSafePath(path string) (string, error) {
+	if path == "" || !filepath.IsAbs(path) {
+		return "", errors.New("Mihomo safe paths must use fixed absolute paths")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil ||
+		absolute == filepath.VolumeName(absolute)+string(filepath.Separator) ||
+		strings.ContainsRune(absolute, os.PathListSeparator) {
+		return "", errors.New("Mihomo safe path is invalid")
+	}
+	info, err := os.Lstat(absolute)
+	if err != nil {
+		return "", fmt.Errorf("inspect Mihomo safe path: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("Mihomo safe path must be a real directory")
+	}
+	linked, err := safepath.ContainsLink(absolute)
+	if err != nil {
+		return "", fmt.Errorf("inspect Mihomo safe path: %w", err)
+	}
+	if linked {
+		return "", errors.New("Mihomo safe path must not contain symbolic or reparse links")
+	}
+	return absolute, nil
 }
