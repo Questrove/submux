@@ -196,6 +196,54 @@ func TestAtomicPublicationRejectsChangedInputsAndSubscription(t *testing.T) {
 	}
 }
 
+func TestDisableOutputSubscriptionRejectsStaleRecordAndKeepsArtifact(t *testing.T) {
+	st := newTestStore(t)
+	id, err := st.SaveOutputSubscription(OutputSubscription{Name: "one", Token: "one", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	update, err := st.GetSubscriptionUpdate(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed, err := st.CommitSubscriptionArtifactIfCurrent(id, update.InputGeneration, SubscriptionArtifact{
+		Body: []byte("last-good"), Revision: "r1",
+	}, nil); err != nil || !committed {
+		t.Fatalf("publish artifact: committed=%v err=%v", committed, err)
+	}
+	stale, err := st.GetOutputSubscription(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateOutputSubscriptionToken(id, "changed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DisableOutputSubscriptionIfCurrent(id, stale.RecordVersion); !errors.Is(err, ErrOutputSubscriptionChanged) {
+		t.Fatalf("stale disable error = %v", err)
+	}
+	current, err := st.GetOutputSubscription(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !current.Enabled {
+		t.Fatalf("stale disable changed subscription: %+v", current)
+	}
+	if err := st.DisableOutputSubscriptionIfCurrent(id, current.RecordVersion); err != nil {
+		t.Fatal(err)
+	}
+	disabled, err := st.GetOutputSubscription(id)
+	if err != nil || disabled.Enabled {
+		t.Fatalf("disabled subscription = %+v err=%v", disabled, err)
+	}
+	if _, err := st.GetSubscriptionUpdate(id); err == nil {
+		t.Fatal("disabled subscription retained update state")
+	}
+	artifact, err := st.GetSubscriptionArtifact(id)
+	if err != nil || string(artifact.Body) != "last-good" || artifact.Revision != "r1" {
+		t.Fatalf("artifact after disable = %+v err=%v", artifact, err)
+	}
+}
+
 func TestOpenV10SeparatesLegacyArtifactAndSchedulesEnabledSubscriptions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "v9.db")
 	db, err := bolt.Open(path, 0600, nil)

@@ -9,37 +9,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"submux/internal/compiler"
 	"submux/internal/node"
+	"submux/internal/outputsubscription"
 	"submux/internal/store"
 )
-
-func (s *Server) saveCompiledOutputSubscription(value store.OutputSubscription) (int64, compiler.Result, error) {
-	for range 3 {
-		inputsGeneration, err := s.store.OutputInputsGeneration()
-		if err != nil {
-			return 0, compiler.Result{}, err
-		}
-		compiled, err := s.compiler.Preview(value)
-		if err != nil {
-			return 0, compiler.Result{}, err
-		}
-		id, err := s.store.SaveOutputSubscriptionWithArtifact(value, store.SubscriptionArtifact{
-			Body: compiled.Body, ContentType: compiled.ContentType, Revision: compiled.Revision,
-		}, compiled.Warnings, store.OutputPublicationGuard{
-			InputsGeneration: inputsGeneration, SubscriptionVersion: value.RecordVersion,
-		})
-		if errors.Is(err, store.ErrOutputInputsChanged) {
-			continue
-		}
-		return id, compiled, err
-	}
-	return 0, compiler.Result{}, store.ErrOutputInputsChanged
-}
 
 func (s *Server) handleListNodes(w http.ResponseWriter, _ *http.Request) {
 	values, err := s.store.ListNodes()
@@ -367,115 +344,40 @@ func (s *Server) handleListOutputSubscriptions(w http.ResponseWriter, _ *http.Re
 	writeJSON(w, out)
 }
 
+type outputSubscriptionSaveRequest struct {
+	outputsubscription.SaveIntent
+	Engine        string `json:"engine,omitempty"`
+	Token         string `json:"token,omitempty"`
+	Enabled       *bool  `json:"enabled,omitempty"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
+	RecordVersion uint64 `json:"record_version,omitempty"`
+}
+
 func (s *Server) handleSaveOutputSubscription(w http.ResponseWriter, r *http.Request) {
-	var value store.OutputSubscription
-	if err := decodeJSON(r, &value); err != nil {
+	var body outputSubscriptionSaveRequest
+	if err := decodeJSON(r, &body); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	intent := body.SaveIntent
 	if routeID := chi.URLParam(r, "id"); routeID != "" {
 		id, err := strconv.ParseInt(routeID, 10, 64)
 		if err != nil {
 			http.Error(w, "bad id", http.StatusBadRequest)
 			return
 		}
-		value.ID = id
+		intent.ID = id
 	}
-	value.Name = strings.TrimSpace(value.Name)
-	if value.Name == "" || value.TemplateVersionID == 0 {
-		http.Error(w, "name and template_version_id are required", http.StatusBadRequest)
-		return
-	}
-	version, err := s.store.GetTemplateVersion(value.TemplateVersionID)
+	result, err := s.publisher.Save(intent)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeOutputSubscriptionError(w, err)
 		return
 	}
-	template, err := s.store.GetTemplate(version.TemplateID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	value.Engine = template.Engine
-	if value.Engine == compiler.EngineMihomo {
-		if value.RuleProfileID == 0 && value.ID != 0 {
-			if old, oldErr := s.store.GetOutputSubscription(value.ID); oldErr == nil {
-				value.RuleProfileID = old.RuleProfileID
-			}
-		}
-		if value.RuleProfileID == 0 {
-			if defaultProfile, defaultErr := s.store.GetRuleProfileByKey("default"); defaultErr == nil {
-				value.RuleProfileID = defaultProfile.ID
-			}
-		}
-		profile, profileErr := s.store.GetRuleProfile(value.RuleProfileID)
-		if profileErr != nil {
-			http.Error(w, "a valid rule profile is required for mihomo subscriptions", http.StatusBadRequest)
-			return
-		}
-		if err := s.compiler.ValidateRuleProfile(profile); err != nil {
-			http.Error(w, "invalid rule profile: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	} else if value.RuleProfileID != 0 {
-		http.Error(w, "rule profiles are only supported by mihomo subscriptions", http.StatusBadRequest)
-		return
-	}
-	seenSlots := map[string]bool{}
-	for index := range value.Bindings {
-		value.Bindings[index].Slot = strings.TrimSpace(value.Bindings[index].Slot)
-		if value.Bindings[index].Slot == "" || seenSlots[value.Bindings[index].Slot] {
-			http.Error(w, "each template slot may be selected once", http.StatusBadRequest)
-			return
-		}
-		seenSlots[value.Bindings[index].Slot] = true
-		seenNodes := map[int64]bool{}
-		for _, nodeID := range value.Bindings[index].NodeIDs {
-			if nodeID <= 0 || seenNodes[nodeID] {
-				http.Error(w, fmt.Sprintf("slot %q contains an invalid or duplicate node", value.Bindings[index].Slot), http.StatusBadRequest)
-				return
-			}
-			seenNodes[nodeID] = true
-			nodeValue, nodeErr := s.store.GetNode(nodeID)
-			if nodeErr != nil {
-				http.Error(w, fmt.Sprintf("unknown node %d", nodeID), http.StatusBadRequest)
-				return
-			}
-			if nodeValue.Role == "notice" {
-				http.Error(w, fmt.Sprintf("node %d is an informational notice", nodeID), http.StatusBadRequest)
-				return
-			}
-		}
-	}
-	if value.ExpiresAt != "" {
-		expires, parseErr := time.Parse(time.RFC3339, value.ExpiresAt)
-		if parseErr != nil || !expires.After(time.Now()) {
-			http.Error(w, "expires_at must be a future RFC3339 timestamp", http.StatusBadRequest)
-			return
-		}
-		value.ExpiresAt = expires.UTC().Format(time.RFC3339)
-	}
-	if value.ID == 0 {
-		value.Token, value.Enabled = randomHex(24), true
-	} else {
-		old, err := s.store.GetOutputSubscription(value.ID)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		value.Token = old.Token
-		value.RecordVersion = old.RecordVersion
-	}
-	id, compiled, err := s.saveCompiledOutputSubscription(value)
-	if err != nil {
-		if errors.Is(err, store.ErrOutputSubscriptionChanged) || errors.Is(err, store.ErrOutputInputsChanged) {
-			http.Error(w, "output subscription changed concurrently; reload and retry", http.StatusConflict)
-			return
-		}
-		http.Error(w, "output subscription does not compile: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, map[string]any{"id": id, "token": value.Token, "outcome": "completed", "revision": compiled.Revision})
+	writeJSON(w, map[string]any{
+		"id": result.SubscriptionID, "token": result.Token,
+		"outcome": result.Outcome, "revision": result.Revision,
+	})
 }
 
 func (s *Server) handlePreviewOutputSubscription(w http.ResponseWriter, r *http.Request) {
@@ -503,13 +405,25 @@ func (s *Server) handlePublishOutputSubscription(w http.ResponseWriter, r *http.
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	report, err := s.updater.Retry(id)
+	publication, err := s.publisher.Republish(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeOutputSubscriptionError(w, err)
 		return
 	}
-	result := map[string]any{"ok": true}
-	addOutputUpdateResult(result, report)
+	outcome := publication.Outcome
+	if outcome != outputsubscription.OutcomeCompleted {
+		outcome = outputsubscription.OutcomeDegraded
+	}
+	result := map[string]any{"ok": true, "outcome": outcome}
+	if publication.Outcome != outputsubscription.OutcomeCompleted || publication.Detail != "" {
+		result["output_update"] = map[string]any{
+			"results": []map[string]any{{
+				"subscription_id": publication.SubscriptionID,
+				"outcome":         publication.Outcome,
+				"error":           publication.Detail,
+			}},
+		}
+	}
 	writeJSON(w, result)
 }
 
@@ -545,29 +459,27 @@ func (s *Server) handleSetOutputSubscriptionEnabled(w http.ResponseWriter, r *ht
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	value, err := s.store.GetOutputSubscription(id)
+	result, err := s.publisher.SetEnabled(id, body.Enabled)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		writeOutputSubscriptionError(w, err)
 		return
 	}
-	if body.Enabled {
-		value.Enabled = true
-		if _, _, err := s.saveCompiledOutputSubscription(value); err != nil {
-			if errors.Is(err, store.ErrOutputSubscriptionChanged) || errors.Is(err, store.ErrOutputInputsChanged) {
-				http.Error(w, "output subscription changed concurrently; reload and retry", http.StatusConflict)
-				return
-			}
-			http.Error(w, "output subscription cannot be enabled: "+err.Error(), http.StatusBadRequest)
-			return
-		}
-	} else {
-		value.Enabled = false
-		if _, err := s.store.SaveOutputSubscription(value); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	writeJSON(w, map[string]any{
+		"ok": true, "outcome": result.Outcome, "revision": result.Revision,
+	})
+}
+
+func writeOutputSubscriptionError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, outputsubscription.ErrInvalidIntent):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	case errors.Is(err, outputsubscription.ErrNotFound):
+		http.Error(w, err.Error(), http.StatusNotFound)
+	case errors.Is(err, outputsubscription.ErrConflict):
+		http.Error(w, "output subscription changed concurrently; reload and retry", http.StatusConflict)
+	default:
+		http.Error(w, "output subscription operation failed", http.StatusInternalServerError)
 	}
-	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})
 }
 
 func (s *Server) handleDeleteOutputSubscription(w http.ResponseWriter, r *http.Request) {

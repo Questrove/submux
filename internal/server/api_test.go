@@ -518,7 +518,7 @@ func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 	}
 	for _, engine := range []string{"mihomo", "sing-box"} {
 		versionID := versionByEngine[engine]
-		payload := `{"name":"` + engine + ` subscription","template_version_id":` + itoa(versionID) + `,"bindings":[{"slot":"primary","node_ids":[` + itoa(nodes[0].ID) + `]}]}`
+		payload := `{"name":"` + engine + ` subscription","template_version_id":` + itoa(versionID) + `,"bindings":[{"slot":"primary","node_ids":[` + itoa(nodes[0].ID) + `]}],"enabled":true}`
 		created := mustPost(t, c, srv.URL+"/api/subscriptions", payload)
 		var subscriptionResult struct {
 			ID    int64  `json:"id"`
@@ -540,6 +540,54 @@ func TestOutputSubscriptionWorkflowBuildsMihomoAndSingBox(t *testing.T) {
 		}
 		if engine == "sing-box" && !strings.Contains(sub.Header.Get("Content-Type"), "json") {
 			t.Fatalf("sing-box subscription has wrong content type: %q", sub.Header.Get("Content-Type"))
+		}
+
+		disableRequest, _ := http.NewRequest(
+			"PUT",
+			srv.URL+"/api/subscriptions/"+itoa(subscriptionResult.ID)+"/enabled",
+			strings.NewReader(`{"enabled":false}`),
+		)
+		disableRequest.Header.Set("Content-Type", "application/json")
+		disabled := mustDo(t, c, disableRequest)
+		var disabledResult struct {
+			Outcome string `json:"outcome"`
+		}
+		_ = json.NewDecoder(disabled.Body).Decode(&disabledResult)
+		disabled.Body.Close()
+		if disabled.StatusCode != http.StatusOK || disabledResult.Outcome != "completed" {
+			t.Fatalf("disable %s subscription failed: status=%d result=%+v", engine, disabled.StatusCode, disabledResult)
+		}
+		disabledPublic := mustGet(t, http.DefaultClient, srv.URL+"/sub/"+subscriptionResult.Token)
+		disabledPublic.Body.Close()
+		if disabledPublic.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("disabled %s subscription remained public: %d", engine, disabledPublic.StatusCode)
+		}
+
+		enableRequest, _ := http.NewRequest(
+			"PUT",
+			srv.URL+"/api/subscriptions/"+itoa(subscriptionResult.ID)+"/enabled",
+			strings.NewReader(`{"enabled":true}`),
+		)
+		enableRequest.Header.Set("Content-Type", "application/json")
+		enabled := mustDo(t, c, enableRequest)
+		var enabledResult struct {
+			Outcome  string `json:"outcome"`
+			Revision string `json:"revision"`
+		}
+		_ = json.NewDecoder(enabled.Body).Decode(&enabledResult)
+		enabled.Body.Close()
+		if enabled.StatusCode != http.StatusOK || enabledResult.Outcome != "completed" || enabledResult.Revision == "" {
+			t.Fatalf("enable %s subscription failed: status=%d result=%+v", engine, enabled.StatusCode, enabledResult)
+		}
+
+		published := mustPost(t, c, srv.URL+"/api/subscriptions/"+itoa(subscriptionResult.ID)+"/publish", "")
+		var publishedResult struct {
+			Outcome string `json:"outcome"`
+		}
+		_ = json.NewDecoder(published.Body).Decode(&publishedResult)
+		published.Body.Close()
+		if published.StatusCode != http.StatusOK || publishedResult.Outcome != "completed" {
+			t.Fatalf("republish %s subscription failed: status=%d result=%+v", engine, published.StatusCode, publishedResult)
 		}
 	}
 }

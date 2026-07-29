@@ -74,6 +74,34 @@ func (s *Store) SaveOutputSubscription(value OutputSubscription) (int64, error) 
 	return id, err
 }
 
+// DisableOutputSubscriptionIfCurrent disables one subscription without
+// replacing its last successful artifact. The record version prevents a stale
+// request from overwriting a concurrent edit, and disabled subscriptions keep
+// no automatic update work.
+func (s *Store) DisableOutputSubscriptionIfCurrent(id int64, recordVersion uint64) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		subscriptions := tx.Bucket([]byte("subscriptions"))
+		raw := subscriptions.Get(itob(id))
+		if raw == nil {
+			return ErrOutputSubscriptionChanged
+		}
+		var value OutputSubscription
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if value.RecordVersion != recordVersion {
+			return ErrOutputSubscriptionChanged
+		}
+		value.Enabled = false
+		value.RecordVersion++
+		value.UpdatedAt = nowRFC3339()
+		if err := putJSON(subscriptions, itob(id), value); err != nil {
+			return err
+		}
+		return tx.Bucket([]byte("subscription_updates")).Delete(itob(id))
+	})
+}
+
 // SaveOutputSubscriptionWithArtifact saves a subscription and its
 // already-compiled artifact atomically. Disabled subscriptions keep no
 // automatic update state.

@@ -10,6 +10,7 @@ import (
 
 	"submux/internal/buildinfo"
 	"submux/internal/compiler"
+	"submux/internal/outputsubscription"
 	"submux/internal/outputupdate"
 	"submux/internal/source"
 	"submux/internal/store"
@@ -17,20 +18,23 @@ import (
 )
 
 type Server struct {
-	store    *store.Store
-	fetcher  *source.Fetcher
-	compiler *compiler.Service
-	updater  *outputupdate.Service
-	initErr  error
+	store     *store.Store
+	fetcher   *source.Fetcher
+	compiler  *compiler.Service
+	publisher *outputsubscription.Publisher
+	updater   *outputupdate.Service
+	initErr   error
 }
 
 func New(st *store.Store, f *source.Fetcher) *Server {
 	srv, err := NewChecked(st, f)
 	if err != nil {
 		compilerService := compiler.New(st)
+		updater := outputupdate.New(st, compilerService)
 		return &Server{
 			store: st, fetcher: f, compiler: compilerService,
-			updater: outputupdate.New(st, compilerService), initErr: err,
+			publisher: outputsubscription.New(st, compilerService, updater),
+			updater:   updater, initErr: err,
 		}
 	}
 	return srv
@@ -50,7 +54,10 @@ func NewChecked(st *store.Store, f *source.Fetcher) (*Server, error) {
 	if f != nil {
 		f.SetOutputUpdater(updater)
 	}
-	return &Server{store: st, fetcher: f, compiler: service, updater: updater}, nil
+	return &Server{
+		store: st, fetcher: f, compiler: service,
+		publisher: outputsubscription.New(st, service, updater), updater: updater,
+	}, nil
 }
 
 func (s *Server) RunOutputUpdates(ctx context.Context) { s.updater.Run(ctx) }
