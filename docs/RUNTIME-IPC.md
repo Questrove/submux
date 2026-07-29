@@ -1,6 +1,6 @@
 # Submux Runtime 本机 IPC
 
-本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传、分层候选配置预览、托管资源、本机高级覆盖、三类来源的添加、刷新、切换与删除、持久化运行操作和 Tauri GUI 桥接；事件流仍按本文继续开发。
+本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、事件流、一次性内容上传、分层候选配置预览、托管资源、本机高级覆盖、三类来源的添加、刷新、切换与删除、持久化运行操作、审计、秘密读取、诊断包和 Tauri GUI 桥接。
 
 ## 传输
 
@@ -18,7 +18,7 @@
 
 - 使用 `/v1` 路径前缀；
 - 携带唯一请求 ID；
-- 指定受支持的协议版本和客户端版本；
+- 通过 `X-Submux-Client-Type` 和 `X-Submux-Client-Version` 指定客户端类型与版本；
 - 使用严格 JSON，拒绝未知字段、重复字段和不符合类型的值；
 - 受固定请求头、正文、字符串、数组和嵌套深度上限约束；
 - 在响应和日志中脱敏凭据。
@@ -98,15 +98,15 @@ POST /v1/candidates/preview
 Content-Type: application/json
 ```
 
-请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回最终候选配置、摘要、显式代理监听、引用的托管资源，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不切换当前配置，也不启动 Mihomo。响应使用 `Cache-Control: no-store`，因为候选配置可能包含来源秘密。
+请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回经过结构化脱敏的最终候选配置、摘要、显式代理监听、引用的托管资源，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不切换当前配置，也不启动 Mihomo。响应始终使用 `Cache-Control: no-store`。
 
 ### 读取本机高级覆盖
 
 ```http
-GET /v1/advanced-override
+GET /v1/advanced-override?reveal=1
 ```
 
-该接口只向已经通过操作系统身份校验的 Runtime 操作员返回当前 YAML 正文和摘要，并始终禁止缓存。修改仍必须上传 YAML，再创建 `override.set` Operation。
+该接口只向已经通过操作系统身份校验、明确传入 `reveal=1` 的 Runtime 操作员返回当前 YAML 正文和摘要，并始终禁止缓存。CLI 使用 `override get --reveal`；TUI 与 GUI 在读取前要求二次确认。读取会留下只含操作者、客户端、时间和对象标识的审计记录，不记录 YAML 正文。修改仍必须上传 YAML，再创建 `override.set` Operation。
 
 ### 创建运行操作
 
@@ -226,6 +226,28 @@ Runtime 是机器状态的唯一写入者：
 GUI、Runtime 和特权网络进程作为同一个产品版本安装。服务升级后，仍在运行的旧 GUI 必须识别版本不匹配，提示重启自身，不能继续提交修改。Runtime 会对上传、创建运行操作和取消操作再次检查客户端产品版本；版本不一致时返回 `protocol_unsupported`。只读快照和候选配置预览仍可用于显示故障信息。CLI 与 TUI 位于 Runtime 二进制中，不会产生独立安装版本。
 
 客户端发送未知 Action 或高于服务端能力的协议特性时，Runtime 返回明确的 `unsupported`，不能尽力猜测执行。
+
+## 来源秘密与诊断包
+
+读取来源原始 URL 使用专用接口：
+
+```http
+POST /v1/sources/reveal-url
+Content-Type: application/json
+
+{"source_id":"src_...","confirm":true}
+```
+
+请求必须包含明确确认。响应只返回所选来源的原始 URL，设置 `Cache-Control: no-store`；Runtime 审计调用者、客户端、请求 ID、时间和来源 ID，不记录 URL。
+
+诊断包分为预览和生成两步：
+
+```http
+POST /v1/diagnostics/preview
+POST /v1/diagnostics/create
+```
+
+默认内容包括脱敏后的 Snapshot、运行操作、事件和审计。`include_raw_config`、`include_full_logs`、`include_network_info` 分别选择原始配置、完整日志和本机网络信息；选择任一敏感项时，生成请求还必须设置 `confirm_sensitive`。客户端先调用预览接口显示文件名、大小和敏感标记，再调用生成接口。Runtime 只把 ZIP 写入本机状态目录下的固定诊断目录，返回文件名、大小和 SHA-256，不接受上传目标，也没有上传接口。
 
 ## 秘密读取
 

@@ -204,11 +204,27 @@ type Operation struct {
 	Cancellable    bool             `json:"cancellable"`
 	CallerIdentity string           `json:"caller_identity"`
 	CancelledBy    string           `json:"cancelled_by,omitempty"`
+	ClientType     string           `json:"client_type"`
 	ClientVersion  string           `json:"client_version"`
 	CreatedAt      time.Time        `json:"created_at"`
 	UpdatedAt      time.Time        `json:"updated_at"`
 	Error          *ProtocolError   `json:"error,omitempty"`
 	Result         *OperationResult `json:"result,omitempty"`
+}
+
+type AuditRecord struct {
+	ID            string         `json:"id"`
+	RequestID     string         `json:"request_id,omitempty"`
+	OperationID   string         `json:"operation_id,omitempty"`
+	Actor         string         `json:"actor"`
+	ClientType    string         `json:"client_type"`
+	ClientVersion string         `json:"client_version"`
+	Action        string         `json:"action"`
+	ObjectID      string         `json:"object_id,omitempty"`
+	Stage         string         `json:"stage"`
+	Result        string         `json:"result"`
+	At            time.Time      `json:"at"`
+	Error         *ProtocolError `json:"error,omitempty"`
 }
 
 type OperationResult struct {
@@ -240,6 +256,42 @@ type ProxyVerification struct {
 	Addresses []string  `json:"addresses,omitempty"`
 	CheckedAt time.Time `json:"checked_at"`
 	Error     *Fault    `json:"error,omitempty"`
+}
+
+type RevealSourceURLRequest struct {
+	SourceID string `json:"source_id"`
+	Confirm  bool   `json:"confirm"`
+}
+
+type RevealSourceURLResponse struct {
+	SourceID string `json:"source_id"`
+	URL      string `json:"url"`
+}
+
+type DiagnosticsRequest struct {
+	IncludeRawConfig   bool `json:"include_raw_config,omitempty"`
+	IncludeFullLogs    bool `json:"include_full_logs,omitempty"`
+	IncludeNetworkInfo bool `json:"include_network_info,omitempty"`
+	ConfirmSensitive   bool `json:"confirm_sensitive,omitempty"`
+}
+
+type DiagnosticItem struct {
+	Name      string `json:"name"`
+	Included  bool   `json:"included"`
+	Sensitive bool   `json:"sensitive"`
+	Size      int64  `json:"size,omitempty"`
+}
+
+type DiagnosticsPreview struct {
+	Items   []DiagnosticItem `json:"items"`
+	Warning string           `json:"warning"`
+}
+
+type DiagnosticsResult struct {
+	FileName  string    `json:"file_name"`
+	Size      int64     `json:"size"`
+	SHA256    string    `json:"sha256"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type Event struct {
@@ -289,6 +341,8 @@ const (
 	ErrorSourceAuthentication = "source_authentication_failed"
 	ErrorInternal             = "internal"
 )
+
+const SensitiveDataWarning = "敏感内容可能包含访问凭据、配置正文、完整日志或本机信息；仅在确认当前显示与保存环境安全时继续。"
 
 const (
 	ActionApplyImportedConfig = "proxy.apply_import"

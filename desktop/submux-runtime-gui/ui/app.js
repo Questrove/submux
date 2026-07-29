@@ -1,4 +1,6 @@
 const invoke = window.__TAURI__.core.invoke;
+const sensitiveDataWarning =
+  "敏感内容可能包含访问凭据、配置正文、完整日志或本机信息；仅在确认当前显示与保存环境安全时继续。";
 
 const state = {
   compatible: false,
@@ -67,6 +69,8 @@ const elements = {
   switchSource: document.querySelector("#switch-source"),
   switchSourceCached: document.querySelector("#switch-source-cached"),
   deleteSource: document.querySelector("#delete-source"),
+  revealSourceUrl: document.querySelector("#reveal-source-url"),
+  revealedSourceUrl: document.querySelector("#revealed-source-url"),
   resourceCount: document.querySelector("#resource-count"),
   resourceList: document.querySelector("#resource-list"),
   resourceName: document.querySelector("#managed-resource-name"),
@@ -78,6 +82,12 @@ const elements = {
   loadAdvancedOverride: document.querySelector("#load-advanced-override"),
   previewAdvancedOverride: document.querySelector("#preview-advanced-override"),
   saveAdvancedOverride: document.querySelector("#save-advanced-override"),
+  diagnosticsRawConfig: document.querySelector("#diagnostics-raw-config"),
+  diagnosticsFullLogs: document.querySelector("#diagnostics-full-logs"),
+  diagnosticsNetworkInfo: document.querySelector("#diagnostics-network-info"),
+  previewDiagnostics: document.querySelector("#preview-diagnostics"),
+  createDiagnostics: document.querySelector("#create-diagnostics"),
+  diagnosticsPreview: document.querySelector("#diagnostics-preview"),
 };
 
 const writeButtons = [
@@ -97,6 +107,7 @@ const writeButtons = [
   elements.addManagedResource,
   elements.saveAdvancedOverride,
   elements.previewAdvancedOverride,
+  elements.createDiagnostics,
 ];
 
 function setBusy(busy, message = "") {
@@ -113,6 +124,7 @@ function setBusy(busy, message = "") {
     elements.switchSource,
     elements.switchSourceCached,
     elements.deleteSource,
+    elements.revealSourceUrl,
   ]) {
     button.disabled = busy || !state.compatible || !state.selectedSourceId;
   }
@@ -129,6 +141,14 @@ function setBusy(busy, message = "") {
   if (message) {
     setMessage(message);
   }
+}
+
+function diagnosticsOptions() {
+  return {
+    includeRawConfig: elements.diagnosticsRawConfig.checked,
+    includeFullLogs: elements.diagnosticsFullLogs.checked,
+    includeNetworkInfo: elements.diagnosticsNetworkInfo.checked,
+  };
 }
 
 function setMessage(message, isError = false) {
@@ -473,6 +493,70 @@ async function deleteSelectedSource() {
   }
 }
 
+async function revealSelectedSourceURL() {
+  if (!state.selectedSourceId) return;
+  if (!window.confirm(`${sensitiveDataWarning}\n\n确认显示所选来源的原始地址吗？`)) return;
+  setBusy(true, "正在读取来源原始地址…");
+  try {
+    const response = await invoke("runtime_reveal_source_url", {
+      sourceId: state.selectedSourceId,
+      confirm: true,
+    });
+    elements.revealedSourceUrl.textContent = response.url;
+    elements.revealedSourceUrl.classList.remove("hidden");
+    setMessage("原始地址仅保存在当前界面内存中；刷新或关闭界面后清除。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function previewDiagnostics() {
+  const options = diagnosticsOptions();
+  setBusy(true, "正在预览诊断包内容…");
+  try {
+    const preview = await invoke("runtime_preview_diagnostics", options);
+    elements.diagnosticsPreview.textContent = preview.items
+      .map((item) => `${item.name}\t${item.size || 0} 字节\t${item.sensitive ? "敏感" : "已脱敏"}`)
+      .join("\n");
+    setMessage(sensitiveDataWarning);
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function createDiagnostics() {
+  const options = diagnosticsOptions();
+  setBusy(true, "正在预览诊断包内容…");
+  try {
+    const preview = await invoke("runtime_preview_diagnostics", options);
+    elements.diagnosticsPreview.textContent = preview.items
+      .map((item) => `${item.name}\t${item.size || 0} 字节\t${item.sensitive ? "敏感" : "已脱敏"}`)
+      .join("\n");
+    const sensitive =
+      options.includeRawConfig || options.includeFullLogs || options.includeNetworkInfo;
+    if (sensitive && !window.confirm(`${sensitiveDataWarning}\n\n确认保存以上所选敏感内容吗？`)) {
+      setMessage("已预览诊断包内容，未生成文件。");
+      return;
+    }
+    setBusy(true, "正在本机生成诊断包…");
+    const result = await invoke("runtime_create_diagnostics", {
+      ...options,
+      confirmSensitive: sensitive,
+    });
+    elements.diagnosticsPreview.textContent =
+      `${result.file_name}\n${result.size} 字节\nSHA-256 ${result.sha256}`;
+    setMessage("诊断包已保存到 Runtime 的本机诊断目录；界面没有上传入口。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function applyCurrentSource() {
   if (!state.currentSourceId) return;
   setBusy(true, "正在提交来源应用操作…");
@@ -512,6 +596,10 @@ async function addManagedResource() {
 }
 
 async function loadAdvancedOverride() {
+  if (!window.confirm(`${sensitiveDataWarning}\n\n确认读取并显示当前高级覆盖正文吗？`)) {
+    setMessage("已取消读取高级覆盖。");
+    return;
+  }
   setBusy(true, "正在读取高级覆盖…");
   try {
     const document = await invoke("runtime_get_advanced_override");
@@ -642,6 +730,8 @@ async function verifyProxy() {
 
 async function refreshStatus() {
   setBusy(true, "正在刷新状态…");
+  elements.revealedSourceUrl.textContent = "";
+  elements.revealedSourceUrl.classList.add("hidden");
   try {
     const snapshot = await invoke("runtime_observe");
     renderSnapshot(snapshot);
@@ -666,6 +756,8 @@ elements.addRemoteSource.addEventListener("click", addRemoteSource);
 elements.addImportedSource.addEventListener("click", addImportedSource);
 elements.selectedSource.addEventListener("change", () => {
   state.selectedSourceId = elements.selectedSource.value;
+  elements.revealedSourceUrl.textContent = "";
+  elements.revealedSourceUrl.classList.add("hidden");
   setBusy(state.busy);
   const selected = state.sources.find((source) => source.id === state.selectedSourceId);
   setMessage(`已选择来源：${selected?.name || state.selectedSourceId}。`);
@@ -678,9 +770,12 @@ elements.previewSelectedSource.addEventListener("click", previewSelectedSource);
 elements.switchSource.addEventListener("click", () => switchSelectedSource(false));
 elements.switchSourceCached.addEventListener("click", () => switchSelectedSource(true));
 elements.deleteSource.addEventListener("click", deleteSelectedSource);
+elements.revealSourceUrl.addEventListener("click", revealSelectedSourceURL);
 elements.addManagedResource.addEventListener("click", addManagedResource);
 elements.loadAdvancedOverride.addEventListener("click", loadAdvancedOverride);
 elements.previewAdvancedOverride.addEventListener("click", previewAdvancedOverride);
 elements.saveAdvancedOverride.addEventListener("click", saveAdvancedOverride);
+elements.previewDiagnostics.addEventListener("click", previewDiagnostics);
+elements.createDiagnostics.addEventListener("click", createDiagnostics);
 
 handshake();

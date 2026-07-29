@@ -3,6 +3,7 @@ package runtimestate
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,6 +148,170 @@ func TestRemoteSourceRefreshStateKeepsLastValidatedRevisionOnFailureAndNotModifi
 	}
 }
 
+func TestRemoteSourceKeepsOnlyThreeMostRecentSuccessfulRevisions(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
+	record, err := store.CreateRemoteSource(RemoteSourceRecord{
+		Type:                   runtimeapi.SourceTypeRemoteHTTP,
+		Name:                   "primary",
+		URL:                    "https://example.com/config.yaml",
+		RedactedTarget:         "https://example.com:443/…",
+		Route:                  runtimeapi.SourceRouteDirect,
+		RefreshIntervalSeconds: 900,
+		TimeoutSeconds:         30,
+		MaxResponseBytes:       8 << 20,
+	}, []byte("source-0"), []byte("candidate-0"), "op-create", now)
+	if err != nil {
+		t.Fatalf("create Runtime source: %v", err)
+	}
+	for index := 1; index <= 4; index++ {
+		record, err = store.CommitRemoteSourceRefresh(record.ID, SourceRefreshSuccess{
+			Result:    "refreshed",
+			Route:     runtimeapi.SourceRouteDirect,
+			Raw:       []byte("source-" + string(rune('0'+index))),
+			Candidate: []byte("candidate-" + string(rune('0'+index))),
+		}, "op-refresh", now.Add(time.Duration(index)*time.Hour))
+		if err != nil {
+			t.Fatalf("commit Runtime source refresh %d: %v", index, err)
+		}
+	}
+
+	revisionsRoot := filepath.Join(store.root, "sources", record.ID, "revisions")
+	entries, err := os.ReadDir(revisionsRoot)
+	if err != nil {
+		t.Fatalf("read Runtime source revisions: %v", err)
+	}
+	if len(entries) != MaxRetainedSourceRevisions {
+		t.Fatalf("retained Runtime source revisions=%d", len(entries))
+	}
+	foundCurrent := false
+	for _, entry := range entries {
+		if entry.Name() == record.RevisionKey {
+			foundCurrent = true
+		}
+	}
+	if !foundCurrent {
+		t.Fatalf("current Runtime source revision %q was pruned", record.RevisionKey)
+	}
+	raw, candidate, err := store.ReadSourceRevision(record)
+	if err != nil || string(raw) != "source-4" || string(candidate) != "candidate-4" {
+		t.Fatalf("current Runtime source revision raw=%q candidate=%q err=%v", raw, candidate, err)
+	}
+}
+
+func TestCreateSourceConflictRemovesUncommittedRevision(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
+	sourceID := "src_" + strings.Repeat("a", 32)
+	record, err := store.CreateSource(SourceRecord{
+		ID:                sourceID,
+		Type:              runtimeapi.SourceTypeLocalImport,
+		Name:              "local",
+		RedactedTarget:    "Runtime-managed local copy",
+		LastRefreshResult: "imported",
+	}, []byte("source-1"), []byte("candidate-1"), "op-create", now)
+	if err != nil {
+		t.Fatalf("create Runtime source: %v", err)
+	}
+	revisionPath := filepath.Join(store.root, "sources", sourceID, "revisions", record.RevisionKey)
+	beforeConflict, err := os.Stat(revisionPath)
+	if err != nil {
+		t.Fatalf("stat committed Runtime source revision: %v", err)
+	}
+
+	_, err = store.CreateSource(SourceRecord{
+		ID:                sourceID,
+		Type:              runtimeapi.SourceTypeLocalImport,
+		Name:              "same-content-duplicate",
+		RedactedTarget:    "Runtime-managed local copy",
+		LastRefreshResult: "imported",
+	}, []byte("source-1"), []byte("candidate-1"), "op-same-conflict", now.Add(30*time.Second))
+	if !errors.Is(err, ErrSourceIDConflict) {
+		t.Fatalf("create same-content duplicate Runtime source error=%v", err)
+	}
+	afterConflict, err := os.Stat(revisionPath)
+	if err != nil {
+		t.Fatalf("stat Runtime source revision after conflict: %v", err)
+	}
+	if !afterConflict.ModTime().Equal(beforeConflict.ModTime()) {
+		t.Fatalf("failed source conflict changed revision time: before=%s after=%s", beforeConflict.ModTime(), afterConflict.ModTime())
+	}
+
+	_, err = store.CreateSource(SourceRecord{
+		ID:                sourceID,
+		Type:              runtimeapi.SourceTypeLocalImport,
+		Name:              "duplicate",
+		RedactedTarget:    "Runtime-managed local copy",
+		LastRefreshResult: "imported",
+	}, []byte("source-2"), []byte("candidate-2"), "op-conflict", now.Add(time.Minute))
+	if !errors.Is(err, ErrSourceIDConflict) {
+		t.Fatalf("create duplicate Runtime source error=%v", err)
+	}
+
+	revisionsRoot := filepath.Join(store.root, "sources", sourceID, "revisions")
+	entries, err := os.ReadDir(revisionsRoot)
+	if err != nil {
+		t.Fatalf("read Runtime source revisions: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != record.RevisionKey {
+		t.Fatalf("uncommitted Runtime source revision remained: %#v", entries)
+	}
+}
+
+func TestCommittedSourceRefreshIsNotReportedFailedWhenHistoryMaintenanceFails(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
+	record, err := store.CreateRemoteSource(RemoteSourceRecord{
+		Type:                   runtimeapi.SourceTypeRemoteHTTP,
+		Name:                   "primary",
+		URL:                    "https://example.com/config.yaml",
+		RedactedTarget:         "https://example.com:443/…",
+		Route:                  runtimeapi.SourceRouteDirect,
+		RefreshIntervalSeconds: 900,
+		TimeoutSeconds:         30,
+		MaxResponseBytes:       8 << 20,
+	}, []byte("source-1"), []byte("candidate-1"), "op-create", now)
+	if err != nil {
+		t.Fatalf("create Runtime source: %v", err)
+	}
+	revisionsRoot := filepath.Join(store.root, "sources", record.ID, "revisions")
+	if err := os.WriteFile(filepath.Join(revisionsRoot, "unmanaged"), []byte("fault"), 0600); err != nil {
+		t.Fatalf("inject Runtime source history maintenance failure: %v", err)
+	}
+
+	refreshed, err := store.CommitRemoteSourceRefresh(record.ID, SourceRefreshSuccess{
+		Result:    "refreshed",
+		Route:     runtimeapi.SourceRouteDirect,
+		Raw:       []byte("source-2"),
+		Candidate: []byte("candidate-2"),
+	}, "op-refresh", now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("committed Runtime source refresh was reported failed: %v", err)
+	}
+	persisted, err := store.GetRemoteSource(record.ID)
+	if err != nil {
+		t.Fatalf("read refreshed Runtime source: %v", err)
+	}
+	if refreshed.RevisionKey == record.RevisionKey || persisted.RevisionKey != refreshed.RevisionKey {
+		t.Fatalf("refreshed revision=%q persisted=%q previous=%q", refreshed.RevisionKey, persisted.RevisionKey, record.RevisionKey)
+	}
+}
+
 func TestDueCurrentRemoteSourceAndActiveRefreshDetection(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {
@@ -181,7 +346,7 @@ func TestDueCurrentRemoteSourceAndActiveRefreshDetection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("observe before refresh submit: %v", err)
 	}
-	_, _, err = store.SubmitOperation(peer, "dev", runtimeapi.CreateOperationRequest{
+	_, _, err = store.SubmitOperation(peer, "test", "dev", runtimeapi.CreateOperationRequest{
 		RequestID:  "refresh-request",
 		IfRevision: snapshot.Revision,
 		Action: runtimeapi.Action{

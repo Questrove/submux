@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimeprivacy"
 	"submux/internal/runtimestate"
 )
 
@@ -26,12 +27,15 @@ type EventObserver interface {
 
 type Operator interface {
 	UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error)
-	GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity) (runtimeapi.AdvancedOverrideDocument, error)
+	GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity, string, string, string, bool) (runtimeapi.AdvancedOverrideDocument, error)
 	PreviewCandidate(context.Context, runtimeapi.PeerIdentity, runtimeapi.PreviewCandidateRequest) (runtimeapi.CandidatePreview, error)
-	Execute(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error)
+	Execute(context.Context, runtimeapi.PeerIdentity, string, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error)
 	GetOperation(context.Context, string) (runtimeapi.Operation, error)
-	CancelOperation(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CancelOperationRequest) (runtimeapi.Operation, bool, error)
+	CancelOperation(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.CancelOperationRequest) (runtimeapi.Operation, bool, error)
 	VerifyProxy(context.Context) (runtimeapi.ProxyVerification, error)
+	RevealSourceURL(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.RevealSourceURLRequest) (runtimeapi.RevealSourceURLResponse, error)
+	PreviewDiagnostics(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsPreview, error)
+	CreateDiagnostics(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error)
 }
 
 type Server struct {
@@ -125,6 +129,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/operations", s.handleCreateOperation)
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
 	mux.HandleFunc("/v1/proxy/verify", s.handleProxyVerification)
+	mux.HandleFunc("/v1/sources/reveal-url", s.handleRevealSourceURL)
+	mux.HandleFunc("/v1/diagnostics/preview", s.handleDiagnosticsPreview)
+	mux.HandleFunc("/v1/diagnostics/create", s.handleDiagnosticsCreate)
 	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
@@ -132,7 +139,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request) {
-	requestID, _, ok := s.validateCommon(writer, request)
+	requestID, _, _, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -193,7 +200,7 @@ func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request)
 	defer ticker.Stop()
 	for {
 		for _, event := range events {
-			if err := encoder.Encode(event); err != nil {
+			if err := encoder.Encode(runtimeprivacy.SanitizeEvent(event)); err != nil {
 				return
 			}
 			after = event.Cursor
@@ -234,7 +241,7 @@ func (s *Server) handleSnapshot(writer http.ResponseWriter, request *http.Reques
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("Content-Type", "application/json")
 
-	requestID, _, ok := s.validateCommon(writer, request)
+	requestID, _, _, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -259,11 +266,11 @@ func (s *Server) handleSnapshot(writer http.ResponseWriter, request *http.Reques
 	writer.Header().Set(HeaderRequestID, requestID)
 	writer.Header().Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
 	writer.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(writer).Encode(snapshot)
+	_ = json.NewEncoder(writer).Encode(runtimeprivacy.SanitizeSnapshot(snapshot))
 }
 
 func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request) {
-	requestID, clientVersion, ok := s.validateCommon(writer, request)
+	requestID, _, clientVersion, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -322,7 +329,7 @@ func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request)
 }
 
 func (s *Server) handleAdvancedOverride(writer http.ResponseWriter, request *http.Request) {
-	requestID, _, ok := s.validateCommon(writer, request)
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -331,8 +338,9 @@ func (s *Server) handleAdvancedOverride(writer http.ResponseWriter, request *htt
 		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime advanced override only accepts GET", false)
 		return
 	}
-	if request.URL.RawQuery != "" || requestHasBody(request) {
-		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime advanced override does not accept query parameters or a request body", false)
+	query := request.URL.Query()
+	if len(query) != 1 || len(query["reveal"]) != 1 || query.Get("reveal") != "1" || requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime advanced override requires reveal=1 and does not accept a request body", false)
 		return
 	}
 	peer, ok := s.authenticatedPeer(writer, request)
@@ -343,7 +351,14 @@ func (s *Server) handleAdvancedOverride(writer http.ResponseWriter, request *htt
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime advanced override service is unavailable", true)
 		return
 	}
-	document, err := s.operator.GetAdvancedOverride(request.Context(), peer)
+	document, err := s.operator.GetAdvancedOverride(
+		request.Context(),
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		true,
+	)
 	if err != nil {
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime advanced override is temporarily unavailable", true)
 		return
@@ -353,7 +368,7 @@ func (s *Server) handleAdvancedOverride(writer http.ResponseWriter, request *htt
 }
 
 func (s *Server) handleCandidatePreview(writer http.ResponseWriter, request *http.Request) {
-	requestID, _, ok := s.validateCommon(writer, request)
+	requestID, _, _, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -392,11 +407,11 @@ func (s *Server) handleCandidatePreview(writer http.ResponseWriter, request *htt
 		return
 	}
 	writer.Header().Set(HeaderRequestID, requestID)
-	s.writeJSON(writer, http.StatusOK, preview)
+	s.writeJSON(writer, http.StatusOK, runtimeprivacy.SanitizeCandidatePreview(preview))
 }
 
 func (s *Server) handleCreateOperation(writer http.ResponseWriter, request *http.Request) {
-	requestID, clientVersion, ok := s.validateCommon(writer, request)
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -429,17 +444,17 @@ func (s *Server) handleCreateOperation(writer http.ResponseWriter, request *http
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime operation request is invalid", false)
 		return
 	}
-	operation, _, err := s.operator.Execute(request.Context(), peer, clientVersion, operationRequest)
+	operation, _, err := s.operator.Execute(request.Context(), peer, clientType, clientVersion, operationRequest)
 	if err != nil {
 		s.writeOperationError(writer, request, err)
 		return
 	}
 	writer.Header().Set(HeaderRequestID, requestID)
-	s.writeJSON(writer, http.StatusAccepted, runtimeapi.OperationResponse{Operation: operation})
+	s.writeJSON(writer, http.StatusAccepted, runtimeapi.OperationResponse{Operation: runtimeprivacy.SanitizeOperation(operation)})
 }
 
 func (s *Server) handleOperation(writer http.ResponseWriter, request *http.Request) {
-	requestID, clientVersion, ok := s.validateCommon(writer, request)
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -469,7 +484,7 @@ func (s *Server) handleOperation(writer http.ResponseWriter, request *http.Reque
 			return
 		}
 		writer.Header().Set(HeaderRequestID, requestID)
-		s.writeJSON(writer, http.StatusOK, runtimeapi.OperationResponse{Operation: operation})
+		s.writeJSON(writer, http.StatusOK, runtimeapi.OperationResponse{Operation: runtimeprivacy.SanitizeOperation(operation)})
 	case len(parts) == 2 && parts[1] == "cancel" && request.Method == http.MethodPost:
 		if request.URL.RawQuery != "" {
 			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime cancellation query is invalid", false)
@@ -487,20 +502,20 @@ func (s *Server) handleOperation(writer http.ResponseWriter, request *http.Reque
 			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime cancellation request ID does not match its header", false)
 			return
 		}
-		operation, _, err := s.operator.CancelOperation(request.Context(), peer, parts[0], cancellation)
+		operation, _, err := s.operator.CancelOperation(request.Context(), peer, clientType, clientVersion, parts[0], cancellation)
 		if err != nil {
 			s.writeOperationError(writer, request, err)
 			return
 		}
 		writer.Header().Set(HeaderRequestID, requestID)
-		s.writeJSON(writer, http.StatusOK, runtimeapi.OperationResponse{Operation: operation})
+		s.writeJSON(writer, http.StatusOK, runtimeapi.OperationResponse{Operation: runtimeprivacy.SanitizeOperation(operation)})
 	default:
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorNotFound, "Runtime operation endpoint was not found", false)
 	}
 }
 
 func (s *Server) handleProxyVerification(writer http.ResponseWriter, request *http.Request) {
-	requestID, _, ok := s.validateCommon(writer, request)
+	requestID, _, _, ok := s.validateCommon(writer, request)
 	if !ok {
 		return
 	}
@@ -520,28 +535,166 @@ func (s *Server) handleProxyVerification(writer http.ResponseWriter, request *ht
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime proxy verification is unavailable", true)
 		return
 	}
+	if verification.Error != nil {
+		copy := *verification.Error
+		copy.Message = runtimeprivacy.RedactText(copy.Message)
+		verification.Error = &copy
+	}
 	writer.Header().Set(HeaderRequestID, requestID)
 	s.writeJSON(writer, http.StatusOK, verification)
 }
 
-func (s *Server) validateCommon(writer http.ResponseWriter, request *http.Request) (string, string, bool) {
+func (s *Server) handleRevealSourceURL(writer http.ResponseWriter, request *http.Request) {
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost || request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Source URL reveal only accepts a POST request without query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime source reveal service is unavailable", true)
+		return
+	}
+	var revealRequest runtimeapi.RevealSourceURLRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &revealRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	if !revealRequest.Confirm {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Revealing a source URL requires explicit confirmation", false)
+		return
+	}
+	response, err := s.operator.RevealSourceURL(
+		request.Context(),
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		revealRequest,
+	)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, response)
+}
+
+func (s *Server) handleDiagnosticsPreview(writer http.ResponseWriter, request *http.Request) {
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost || request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime diagnostics preview only accepts a POST request without query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime diagnostics preview is unavailable", true)
+		return
+	}
+	var diagnosticsRequest runtimeapi.DiagnosticsRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &diagnosticsRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	preview, err := s.operator.PreviewDiagnostics(
+		request.Context(),
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		diagnosticsRequest,
+	)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, preview)
+}
+
+func (s *Server) handleDiagnosticsCreate(writer http.ResponseWriter, request *http.Request) {
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost || request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime diagnostics creation only accepts a POST request without query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.operator == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime diagnostics creation is unavailable", true)
+		return
+	}
+	if !s.validateWriteCompatibility(writer, request, clientVersion) {
+		return
+	}
+	var diagnosticsRequest runtimeapi.DiagnosticsRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &diagnosticsRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	if (diagnosticsRequest.IncludeRawConfig ||
+		diagnosticsRequest.IncludeFullLogs ||
+		diagnosticsRequest.IncludeNetworkInfo) &&
+		!diagnosticsRequest.ConfirmSensitive {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Sensitive diagnostics require explicit confirmation after reviewing the preview", false)
+		return
+	}
+	result, err := s.operator.CreateDiagnostics(
+		request.Context(),
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		diagnosticsRequest,
+	)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusCreated, result)
+}
+
+func (s *Server) validateCommon(writer http.ResponseWriter, request *http.Request) (string, string, string, bool) {
 	requestID := request.Header.Get(HeaderRequestID)
 	if !validIdentifier(requestID, 128) {
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime request ID is missing or invalid", false)
-		return "", "", false
+		return "", "", "", false
 	}
 	versionText := request.Header.Get(HeaderProtocolVersion)
 	version, err := strconv.Atoi(versionText)
 	if err != nil || version != runtimeapi.ProtocolVersion {
 		s.writeError(writer, request, http.StatusUpgradeRequired, runtimeapi.ErrorProtocolUnsupported, "Runtime protocol version is not supported", false)
-		return "", "", false
+		return "", "", "", false
+	}
+	clientType := request.Header.Get(HeaderClientType)
+	if clientType == "" || len(clientType) > 64 || hasControlCharacter(clientType) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime client type is missing or invalid", false)
+		return "", "", "", false
 	}
 	clientVersion := request.Header.Get(HeaderClientVersion)
 	if clientVersion == "" || len(clientVersion) > 128 || hasControlCharacter(clientVersion) {
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime client version is missing or invalid", false)
-		return "", "", false
+		return "", "", "", false
 	}
-	return requestID, clientVersion, true
+	return requestID, clientType, clientVersion, true
 }
 
 func (s *Server) validateWriteCompatibility(
@@ -686,6 +839,7 @@ func (s *Server) writeErrorEnvelope(
 	}
 	response.ProtocolVersion = runtimeapi.ProtocolVersion
 	response.RequestID = requestID
+	response.Error.Message = runtimeprivacy.RedactText(response.Error.Message)
 	if response.Error.Code == runtimeapi.ErrorProtocolUnsupported {
 		response.SupportedVersions = []int{runtimeapi.ProtocolVersion}
 	}

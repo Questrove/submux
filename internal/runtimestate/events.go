@@ -160,7 +160,10 @@ func (s *Store) GCOperationHistory(now time.Time) (int, error) {
 		if err := deleteRequestRecords(cancels, deleted); err != nil {
 			return err
 		}
-		return pruneEventHistory(transaction)
+		if err := pruneEventHistory(transaction); err != nil {
+			return err
+		}
+		return pruneAuditHistory(transaction, now)
 	})
 	return removed, err
 }

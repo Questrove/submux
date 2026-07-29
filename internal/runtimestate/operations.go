@@ -13,6 +13,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimeprivacy"
 )
 
 var (
@@ -21,6 +22,7 @@ var (
 	cancelRequestsBucket = []byte("runtime_cancel_requests")
 	importsBucket        = []byte("runtime_imports")
 	eventsBucket         = []byte("runtime_events")
+	auditBucket          = []byte("runtime_audit")
 )
 
 var (
@@ -65,6 +67,7 @@ func createRuntimeBuckets(transaction *bbolt.Tx) error {
 		eventsBucket,
 		sourcesBucket,
 		managedResourcesBucket,
+		auditBucket,
 	} {
 		if _, err := transaction.CreateBucketIfNotExists(name); err != nil {
 			return err
@@ -75,6 +78,7 @@ func createRuntimeBuckets(transaction *bbolt.Tx) error {
 
 func (s *Store) SubmitOperation(
 	peer runtimeapi.PeerIdentity,
+	clientType string,
 	clientVersion string,
 	request runtimeapi.CreateOperationRequest,
 	capacity int,
@@ -86,7 +90,7 @@ func (s *Store) SubmitOperation(
 	if capacity <= 0 {
 		return runtimeapi.Operation{}, false, errors.New("Runtime operation queue capacity must be positive")
 	}
-	if request.RequestID == "" || request.Action.Kind == "" || peer.Key() == "" || clientVersion == "" {
+	if request.RequestID == "" || request.Action.Kind == "" || peer.Key() == "" || clientType == "" || clientVersion == "" {
 		return runtimeapi.Operation{}, false, errors.New("Runtime operation metadata is incomplete")
 	}
 	fingerprint, err := operationFingerprint(request)
@@ -167,6 +171,7 @@ func (s *Store) SubmitOperation(
 			Progress:       0,
 			Cancellable:    true,
 			CallerIdentity: caller,
+			ClientType:     clientType,
 			ClientVersion:  clientVersion,
 			CreatedAt:      now,
 			UpdatedAt:      now,
@@ -179,6 +184,9 @@ func (s *Store) SubmitOperation(
 			Caller:      caller,
 			Fingerprint: fingerprint,
 		}); err != nil {
+			return err
+		}
+		if err := appendAuditRecord(transaction, auditForOperation(operation, "accepted", runtimeapi.OperationQueued, nil, now)); err != nil {
 			return err
 		}
 		_, err = advanceRevisionAndEvent(transaction, "operation.queued", operation.ID, now)
@@ -266,6 +274,9 @@ func (s *Store) BeginNextOperation(now time.Time) (runtimeapi.Operation, bool, e
 		if err := metadata.Put(currentOperationKey, []byte(selected.ID)); err != nil {
 			return err
 		}
+		if err := appendAuditRecord(transaction, auditForOperation(selected, "preparing", runtimeapi.OperationRunning, nil, now)); err != nil {
+			return err
+		}
 		if _, err := advanceRevisionAndEvent(transaction, "operation.running", selected.ID, now); err != nil {
 			return err
 		}
@@ -303,6 +314,9 @@ func (s *Store) UpdateOperationStage(id, stage string, progress int, cancellable
 		operation.Cancellable = cancellable
 		operation.UpdatedAt = now
 		if err := putJSON(operations, []byte(id), operation); err != nil {
+			return err
+		}
+		if err := appendAuditRecord(transaction, auditForOperation(operation, stage, runtimeapi.OperationRunning, nil, now)); err != nil {
 			return err
 		}
 		_, err = advanceRevisionAndEvent(transaction, "operation.progress", id, now)
@@ -343,6 +357,11 @@ func (s *Store) CompleteOperation(
 		operation.Cancellable = false
 		operation.UpdatedAt = now
 		operation.Result = result
+		if operationError != nil {
+			copy := *operationError
+			copy.Message = runtimeprivacy.RedactText(copy.Message)
+			operationError = &copy
+		}
 		operation.Error = operationError
 		if err := putJSON(operations, []byte(id), operation); err != nil {
 			return err
@@ -399,6 +418,9 @@ func (s *Store) CompleteOperation(
 				}
 			}
 		}
+		if err := appendAuditRecord(transaction, auditForOperation(operation, operation.Stage, state, operationError, now)); err != nil {
+			return err
+		}
 		_, err = advanceRevisionAndEvent(transaction, "operation."+state, id, now)
 		return err
 	})
@@ -406,6 +428,8 @@ func (s *Store) CompleteOperation(
 
 func (s *Store) CancelOperation(
 	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
 	targetID string,
 	request runtimeapi.CancelOperationRequest,
 	now time.Time,
@@ -413,7 +437,7 @@ func (s *Store) CancelOperation(
 	if s == nil || s.db == nil {
 		return runtimeapi.Operation{}, false, errors.New("Runtime state is not open")
 	}
-	if targetID == "" || request.RequestID == "" || peer.Key() == "" {
+	if targetID == "" || request.RequestID == "" || peer.Key() == "" || clientType == "" || clientVersion == "" {
 		return runtimeapi.Operation{}, false, errors.New("Runtime cancellation metadata is incomplete")
 	}
 	fingerprintValue, err := json.Marshal(struct {
@@ -492,6 +516,20 @@ func (s *Store) CancelOperation(
 		}); err != nil {
 			return err
 		}
+		if err := appendAuditRecord(transaction, runtimeapi.AuditRecord{
+			RequestID:     request.RequestID,
+			OperationID:   targetID,
+			Actor:         caller,
+			ClientType:    clientType,
+			ClientVersion: clientVersion,
+			Action:        "operation.cancel",
+			ObjectID:      targetID,
+			Stage:         "cancelled",
+			Result:        runtimeapi.OperationCancelled,
+			At:            now,
+		}); err != nil {
+			return err
+		}
 		_, err = advanceRevisionAndEvent(transaction, "operation.cancelled", targetID, now)
 		return err
 	})
@@ -537,6 +575,15 @@ func (s *Store) RecoverOperations(now time.Time) error {
 				Retryable: false,
 			}
 			if err := putJSON(operations, []byte(operation.ID), operation); err != nil {
+				return err
+			}
+			if err := appendAuditRecord(transaction, auditForOperation(
+				operation,
+				"recovery_required",
+				runtimeapi.OperationOutcomeUnknown,
+				operation.Error,
+				now,
+			)); err != nil {
 				return err
 			}
 			if _, err := advanceRevisionAndEvent(transaction, "operation.outcome_unknown", operation.ID, now); err != nil {

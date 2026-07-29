@@ -26,6 +26,13 @@ type operatorObserver struct {
 	observerFunc
 }
 
+type privacyOperator struct {
+	operatorObserver
+	reveal  func(runtimeapi.PeerIdentity, string, string, string, runtimeapi.RevealSourceURLRequest) (runtimeapi.RevealSourceURLResponse, error)
+	preview func(runtimeapi.PeerIdentity, string, string, string, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsPreview, error)
+	create  func(runtimeapi.PeerIdentity, string, string, string, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error)
+}
+
 type eventObserver struct {
 	observerFunc
 	events func(context.Context, runtimeapi.PeerIdentity, uint64, int) ([]runtimeapi.Event, uint64, error)
@@ -44,7 +51,14 @@ func (operatorObserver) UploadImport(context.Context, runtimeapi.PeerIdentity, s
 	return runtimeapi.ImportContent{}, nil
 }
 
-func (operatorObserver) GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity) (runtimeapi.AdvancedOverrideDocument, error) {
+func (operatorObserver) GetAdvancedOverride(
+	context.Context,
+	runtimeapi.PeerIdentity,
+	string,
+	string,
+	string,
+	bool,
+) (runtimeapi.AdvancedOverrideDocument, error) {
 	return runtimeapi.AdvancedOverrideDocument{YAML: "{}\n"}, nil
 }
 
@@ -60,7 +74,7 @@ func (operatorObserver) RuntimeVersion() string {
 	return "test"
 }
 
-func (operatorObserver) Execute(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error) {
+func (operatorObserver) Execute(context.Context, runtimeapi.PeerIdentity, string, string, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, bool, error) {
 	return runtimeapi.Operation{}, false, nil
 }
 
@@ -68,12 +82,57 @@ func (operatorObserver) GetOperation(context.Context, string) (runtimeapi.Operat
 	return runtimeapi.Operation{}, nil
 }
 
-func (operatorObserver) CancelOperation(context.Context, runtimeapi.PeerIdentity, string, runtimeapi.CancelOperationRequest) (runtimeapi.Operation, bool, error) {
+func (operatorObserver) CancelOperation(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.CancelOperationRequest) (runtimeapi.Operation, bool, error) {
 	return runtimeapi.Operation{}, false, nil
 }
 
 func (operatorObserver) VerifyProxy(context.Context) (runtimeapi.ProxyVerification, error) {
 	return runtimeapi.ProxyVerification{}, nil
+}
+
+func (operatorObserver) RevealSourceURL(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.RevealSourceURLRequest) (runtimeapi.RevealSourceURLResponse, error) {
+	return runtimeapi.RevealSourceURLResponse{}, nil
+}
+
+func (operatorObserver) PreviewDiagnostics(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsPreview, error) {
+	return runtimeapi.DiagnosticsPreview{}, nil
+}
+
+func (operatorObserver) CreateDiagnostics(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error) {
+	return runtimeapi.DiagnosticsResult{}, nil
+}
+
+func (operator privacyOperator) RevealSourceURL(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.RevealSourceURLRequest,
+) (runtimeapi.RevealSourceURLResponse, error) {
+	return operator.reveal(peer, clientType, clientVersion, requestID, request)
+}
+
+func (operator privacyOperator) PreviewDiagnostics(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.DiagnosticsRequest,
+) (runtimeapi.DiagnosticsPreview, error) {
+	return operator.preview(peer, clientType, clientVersion, requestID, request)
+}
+
+func (operator privacyOperator) CreateDiagnostics(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.DiagnosticsRequest,
+) (runtimeapi.DiagnosticsResult, error) {
+	return operator.create(peer, clientType, clientVersion, requestID, request)
 }
 
 func TestSnapshotHandlerValidatesProtocolAndPeer(t *testing.T) {
@@ -105,6 +164,7 @@ func TestSnapshotHandlerValidatesProtocolAndPeer(t *testing.T) {
 	request.Header.Set(HeaderRequestID, "request-1")
 	request.Header.Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
 	request.Header.Set(HeaderClientVersion, "test")
+	request.Header.Set(HeaderClientType, "test")
 	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}, nil)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
@@ -159,6 +219,7 @@ func TestEventHandlerStreamsMonotonicNDJSON(t *testing.T) {
 	request.Header.Set(HeaderRequestID, "request-events")
 	request.Header.Set(HeaderProtocolVersion, "1")
 	request.Header.Set(HeaderClientVersion, "test")
+	request.Header.Set(HeaderClientType, "test")
 	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
@@ -195,6 +256,7 @@ func TestEventHandlerReturnsCursorExpiredWithEarliestCursor(t *testing.T) {
 	request.Header.Set(HeaderRequestID, "request-events")
 	request.Header.Set(HeaderProtocolVersion, "1")
 	request.Header.Set(HeaderClientVersion, "test")
+	request.Header.Set(HeaderClientType, "test")
 	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
 	recorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
@@ -241,6 +303,7 @@ func TestSnapshotHandlerErrorsAreStable(t *testing.T) {
 				request.Header.Set(HeaderRequestID, "request-1")
 				request.Header.Set(HeaderProtocolVersion, "999")
 				request.Header.Set(HeaderClientVersion, "test")
+				request.Header.Set(HeaderClientType, "test")
 			},
 			peer:    true,
 			status:  http.StatusUpgradeRequired,
@@ -252,6 +315,7 @@ func TestSnapshotHandlerErrorsAreStable(t *testing.T) {
 				request.Header.Set(HeaderRequestID, "request-1")
 				request.Header.Set(HeaderProtocolVersion, "1")
 				request.Header.Set(HeaderClientVersion, "test")
+				request.Header.Set(HeaderClientType, "test")
 			},
 			status:  http.StatusForbidden,
 			errCode: runtimeapi.ErrorUnauthorized,
@@ -293,6 +357,7 @@ func TestOperationHandlerRejectsUnknownAndDuplicateJSONFields(t *testing.T) {
 		request.Header.Set(HeaderRequestID, "request-1")
 		request.Header.Set(HeaderProtocolVersion, "1")
 		request.Header.Set(HeaderClientVersion, "test")
+		request.Header.Set(HeaderClientType, "test")
 		request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
 		recorder := httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)
@@ -318,6 +383,7 @@ func TestMutationRejectsIncompatibleClientVersion(t *testing.T) {
 	request.Header.Set(HeaderRequestID, "request-1")
 	request.Header.Set(HeaderProtocolVersion, "1")
 	request.Header.Set(HeaderClientVersion, "old")
+	request.Header.Set(HeaderClientType, "test")
 	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
 	recorder := httptest.NewRecorder()
 
@@ -347,6 +413,7 @@ func TestCandidatePreviewUsesReadOnlyIPCEndpoint(t *testing.T) {
 	request.Header.Set(HeaderRequestID, "request-1")
 	request.Header.Set(HeaderProtocolVersion, "1")
 	request.Header.Set(HeaderClientVersion, "old")
+	request.Header.Set(HeaderClientType, "test")
 	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
 	recorder := httptest.NewRecorder()
 
@@ -398,14 +465,105 @@ func TestAdvancedOverrideUsesAuthenticatedReadOnlyEndpoint(t *testing.T) {
 	request.Header.Set(HeaderRequestID, "request-1")
 	request.Header.Set(HeaderProtocolVersion, "1")
 	request.Header.Set(HeaderClientVersion, "old")
+	request.Header.Set(HeaderClientType, "test")
 	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
 	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unconfirmed status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/v1/advanced-override?reveal=1", nil)
+	request.Header.Set(HeaderRequestID, "request-2")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientVersion, "old")
+	request.Header.Set(HeaderClientType, "test")
+	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+	recorder = httptest.NewRecorder()
 	server.Handler().ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"yaml":"{}\n"`) {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	if recorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cache-Control = %q", recorder.Header().Get("Cache-Control"))
+	}
+}
+
+func TestSensitiveEndpointsRequireConfirmationAndCarryClientIdentity(t *testing.T) {
+	peer := runtimeapi.PeerIdentity{Platform: "windows", SID: "S-1-5-21-test"}
+	revealCalls := 0
+	previewCalls := 0
+	createCalls := 0
+	service := privacyOperator{
+		operatorObserver: operatorObserver{observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		}},
+		reveal: func(gotPeer runtimeapi.PeerIdentity, clientType, clientVersion, requestID string, request runtimeapi.RevealSourceURLRequest) (runtimeapi.RevealSourceURLResponse, error) {
+			revealCalls++
+			if gotPeer.Key() != peer.Key() || clientType != "gui" || clientVersion != "test" || requestID != "request-sensitive" || !request.Confirm {
+				t.Fatalf("source reveal metadata peer=%#v type=%q version=%q request=%q body=%#v", gotPeer, clientType, clientVersion, requestID, request)
+			}
+			return runtimeapi.RevealSourceURLResponse{
+				SourceID: request.SourceID,
+				URL:      "https://user:pass@example.com/config?token=secret",
+			}, nil
+		},
+		preview: func(gotPeer runtimeapi.PeerIdentity, clientType, clientVersion, requestID string, request runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsPreview, error) {
+			previewCalls++
+			if gotPeer.Key() != peer.Key() || clientType != "gui" || clientVersion != "test" || requestID != "request-sensitive" || !request.IncludeFullLogs {
+				t.Fatalf("diagnostics preview metadata peer=%#v type=%q version=%q request=%q body=%#v", gotPeer, clientType, clientVersion, requestID, request)
+			}
+			return runtimeapi.DiagnosticsPreview{
+				Warning: runtimeapi.SensitiveDataWarning,
+				Items:   []runtimeapi.DiagnosticItem{{Name: "sensitive/logs/runtime.log", Included: true, Sensitive: true}},
+			}, nil
+		},
+		create: func(gotPeer runtimeapi.PeerIdentity, clientType, clientVersion, requestID string, request runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error) {
+			createCalls++
+			if gotPeer.Key() != peer.Key() || clientType != "gui" || clientVersion != "test" || requestID != "request-sensitive" || !request.IncludeFullLogs || !request.ConfirmSensitive {
+				t.Fatalf("diagnostics create metadata peer=%#v type=%q version=%q request=%q body=%#v", gotPeer, clientType, clientVersion, requestID, request)
+			}
+			return runtimeapi.DiagnosticsResult{FileName: "diagnostics.zip", Size: 10}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	serve := func(path, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
+		request.Header.Set(HeaderRequestID, "request-sensitive")
+		request.Header.Set(HeaderProtocolVersion, "1")
+		request.Header.Set(HeaderClientType, "gui")
+		request.Header.Set(HeaderClientVersion, "test")
+		request = withPeerContext(request, peer, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	sourceID := "src_0123456789abcdef0123456789abcdef"
+	recorder := serve("/v1/sources/reveal-url", `{"source_id":"`+sourceID+`","confirm":false}`)
+	if recorder.Code != http.StatusBadRequest || revealCalls != 0 {
+		t.Fatalf("unconfirmed reveal status=%d calls=%d body=%s", recorder.Code, revealCalls, recorder.Body.String())
+	}
+	recorder = serve("/v1/sources/reveal-url", `{"source_id":"`+sourceID+`","confirm":true}`)
+	if recorder.Code != http.StatusOK || revealCalls != 1 || !strings.Contains(recorder.Body.String(), "token=secret") ||
+		recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("confirmed reveal status=%d calls=%d headers=%v body=%s", recorder.Code, revealCalls, recorder.Header(), recorder.Body.String())
+	}
+
+	recorder = serve("/v1/diagnostics/preview", `{"include_full_logs":true}`)
+	if recorder.Code != http.StatusOK || previewCalls != 1 || !strings.Contains(recorder.Body.String(), runtimeapi.SensitiveDataWarning) {
+		t.Fatalf("diagnostics preview status=%d calls=%d body=%s", recorder.Code, previewCalls, recorder.Body.String())
+	}
+	recorder = serve("/v1/diagnostics/create", `{"include_full_logs":true}`)
+	if recorder.Code != http.StatusBadRequest || createCalls != 0 {
+		t.Fatalf("unconfirmed diagnostics status=%d calls=%d body=%s", recorder.Code, createCalls, recorder.Body.String())
+	}
+	recorder = serve("/v1/diagnostics/create", `{"include_full_logs":true,"confirm_sensitive":true}`)
+	if recorder.Code != http.StatusCreated || createCalls != 1 || recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("confirmed diagnostics status=%d calls=%d headers=%v body=%s", recorder.Code, createCalls, recorder.Header(), recorder.Body.String())
 	}
 }
 

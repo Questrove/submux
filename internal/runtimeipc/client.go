@@ -21,9 +21,10 @@ import (
 )
 
 type Client struct {
-	endpoint string
-	version  string
-	http     *http.Client
+	endpoint   string
+	clientType string
+	version    string
+	http       *http.Client
 }
 
 type ClientError struct {
@@ -58,8 +59,15 @@ func (e *ClientError) Unwrap() error {
 }
 
 func NewClient(endpoint string, clientVersion string) (*Client, error) {
+	return NewTypedClient(endpoint, "cli", clientVersion)
+}
+
+func NewTypedClient(endpoint string, clientType string, clientVersion string) (*Client, error) {
 	if endpoint == "" {
 		return nil, errors.New("Runtime endpoint is required")
+	}
+	if clientType == "" || len(clientType) > 64 || hasControlCharacter(clientType) {
+		return nil, errors.New("Runtime client type is invalid")
 	}
 	if clientVersion == "" || len(clientVersion) > 128 || hasControlCharacter(clientVersion) {
 		return nil, errors.New("Runtime client version is invalid")
@@ -76,8 +84,9 @@ func NewClient(endpoint string, clientVersion string) (*Client, error) {
 		IdleConnTimeout:     30 * time.Second,
 	}
 	return &Client{
-		endpoint: endpoint,
-		version:  clientVersion,
+		endpoint:   endpoint,
+		clientType: clientType,
+		version:    clientVersion,
 		http: &http.Client{
 			Transport: transport,
 			Timeout:   15 * time.Second,
@@ -112,6 +121,7 @@ func (c *Client) Observe(ctx context.Context) (runtimeapi.Snapshot, error) {
 	}
 	request.Header.Set(HeaderRequestID, requestID)
 	request.Header.Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+	request.Header.Set(HeaderClientType, c.clientType)
 	request.Header.Set(HeaderClientVersion, c.version)
 
 	response, err := c.http.Do(request)
@@ -316,13 +326,16 @@ func (c *Client) UploadImport(
 	return content, nil
 }
 
-func (c *Client) GetAdvancedOverride(ctx context.Context) (runtimeapi.AdvancedOverrideDocument, error) {
+func (c *Client) GetAdvancedOverride(ctx context.Context, reveal bool) (runtimeapi.AdvancedOverrideDocument, error) {
 	var document runtimeapi.AdvancedOverrideDocument
+	if !reveal {
+		return document, errors.New("reading the Runtime advanced override requires explicit confirmation")
+	}
 	requestID, err := newRequestID()
 	if err != nil {
 		return document, err
 	}
-	request, err := c.newRequest(ctx, http.MethodGet, "/v1/advanced-override", nil, requestID)
+	request, err := c.newRequest(ctx, http.MethodGet, "/v1/advanced-override?reveal=1", nil, requestID)
 	if err != nil {
 		return document, err
 	}
@@ -542,6 +555,74 @@ func (c *Client) WaitOperation(
 	}
 }
 
+func (c *Client) RevealSourceURL(
+	ctx context.Context,
+	sourceID string,
+	confirm bool,
+) (runtimeapi.RevealSourceURLResponse, error) {
+	var response runtimeapi.RevealSourceURLResponse
+	err := c.postJSON(
+		ctx,
+		"/v1/sources/reveal-url",
+		runtimeapi.RevealSourceURLRequest{SourceID: sourceID, Confirm: confirm},
+		http.StatusOK,
+		&response,
+	)
+	return response, err
+}
+
+func (c *Client) PreviewDiagnostics(
+	ctx context.Context,
+	request runtimeapi.DiagnosticsRequest,
+) (runtimeapi.DiagnosticsPreview, error) {
+	var response runtimeapi.DiagnosticsPreview
+	err := c.postJSON(ctx, "/v1/diagnostics/preview", request, http.StatusOK, &response)
+	return response, err
+}
+
+func (c *Client) CreateDiagnostics(
+	ctx context.Context,
+	request runtimeapi.DiagnosticsRequest,
+) (runtimeapi.DiagnosticsResult, error) {
+	var response runtimeapi.DiagnosticsResult
+	err := c.postJSON(ctx, "/v1/diagnostics/create", request, http.StatusCreated, &response)
+	return response, err
+}
+
+func (c *Client) postJSON(
+	ctx context.Context,
+	path string,
+	value any,
+	successStatus int,
+	destination any,
+) error {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return err
+	}
+	request, err := c.newRequest(ctx, http.MethodPost, path, bytes.NewReader(body), requestID)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != successStatus {
+		return decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, destination); err != nil {
+		return invalidResponseError("Runtime response", err)
+	}
+	return nil
+}
+
 func (c *Client) newRequest(
 	ctx context.Context,
 	method string,
@@ -561,6 +642,7 @@ func (c *Client) newRequest(
 	}
 	request.Header.Set(HeaderRequestID, requestID)
 	request.Header.Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+	request.Header.Set(HeaderClientType, c.clientType)
 	request.Header.Set(HeaderClientVersion, c.version)
 	return request, nil
 }

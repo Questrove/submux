@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"submux/internal/runtimeapi"
 )
 
 func TestWebViewOnlyUsesAllowlistedTauriCommands(t *testing.T) {
@@ -45,9 +47,47 @@ func TestWebViewOnlyUsesAllowlistedTauriCommands(t *testing.T) {
 		"runtime_wait_operation",
 		"runtime_cancel_operation",
 		"runtime_verify_proxy",
+		"runtime_reveal_source_url",
+		"runtime_preview_diagnostics",
+		"runtime_create_diagnostics",
 	} {
 		if !strings.Contains(script, `"`+command+`"`) {
 			t.Fatalf("WebView does not invoke %q", command)
+		}
+	}
+}
+
+func TestGUISensitiveActionsUseSharedWarningAndLocalIPC(t *testing.T) {
+	page := readGUIFile(t, "ui", "index.html")
+	for _, id := range []string{
+		`id="reveal-source-url"`,
+		`id="revealed-source-url"`,
+		`id="diagnostics-raw-config"`,
+		`id="diagnostics-full-logs"`,
+		`id="diagnostics-network-info"`,
+		`id="preview-diagnostics"`,
+		`id="create-diagnostics"`,
+	} {
+		if !strings.Contains(page, id) {
+			t.Fatalf("GUI sensitive control %s is missing", id)
+		}
+	}
+	script := readGUIFile(t, "ui", "app.js")
+	if !strings.Contains(script, runtimeapi.SensitiveDataWarning) ||
+		!strings.Contains(script, "window.confirm") ||
+		!strings.Contains(script, "confirmSensitive") {
+		t.Fatal("GUI sensitive warning or confirmation is missing")
+	}
+	bridge := readGUIFile(t, "src-tauri", "src", "runtime_ipc.rs")
+	for _, contract := range []string{
+		"X-Submux-Client-Type: gui",
+		"/v1/advanced-override?reveal=1",
+		"/v1/sources/reveal-url",
+		"/v1/diagnostics/preview",
+		"/v1/diagnostics/create",
+	} {
+		if !strings.Contains(bridge, contract) {
+			t.Fatalf("GUI Runtime IPC privacy contract %q is missing", contract)
 		}
 	}
 }

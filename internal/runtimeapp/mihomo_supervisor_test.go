@@ -365,7 +365,7 @@ func completeDesiredOperation(t *testing.T, state *runtimestate.Store, action, r
 	if err != nil {
 		t.Fatalf("observe Runtime before desired-state seed: %v", err)
 	}
-	operation, _, err := state.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	operation, _, err := state.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  requestID,
 		IfRevision: snapshot.Revision,
 		Action:     runtimeapi.Action{Kind: action},

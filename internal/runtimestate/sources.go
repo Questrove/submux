@@ -27,6 +27,8 @@ var (
 	ErrSourceChanged    = errors.New("Runtime current configuration source changed")
 )
 
+const MaxRetainedSourceRevisions = 3
+
 type SourceRecord struct {
 	ID                     string     `json:"id"`
 	Type                   string     `json:"type"`
@@ -105,10 +107,18 @@ func (s *Store) CreateSource(
 	if err := validateSourceRecord(record, true); err != nil {
 		return SourceRecord{}, err
 	}
-	rawDigest, candidateDigest, revisionKey, err := s.writeSourceRevision(record.ID, raw, candidate)
+	s.sourceMu.Lock()
+	defer s.sourceMu.Unlock()
+	rawDigest, candidateDigest, revisionKey, revisionCreated, err := s.writeSourceRevision(record.ID, raw, candidate)
 	if err != nil {
 		return SourceRecord{}, err
 	}
+	revisionCommitted := false
+	defer func() {
+		if revisionCreated && !revisionCommitted {
+			_ = s.removeSourceRevision(record.ID, revisionKey)
+		}
+	}()
 	now = now.UTC()
 	record.RawSHA256 = rawDigest
 	record.CandidateSHA256 = candidateDigest
@@ -138,6 +148,8 @@ func (s *Store) CreateSource(
 	if err != nil {
 		return SourceRecord{}, err
 	}
+	revisionCommitted = true
+	s.maintainSourceRevisionHistory(record.ID, record.RevisionKey, now)
 	return record, nil
 }
 
@@ -264,6 +276,8 @@ func (s *Store) DeleteSource(
 	if !validSourceID(sourceID) {
 		return SourceRecord{}, ErrSourceNotFound
 	}
+	s.sourceMu.Lock()
+	defer s.sourceMu.Unlock()
 	now = now.UTC()
 	var deleted SourceRecord
 	err := s.db.Update(func(transaction *bbolt.Tx) error {
@@ -307,12 +321,23 @@ func (s *Store) CommitRemoteSourceRefresh(
 	if !validSourceID(id) {
 		return RemoteSourceRecord{}, ErrSourceNotFound
 	}
+	s.sourceMu.Lock()
+	defer s.sourceMu.Unlock()
 	var revisionKey string
+	var revisionCreated bool
+	revisionCommitted := false
+	defer func() {
+		if revisionCreated && !revisionCommitted {
+			_ = s.removeSourceRevision(id, revisionKey)
+		}
+	}()
 	if !update.NotModified {
-		rawDigest, candidateDigest, storedRevision, err := s.writeSourceRevision(id, update.Raw, update.Candidate)
+		rawDigest, candidateDigest, storedRevision, created, err := s.writeSourceRevision(id, update.Raw, update.Candidate)
 		if err != nil {
 			return RemoteSourceRecord{}, err
 		}
+		revisionCreated = created
+		revisionKey = storedRevision
 		if update.RawSHA256 != "" && !strings.EqualFold(update.RawSHA256, rawDigest) {
 			return RemoteSourceRecord{}, errors.New("Runtime source raw digest changed before commit")
 		}
@@ -321,7 +346,6 @@ func (s *Store) CommitRemoteSourceRefresh(
 		}
 		update.RawSHA256 = rawDigest
 		update.CandidateSHA256 = candidateDigest
-		revisionKey = storedRevision
 	}
 	now = now.UTC()
 	var record RemoteSourceRecord
@@ -358,7 +382,14 @@ func (s *Store) CommitRemoteSourceRefresh(
 		_, err = advanceRevisionAndEvent(transaction, "source.refreshed", operationID, now)
 		return err
 	})
-	return record, err
+	if err != nil {
+		return RemoteSourceRecord{}, err
+	}
+	if !update.NotModified {
+		revisionCommitted = true
+		s.maintainSourceRevisionHistory(record.ID, record.RevisionKey, now)
+	}
+	return record, nil
 }
 
 func (s *Store) RecordRemoteSourceFailure(
@@ -644,26 +675,45 @@ func sourceRiskSettings(record RemoteSourceRecord) []string {
 	return risks
 }
 
-func (s *Store) writeSourceRevision(sourceID string, raw, candidate []byte) (string, string, string, error) {
+func (s *Store) writeSourceRevision(sourceID string, raw, candidate []byte) (string, string, string, bool, error) {
 	if len(raw) == 0 || len(candidate) == 0 {
-		return "", "", "", errors.New("Runtime source revision content is empty")
+		return "", "", "", false, errors.New("Runtime source revision content is empty")
 	}
 	rawHash := sha256.Sum256(raw)
 	candidateHash := sha256.Sum256(candidate)
 	rawDigest := hex.EncodeToString(rawHash[:])
 	candidateDigest := hex.EncodeToString(candidateHash[:])
 	revisionKey := rawDigest + "-" + candidateDigest
+	if !validSourceID(sourceID) {
+		return "", "", "", false, errors.New("Runtime source ID is invalid")
+	}
+	root, err := s.safeSourceRoot()
+	if err != nil {
+		return "", "", "", false, err
+	}
+	revisionPath := filepath.Join(root, sourceID, "revisions", revisionKey)
+	_, statErr := os.Lstat(revisionPath)
+	created := errors.Is(statErr, os.ErrNotExist)
+	if statErr != nil && !created {
+		return "", "", "", false, statErr
+	}
 	directory, err := s.sourceRevisionDirectory(sourceID, revisionKey, true)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", false, err
 	}
 	if err := writeOrVerifyImmutableSourceFile(filepath.Join(directory, "source.yaml"), raw, rawDigest); err != nil {
-		return "", "", "", err
+		if created {
+			_ = s.removeSourceRevision(sourceID, revisionKey)
+		}
+		return "", "", "", false, err
 	}
 	if err := writeOrVerifyImmutableSourceFile(filepath.Join(directory, "candidate.yaml"), candidate, candidateDigest); err != nil {
-		return "", "", "", err
+		if created {
+			_ = s.removeSourceRevision(sourceID, revisionKey)
+		}
+		return "", "", "", false, err
 	}
-	return rawDigest, candidateDigest, revisionKey, nil
+	return rawDigest, candidateDigest, revisionKey, created, nil
 }
 
 func (s *Store) sourceRevisionDirectory(sourceID, revisionKey string, create bool) (string, error) {
@@ -707,6 +757,120 @@ func (s *Store) sourceRevisionDirectory(sourceID, revisionKey string, create boo
 		return "", errors.New("Runtime source revision must not contain symbolic or reparse links")
 	}
 	return directory, nil
+}
+
+func (s *Store) pruneSourceRevisions(sourceID, currentRevisionKey string, limit int) error {
+	if limit < 1 {
+		return errors.New("Runtime source revision retention must be positive")
+	}
+	if !validSourceID(sourceID) {
+		return errors.New("Runtime source ID is invalid")
+	}
+	if _, err := s.sourceRevisionDirectory(sourceID, currentRevisionKey, false); err != nil {
+		return err
+	}
+	root, err := s.safeSourceRoot()
+	if err != nil {
+		return err
+	}
+	revisionsRoot := filepath.Join(root, sourceID, "revisions")
+	if filepath.Dir(filepath.Dir(revisionsRoot)) != root {
+		return errors.New("Runtime source revision path escaped the state root")
+	}
+	entries, err := os.ReadDir(revisionsRoot)
+	if err != nil {
+		return err
+	}
+	type revisionEntry struct {
+		name    string
+		path    string
+		modTime time.Time
+		current bool
+	}
+	revisions := make([]revisionEntry, 0, len(entries))
+	for _, entry := range entries {
+		directory, err := s.sourceRevisionDirectory(sourceID, entry.Name(), false)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !entry.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("Runtime source revision history contains an unmanaged entry")
+		}
+		revisions = append(revisions, revisionEntry{
+			name:    entry.Name(),
+			path:    directory,
+			modTime: info.ModTime(),
+			current: entry.Name() == currentRevisionKey,
+		})
+	}
+	sort.Slice(revisions, func(left, right int) bool {
+		if revisions[left].current != revisions[right].current {
+			return revisions[left].current
+		}
+		if revisions[left].modTime.Equal(revisions[right].modTime) {
+			return revisions[left].name > revisions[right].name
+		}
+		return revisions[left].modTime.After(revisions[right].modTime)
+	})
+	if len(revisions) <= limit {
+		return nil
+	}
+	for _, revision := range revisions[limit:] {
+		if err := removeSourceRevision(revisionsRoot, revision.path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) markSourceRevisionApplied(sourceID, revisionKey string, appliedAt time.Time) error {
+	directory, err := s.sourceRevisionDirectory(sourceID, revisionKey, false)
+	if err != nil {
+		return err
+	}
+	appliedAt = appliedAt.UTC()
+	return os.Chtimes(directory, appliedAt, appliedAt)
+}
+
+func (s *Store) maintainSourceRevisionHistory(sourceID, revisionKey string, appliedAt time.Time) {
+	// Once the bbolt transaction commits, the source record is authoritative.
+	// History maintenance must not turn that successful state transition into a
+	// reported failure. A later successful source write retries the pruning.
+	if err := s.markSourceRevisionApplied(sourceID, revisionKey, appliedAt); err != nil {
+		return
+	}
+	_ = s.pruneSourceRevisions(sourceID, revisionKey, MaxRetainedSourceRevisions)
+}
+
+func removeSourceRevision(revisionsRoot, path string) error {
+	if filepath.Dir(path) != revisionsRoot {
+		return errors.New("refusing to remove a path outside Runtime source revision history")
+	}
+	linked, err := safepath.ContainsLink(path)
+	if err != nil {
+		return fmt.Errorf("inspect Runtime source revision before removal: %w", err)
+	}
+	if linked {
+		return errors.New("refusing to remove a linked Runtime source revision")
+	}
+	return os.RemoveAll(path)
+}
+
+func (s *Store) removeSourceRevision(sourceID, revisionKey string) error {
+	directory, err := s.sourceRevisionDirectory(sourceID, revisionKey, false)
+	if err != nil {
+		return err
+	}
+	root, err := s.safeSourceRoot()
+	if err != nil {
+		return err
+	}
+	revisionsRoot := filepath.Join(root, sourceID, "revisions")
+	return removeSourceRevision(revisionsRoot, directory)
 }
 
 func (s *Store) safeSourceRoot() (string, error) {

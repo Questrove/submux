@@ -99,7 +99,7 @@ func TestAcceptedOperationReservesImportPastExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload Runtime import: %v", err)
 	}
-	operation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	operation, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "request-one",
 		IfRevision: 1,
 		Action: runtimeapi.Action{

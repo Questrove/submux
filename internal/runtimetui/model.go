@@ -14,12 +14,13 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimeprivacy"
 )
 
 type Client interface {
 	Observe(context.Context) (runtimeapi.Snapshot, error)
 	UploadImport(context.Context, string, []byte) (runtimeapi.ImportContent, error)
-	GetAdvancedOverride(context.Context) (runtimeapi.AdvancedOverrideDocument, error)
+	GetAdvancedOverride(context.Context, bool) (runtimeapi.AdvancedOverrideDocument, error)
 	PreviewCandidate(context.Context, string) (runtimeapi.CandidatePreview, error)
 	PreviewCandidateRequest(context.Context, runtimeapi.PreviewCandidateRequest) (runtimeapi.CandidatePreview, error)
 	Execute(context.Context, runtimeapi.CreateOperationRequest) (runtimeapi.Operation, error)
@@ -27,6 +28,9 @@ type Client interface {
 	WaitOperation(context.Context, string, time.Duration) (runtimeapi.Operation, error)
 	CancelOperation(context.Context, string, runtimeapi.CancelOperationRequest) (runtimeapi.Operation, error)
 	VerifyProxy(context.Context) (runtimeapi.ProxyVerification, error)
+	RevealSourceURL(context.Context, string, bool) (runtimeapi.RevealSourceURLResponse, error)
+	PreviewDiagnostics(context.Context, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsPreview, error)
+	CreateDiagnostics(context.Context, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error)
 }
 
 type Model struct {
@@ -45,6 +49,10 @@ type Model struct {
 	verification     runtimeapi.ProxyVerification
 	status           string
 	err              error
+	sensitiveConfirm string
+	revealedURL      string
+	diagnostics      runtimeapi.DiagnosticsPreview
+	diagnosticsFile  runtimeapi.DiagnosticsResult
 }
 
 const (
@@ -89,6 +97,18 @@ type overrideDocumentMsg struct {
 
 type overridePreviewMsg struct {
 	preview runtimeapi.CandidatePreview
+}
+
+type revealSourceURLMsg struct {
+	response runtimeapi.RevealSourceURLResponse
+}
+
+type diagnosticsPreviewMsg struct {
+	preview runtimeapi.DiagnosticsPreview
+}
+
+type diagnosticsResultMsg struct {
+	result runtimeapi.DiagnosticsResult
 }
 
 type errMsg struct {
@@ -200,6 +220,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.editing = true
 		m.editorMode = editorModeOverride
 		m.err = nil
+		m.sensitiveConfirm = ""
 		m.editor.SetValue(message.document.YAML)
 		m.status = "编辑高级覆盖后按 Ctrl+S 校验并保存，Esc 取消"
 		return m, m.editor.Focus()
@@ -208,6 +229,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.err = nil
 		m.status = fmt.Sprintf("高级覆盖预览已校验：%s；Ctrl+S 保存", shortDigest(message.preview.CandidateSHA256))
+	case revealSourceURLMsg:
+		m.busy = false
+		m.err = nil
+		m.sensitiveConfirm = ""
+		m.revealedURL = message.response.URL
+		m.status = "已临时显示来源原始地址；离开当前界面后不会保存"
+	case diagnosticsPreviewMsg:
+		m.busy = false
+		m.err = nil
+		m.diagnostics = message.preview
+		m.sensitiveConfirm = "diagnostics"
+		m.status = "诊断包内容已预览；再次按 Ctrl+G 生成默认脱敏诊断包"
+	case diagnosticsResultMsg:
+		m.busy = false
+		m.err = nil
+		m.sensitiveConfirm = ""
+		m.diagnosticsFile = message.result
+		m.status = fmt.Sprintf("诊断包已保存：%s", message.result.FileName)
 	case errMsg:
 		m.busy = false
 		m.err = message.err
@@ -342,6 +381,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "编辑资源 JSON 后按 Ctrl+S 添加，Esc 取消"
 			return m, m.editor.Focus()
 		case "o":
+			if m.sensitiveConfirm != "override" {
+				m.sensitiveConfirm = "override"
+				m.err = nil
+				m.status = runtimeapi.SensitiveDataWarning + " 再按一次 o 确认读取高级覆盖。"
+				return m, nil
+			}
 			m.busy = true
 			m.status = "正在读取高级覆盖…"
 			return m, m.getOverrideCmd()
@@ -408,6 +453,33 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在验证显式代理…"
 			return m, m.verifyCmd()
+		case "ctrl+u":
+			sourceID := m.selectedSource()
+			if sourceID == "" {
+				m.err = errors.New("当前没有可显示原始地址的远程来源")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			confirmation := "reveal:" + sourceID
+			if m.sensitiveConfirm != confirmation {
+				m.sensitiveConfirm = confirmation
+				m.revealedURL = ""
+				m.err = nil
+				m.status = runtimeapi.SensitiveDataWarning + " 再按一次 Ctrl+U 确认显示。"
+				return m, nil
+			}
+			m.busy = true
+			m.status = "正在读取来源原始地址…"
+			return m, m.revealSourceURLCmd(sourceID)
+		case "ctrl+g":
+			if m.sensitiveConfirm != "diagnostics" {
+				m.busy = true
+				m.status = runtimeapi.SensitiveDataWarning + " 正在生成默认脱敏预览…"
+				return m, m.previewDiagnosticsCmd()
+			}
+			m.busy = true
+			m.status = "正在生成默认脱敏诊断包…"
+			return m, m.createDiagnosticsCmd()
 		case "y":
 			sourceID := m.selectedSource()
 			if sourceID == "" {
@@ -584,6 +656,19 @@ func (m Model) View() tea.View {
 			lines = append(lines, fmt.Sprintf("%s · %s · %s", origin.Path, origin.Origin, origin.Status))
 		}
 	}
+	if m.revealedURL != "" {
+		lines = append(lines, "", warnStyle.Render("来源原始地址："+m.revealedURL))
+	}
+	if len(m.diagnostics.Items) > 0 {
+		lines = append(lines, "", labelStyle.Render("诊断包预览"))
+		for _, item := range m.diagnostics.Items {
+			sensitivity := "已脱敏"
+			if item.Sensitive {
+				sensitivity = "敏感"
+			}
+			lines = append(lines, fmt.Sprintf("%s · %d 字节 · %s", item.Name, item.Size, sensitivity))
+		}
+	}
 	if m.lastOperation.ID != "" {
 		lines = append(lines,
 			"",
@@ -642,7 +727,8 @@ func (m Model) View() tea.View {
 		"",
 		renderStatus(m.status, m.err, m.busy),
 		"",
-		mutedStyle.Render("[/] 选择来源 · u 添加远程来源 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		warnStyle.Render(runtimeapi.SensitiveDataWarning),
+		mutedStyle.Render("[/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -753,7 +839,7 @@ func (m Model) addResourceCmd(draft resourceDraft) tea.Cmd {
 
 func (m Model) getOverrideCmd() tea.Cmd {
 	return func() tea.Msg {
-		document, err := m.client.GetAdvancedOverride(m.ctx)
+		document, err := m.client.GetAdvancedOverride(m.ctx, true)
 		if err != nil {
 			return errMsg{err: err}
 		}
@@ -870,6 +956,36 @@ func (m Model) verifyCmd() tea.Cmd {
 	}
 }
 
+func (m Model) revealSourceURLCmd(sourceID string) tea.Cmd {
+	return func() tea.Msg {
+		response, err := m.client.RevealSourceURL(m.ctx, sourceID, true)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return revealSourceURLMsg{response: response}
+	}
+}
+
+func (m Model) previewDiagnosticsCmd() tea.Cmd {
+	return func() tea.Msg {
+		preview, err := m.client.PreviewDiagnostics(m.ctx, runtimeapi.DiagnosticsRequest{})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return diagnosticsPreviewMsg{preview: preview}
+	}
+}
+
+func (m Model) createDiagnosticsCmd() tea.Cmd {
+	return func() tea.Msg {
+		result, err := m.client.CreateDiagnostics(m.ctx, runtimeapi.DiagnosticsRequest{})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return diagnosticsResultMsg{result: result}
+	}
+}
+
 func renderStatus(status string, err error, busy bool) string {
 	if err != nil {
 		return errorStyle.Render(status)
@@ -891,10 +1007,10 @@ func publicErrorMessage(err error) string {
 	if errors.As(err, &candidate) {
 		if strings.Contains(strings.ToLower(candidate.Error()), "version") ||
 			strings.Contains(strings.ToLower(candidate.Error()), "protocol") {
-			return candidate.Error() + "；请重启或更新界面"
+			return runtimeprivacy.RedactText(candidate.Error()) + "；请重启或更新界面"
 		}
 	}
-	return err.Error()
+	return runtimeprivacy.RedactError(err)
 }
 
 func operationStatus(operation runtimeapi.Operation) string {
@@ -923,8 +1039,10 @@ func operationStatus(operation runtimeapi.Operation) string {
 }
 
 func (m *Model) syncSelectedSource() {
+	previousSourceID := m.selectedSourceID
 	if len(m.snapshot.Sources.Items) == 0 {
 		m.selectedSourceID = ""
+		m.clearRevealedSource(previousSourceID)
 		return
 	}
 	for _, source := range m.snapshot.Sources.Items {
@@ -936,17 +1054,21 @@ func (m *Model) syncSelectedSource() {
 		for _, source := range m.snapshot.Sources.Items {
 			if source.ID == m.snapshot.Sources.CurrentSourceID {
 				m.selectedSourceID = source.ID
+				m.clearRevealedSource(previousSourceID)
 				return
 			}
 		}
 	}
 	m.selectedSourceID = m.snapshot.Sources.Items[0].ID
+	m.clearRevealedSource(previousSourceID)
 }
 
 func (m *Model) selectAdjacentSource(forward bool) {
 	items := m.snapshot.Sources.Items
 	if len(items) == 0 {
+		previousSourceID := m.selectedSourceID
 		m.selectedSourceID = ""
+		m.clearRevealedSource(previousSourceID)
 		return
 	}
 	index := 0
@@ -961,7 +1083,19 @@ func (m *Model) selectAdjacentSource(forward bool) {
 	} else {
 		index = (index - 1 + len(items)) % len(items)
 	}
+	previousSourceID := m.selectedSourceID
 	m.selectedSourceID = items[index].ID
+	m.clearRevealedSource(previousSourceID)
+}
+
+func (m *Model) clearRevealedSource(previousSourceID string) {
+	if previousSourceID == m.selectedSourceID {
+		return
+	}
+	m.revealedURL = ""
+	if strings.HasPrefix(m.sensitiveConfirm, "reveal:") {
+		m.sensitiveConfirm = ""
+	}
 }
 
 func (m Model) selectedSource() string {

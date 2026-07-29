@@ -261,7 +261,7 @@ func submitRunningLifecycleOperation(
 	if err != nil {
 		t.Fatalf("observe Runtime before lifecycle operation: %v", err)
 	}
-	operation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	operation, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  action + "-" + now.Format(time.RFC3339Nano),
 		IfRevision: snapshot.Revision,
 		Action:     runtimeapi.Action{Kind: action},

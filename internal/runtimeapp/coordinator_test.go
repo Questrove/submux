@@ -2,6 +2,7 @@ package runtimeapp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -89,7 +90,7 @@ func TestCoordinatorRunsPersistedOperationAfterSubmission(t *testing.T) {
 	go func() { result <- coordinator.Run(serviceContext) }()
 
 	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
-	operation, duplicate, err := coordinator.Execute(context.Background(), peer, "test", runtimeapi.CreateOperationRequest{
+	operation, duplicate, err := coordinator.Execute(context.Background(), peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "request-one",
 		IfRevision: 1,
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
@@ -144,7 +145,7 @@ func TestCoordinatorCancelsOnlyCancellableRunningStage(t *testing.T) {
 	result := make(chan error, 1)
 	go func() { result <- coordinator.Run(serviceContext) }()
 	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
-	operation, _, err := coordinator.Execute(context.Background(), peer, "test", runtimeapi.CreateOperationRequest{
+	operation, _, err := coordinator.Execute(context.Background(), peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "request-one",
 		IfRevision: 1,
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
@@ -164,7 +165,7 @@ func TestCoordinatorCancelsOnlyCancellableRunningStage(t *testing.T) {
 		cancelService()
 		t.Fatalf("observe Runtime before cancellation: %v", err)
 	}
-	cancelledOperation, _, err := coordinator.CancelOperation(context.Background(), peer, operation.ID, runtimeapi.CancelOperationRequest{
+	cancelledOperation, _, err := coordinator.CancelOperation(context.Background(), peer, "test", "test", operation.ID, runtimeapi.CancelOperationRequest{
 		RequestID:  "cancel-one",
 		IfRevision: snapshot.Revision,
 	})
@@ -211,7 +212,7 @@ func TestClientContextEndingDoesNotCancelPersistedOperation(t *testing.T) {
 	go func() { result <- coordinator.Run(serviceContext) }()
 	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
 	clientContext, cancelClient := context.WithCancel(context.Background())
-	operation, _, err := coordinator.Execute(clientContext, peer, "test", runtimeapi.CreateOperationRequest{
+	operation, _, err := coordinator.Execute(clientContext, peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "request-one",
 		IfRevision: 1,
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
@@ -232,6 +233,62 @@ func TestClientContextEndingDoesNotCancelPersistedOperation(t *testing.T) {
 	cancelService()
 	if err := <-result; err != nil {
 		t.Fatalf("stop Runtime coordinator: %v", err)
+	}
+}
+
+func TestCoordinatorRevealsSourceOnlyAfterConfirmationAndAuditsNoSecret(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	source, err := state.CreateRemoteSource(runtimestate.RemoteSourceRecord{
+		ID:                     "src_0123456789abcdef0123456789abcdef",
+		Type:                   runtimeapi.SourceTypeRemoteHTTP,
+		Name:                   "primary",
+		URL:                    "https://user:pass@example.com/config?token=one&token=two",
+		RedactedTarget:         "https://example.com:443/…",
+		Route:                  runtimeapi.SourceRouteDirect,
+		RefreshIntervalSeconds: 900,
+		TimeoutSeconds:         30,
+		MaxResponseBytes:       8 << 20,
+	}, []byte("proxies: []\n"), []byte("mixed-port: 7890\n"), "op-source", now)
+	if err != nil {
+		t.Fatalf("create Runtime source: %v", err)
+	}
+	coordinator := &Coordinator{State: state, Version: "test", Now: func() time.Time { return now }}
+	peer := runtimeapi.PeerIdentity{Platform: "windows", SID: "S-1-5-21-test"}
+	if _, err := coordinator.RevealSourceURL(context.Background(), peer, "gui", "test", "request-denied", runtimeapi.RevealSourceURLRequest{
+		SourceID: source.ID,
+	}); err == nil {
+		t.Fatal("source URL was revealed without confirmation")
+	}
+	response, err := coordinator.RevealSourceURL(context.Background(), peer, "gui", "test", "request-reveal", runtimeapi.RevealSourceURLRequest{
+		SourceID: source.ID,
+		Confirm:  true,
+	})
+	if err != nil || response.URL != source.URL {
+		t.Fatalf("reveal Runtime source URL response=%#v err=%v", response, err)
+	}
+	audit, err := state.RecentAudit(10)
+	if err != nil || len(audit) != 1 {
+		t.Fatalf("read source reveal audit=%#v err=%v", audit, err)
+	}
+	record := audit[0]
+	if record.Actor != peer.Key() || record.ClientType != "gui" || record.ClientVersion != "test" ||
+		record.RequestID != "request-reveal" || record.Action != "source.reveal_url" ||
+		record.ObjectID != source.ID || record.Result != "succeeded" {
+		t.Fatalf("source reveal audit=%#v", record)
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("encode source reveal audit: %v", err)
+	}
+	for _, secret := range []string{"user:pass", "token=one", "token=two"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("source reveal audit leaked %q: %s", secret, encoded)
+		}
 	}
 }
 
@@ -370,4 +427,59 @@ func waitForOperationState(t *testing.T, state *runtimestate.Store, id, expected
 	}
 	operation, _ := state.GetOperation(id)
 	t.Fatalf("operation state = %q, want %q", operation.State, expected)
+}
+
+func TestAdvancedOverrideReadRequiresConfirmationAndWritesContentFreeAudit(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	override := []byte("proxies:\n  - password: super-secret\n")
+	if _, err := state.SetAdvancedOverride(override, "op-override", now); err != nil {
+		t.Fatalf("set Runtime advanced override: %v", err)
+	}
+	coordinator := &Coordinator{
+		State: state,
+		Now:   func() time.Time { return now.Add(time.Minute) },
+	}
+	peer := runtimeapi.PeerIdentity{Platform: "windows", SID: "S-1-5-21-test"}
+
+	if _, err := coordinator.GetAdvancedOverride(
+		t.Context(),
+		peer,
+		"cli",
+		"test",
+		"request-unconfirmed",
+		false,
+	); err == nil {
+		t.Fatal("advanced override read did not require confirmation")
+	}
+	document, err := coordinator.GetAdvancedOverride(
+		t.Context(),
+		peer,
+		"cli",
+		"test",
+		"request-confirmed",
+		true,
+	)
+	if err != nil || document.YAML != string(override) {
+		t.Fatalf("read advanced override document=%#v err=%v", document, err)
+	}
+	audit, err := state.RecentAudit(10)
+	if err != nil {
+		t.Fatalf("read Runtime audit: %v", err)
+	}
+	if len(audit) != 1 || audit[0].Action != "override.reveal" ||
+		audit[0].Actor != peer.Key() || audit[0].ObjectID != "advanced-override" {
+		t.Fatalf("advanced override audit=%#v", audit)
+	}
+	encoded, err := json.Marshal(audit[0])
+	if err != nil {
+		t.Fatalf("encode Runtime audit: %v", err)
+	}
+	if strings.Contains(string(encoded), "super-secret") || strings.Contains(string(encoded), "proxies:") {
+		t.Fatalf("advanced override audit leaked content: %s", encoded)
+	}
 }

@@ -23,9 +23,12 @@ import (
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimeapp"
 	"submux/internal/runtimecore"
+	"submux/internal/runtimediag"
 	"submux/internal/runtimeinstance"
 	"submux/internal/runtimeipc"
+	"submux/internal/runtimelog"
 	"submux/internal/runtimepaths"
+	"submux/internal/runtimeprivacy"
 	"submux/internal/runtimeprocess"
 	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
@@ -82,7 +85,10 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "override" {
 		return runOverride(arguments[1:], os.Stdin, stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|source|resource|override|version|--version-json]")
+	if arguments[0] == "diagnostics" {
+		return runDiagnostics(arguments[1:], stdout, stderr)
+	}
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|source|resource|override|diagnostics|version|--version-json]")
 	return 2
 }
 
@@ -98,7 +104,7 @@ func runTUI(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Wri
 		fmt.Fprintln(stderr, "tui does not accept positional arguments")
 		return 2
 	}
-	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	client, err := runtimeipc.NewTypedClient(*endpoint, "tui", buildinfo.Current().Version)
 	if err != nil {
 		writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
 		return 1
@@ -156,6 +162,31 @@ func runServe(arguments []string, stderr io.Writer) int {
 		return 1
 	}
 	defer state.Close()
+	logs, err := runtimelog.Open(filepath.Join(*stateRoot, "logs"))
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
+		return 1
+	}
+	if err := logs.GC(); err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
+		return 1
+	}
+	runtimeLogWriter, err := logs.Writer("runtime", "service")
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInternal, err.Error(), false)
+		return 1
+	}
+	defer runtimeLogWriter.Flush()
+	mihomoStdout, err := logs.Writer("mihomo", "stdout")
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInternal, err.Error(), false)
+		return 1
+	}
+	mihomoStderr, err := logs.Writer("mihomo", "stderr")
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInternal, err.Error(), false)
+		return 1
+	}
 
 	listener, err := runtimeipc.Listen(*endpoint)
 	if err != nil {
@@ -172,6 +203,8 @@ func runServe(arguments []string, stderr io.Writer) int {
 	process := &runtimeprocess.Process{
 		ConfigPath: filepath.Join(*stateRoot, "config", "current", "config.yaml"),
 		DataDir:    filepath.Join(*stateRoot, "mihomo-data"),
+		Stdout:     mihomoStdout,
+		Stderr:     mihomoStderr,
 	}
 	core := &runtimecore.Store{
 		Root:       filepath.Join(*stateRoot, "core"),
@@ -205,9 +238,14 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Target: executor,
 	}
 	coordinator := &runtimeapp.Coordinator{
-		State:         state,
-		Executor:      executor,
-		Recovery:      supervisor,
+		State:    state,
+		Executor: executor,
+		Recovery: supervisor,
+		Diagnostics: &runtimediag.Service{
+			State:          state,
+			StateRoot:      *stateRoot,
+			RuntimeVersion: buildinfo.Current().Version,
+		},
 		Version:       buildinfo.Current().Version,
 		QueueCapacity: runtimeapp.DefaultQueueCapacity,
 	}
@@ -221,7 +259,8 @@ func runServe(arguments []string, stderr io.Writer) int {
 	defer stopSignal()
 	serviceContext, stop := context.WithCancel(contextWithSignal)
 	defer stop()
-	log.New(stderr, "submux-runtime: ", log.LstdFlags).Printf("serving local IPC at %s", *endpoint)
+	runtimeLogger := log.New(runtimeLogWriter, "submux-runtime: ", log.LstdFlags)
+	runtimeLogger.Print("serving local IPC")
 	workerResult := make(chan error, 1)
 	go func() {
 		workerErr := coordinator.Run(serviceContext)
@@ -230,13 +269,23 @@ func runServe(arguments []string, stderr io.Writer) int {
 			stop()
 		}
 	}()
+	logGCResult := make(chan error, 1)
+	go func() {
+		logGCErr := logs.RunGC(serviceContext, runtimelog.DefaultGCInterval)
+		logGCResult <- logGCErr
+		if logGCErr != nil {
+			stop()
+		}
+	}()
 	serverErr := server.Serve(serviceContext, listener)
 	stop()
 	workerErr := <-workerResult
+	logGCErr := <-logGCResult
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	processErr := process.Stop(shutdownContext)
-	if err := errors.Join(serverErr, workerErr, processErr); err != nil {
+	if err := errors.Join(serverErr, workerErr, logGCErr, processErr); err != nil {
+		runtimeLogger.Printf("service stopped with error: %s", runtimeprivacy.RedactError(err))
 		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
 		return 1
 	}
@@ -281,7 +330,7 @@ func runStatus(arguments []string, stdout io.Writer, stderr io.Writer) int {
 
 	if *jsonOutput {
 		if err := json.NewEncoder(stdout).Encode(snapshot); err != nil {
-			fmt.Fprintf(stderr, "encode Runtime status: %v\n", err)
+			fmt.Fprintf(stderr, "encode Runtime status: %s\n", runtimeprivacy.RedactError(err))
 			return 1
 		}
 		return 0
@@ -335,7 +384,7 @@ func runImport(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.
 	if flags.Arg(0) != "-" {
 		file, err = os.Open(flags.Arg(0))
 		if err != nil {
-			fmt.Fprintf(stderr, "open import file: %v\n", err)
+			fmt.Fprintf(stderr, "open import file: %s\n", runtimeprivacy.RedactError(err))
 			return 1
 		}
 		defer file.Close()
@@ -343,7 +392,7 @@ func runImport(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.
 	}
 	body, err := io.ReadAll(io.LimitReader(reader, runtimestate.MaxImportBytes+1))
 	if err != nil {
-		fmt.Fprintf(stderr, "read import: %v\n", err)
+		fmt.Fprintf(stderr, "read import: %s\n", runtimeprivacy.RedactError(err))
 		return 1
 	}
 	if len(body) == 0 || len(body) > runtimestate.MaxImportBytes {
@@ -352,7 +401,7 @@ func runImport(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -388,7 +437,7 @@ func runOperation(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -441,7 +490,7 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -576,12 +625,12 @@ func runResourceAdd(
 	}
 	body, err := readContentArgument(flags.Arg(0), stdin, runtimestate.MaxManagedResourceBytes)
 	if err != nil {
-		fmt.Fprintf(stderr, "read managed resource: %v\n", err)
+		fmt.Fprintf(stderr, "read managed resource: %s\n", runtimeprivacy.RedactError(err))
 		return 1
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -631,7 +680,7 @@ func runResourceList(arguments []string, stdout io.Writer, stderr io.Writer) int
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -669,6 +718,7 @@ func runOverrideGet(arguments []string, stdout io.Writer, stderr io.Writer) int 
 	flags.SetOutput(stderr)
 	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
 	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	reveal := flags.Bool("reveal", false, "confirm displaying the advanced override body")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -676,13 +726,18 @@ func runOverrideGet(arguments []string, stdout io.Writer, stderr io.Writer) int 
 		fmt.Fprintln(stderr, "override get does not accept positional arguments")
 		return 2
 	}
+	if !*reveal {
+		fmt.Fprintln(stderr, runtimeapi.SensitiveDataWarning)
+		fmt.Fprintln(stderr, "override get requires --reveal")
+		return 2
+	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
-	document, err := client.GetAdvancedOverride(context.Background())
+	document, err := client.GetAdvancedOverride(context.Background(), true)
 	if err != nil {
 		return writeClientFailure(stdout, stderr, *jsonOutput, err)
 	}
@@ -718,12 +773,12 @@ func runOverrideSet(
 	}
 	body, err := readContentArgument(flags.Arg(0), stdin, runtimestate.MaxAdvancedOverrideBytes)
 	if err != nil {
-		fmt.Fprintf(stderr, "read advanced override: %v\n", err)
+		fmt.Fprintf(stderr, "read advanced override: %s\n", runtimeprivacy.RedactError(err))
 		return 1
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -763,7 +818,7 @@ func runSource(
 	stderr io.Writer,
 ) int {
 	if len(arguments) == 0 {
-		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|delete|import|list|refresh|switch]")
+		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|delete|import|list|refresh|reveal-url|switch]")
 		return 2
 	}
 	switch arguments[0] {
@@ -779,12 +834,47 @@ func runSource(
 		return runSourceList(arguments[1:], stdout, stderr)
 	case "refresh":
 		return runSourceRefresh(arguments[1:], stdout, stderr)
+	case "reveal-url":
+		return runSourceRevealURL(arguments[1:], stdout, stderr)
 	case "switch":
 		return runSourceSwitch(arguments[1:], stdout, stderr)
 	default:
-		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|delete|import|list|refresh|switch]")
+		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|delete|import|list|refresh|reveal-url|switch]")
 		return 2
 	}
+}
+
+func runSourceRevealURL(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("source reveal-url", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	reveal := flags.Bool("reveal", false, "explicitly confirm revealing the full source URL")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 || !*reveal {
+		fmt.Fprintln(stderr, "source reveal-url requires --reveal and one <source-id>")
+		return 2
+	}
+	fmt.Fprintln(stderr, runtimeapi.SensitiveDataWarning)
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	result, err := client.RevealSourceURL(context.Background(), flags.Arg(0), true)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(stdout).Encode(result)
+	} else {
+		fmt.Fprintln(stdout, result.URL)
+	}
+	return 0
 }
 
 func runSourceAdd(
@@ -825,7 +915,7 @@ func runSourceAdd(
 	if *passwordStdin {
 		body, err := io.ReadAll(io.LimitReader(stdin, 4097))
 		if err != nil {
-			fmt.Fprintf(stderr, "read source password: %v\n", err)
+			fmt.Fprintf(stderr, "read source password: %s\n", runtimeprivacy.RedactError(err))
 			return 1
 		}
 		if len(body) > 4096 {
@@ -838,7 +928,7 @@ func runSourceAdd(
 	if *customCAFile != "" {
 		body, err := readSmallRegularFile(*customCAFile, runtimesource.MaximumCustomCABytes)
 		if err != nil {
-			fmt.Fprintf(stderr, "read source custom CA: %v\n", err)
+			fmt.Fprintf(stderr, "read source custom CA: %s\n", runtimeprivacy.RedactError(err))
 			return 1
 		}
 		customCAPEM = string(body)
@@ -867,7 +957,7 @@ func runSourceAdd(
 	}
 	body, err := json.Marshal(draft)
 	if err != nil {
-		fmt.Fprintf(stderr, "encode source draft: %v\n", err)
+		fmt.Fprintf(stderr, "encode source draft: %s\n", runtimeprivacy.RedactError(err))
 		return 1
 	}
 	return submitSourceDraft(
@@ -902,12 +992,12 @@ func runSourceImport(
 	}
 	body, err := readContentArgument(flags.Arg(0), stdin, runtimestate.MaxImportBytes)
 	if err != nil {
-		fmt.Fprintf(stderr, "read imported source: %v\n", err)
+		fmt.Fprintf(stderr, "read imported source: %s\n", runtimeprivacy.RedactError(err))
 		return 1
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -956,7 +1046,7 @@ func runSourceList(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -993,7 +1083,7 @@ func runSourceRefresh(arguments []string, stdout io.Writer, stderr io.Writer) in
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -1039,7 +1129,7 @@ func runSourceApply(arguments []string, stdout io.Writer, stderr io.Writer) int 
 	}
 	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -1136,6 +1226,88 @@ func runSourceDelete(arguments []string, stdout io.Writer, stderr io.Writer) int
 	)
 }
 
+func runDiagnostics(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 || (arguments[0] != "preview" && arguments[0] != "create") {
+		fmt.Fprintln(stderr, "usage: submux-runtime diagnostics [preview|create] [options]")
+		return 2
+	}
+	command := arguments[0]
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("diagnostics "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	includeRawConfig := flags.Bool("include-raw-config", false, "include the current raw Mihomo configuration")
+	includeFullLogs := flags.Bool("include-full-logs", false, "include retained Runtime and Mihomo logs")
+	includeNetworkInfo := flags.Bool("include-network-info", false, "include local Runtime network state")
+	confirmSensitive := flags.Bool("confirm-sensitive", false, "confirm inclusion of every selected sensitive item")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "diagnostics does not accept positional arguments")
+		return 2
+	}
+	request := runtimeapi.DiagnosticsRequest{
+		IncludeRawConfig:   *includeRawConfig,
+		IncludeFullLogs:    *includeFullLogs,
+		IncludeNetworkInfo: *includeNetworkInfo,
+		ConfirmSensitive:   *confirmSensitive,
+	}
+	if command == "create" &&
+		(request.IncludeRawConfig || request.IncludeFullLogs || request.IncludeNetworkInfo) &&
+		!request.ConfirmSensitive {
+		fmt.Fprintln(stderr, "sensitive diagnostics require --confirm-sensitive after reviewing diagnostics preview")
+		return 2
+	}
+	fmt.Fprintln(stderr, runtimeapi.SensitiveDataWarning)
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	if command == "preview" {
+		preview, err := client.PreviewDiagnostics(context.Background(), request)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		if *jsonOutput {
+			_ = json.NewEncoder(stdout).Encode(preview)
+			return 0
+		}
+		for _, item := range preview.Items {
+			sensitivity := "已脱敏"
+			if item.Sensitive {
+				sensitivity = "敏感"
+			}
+			fmt.Fprintf(stdout, "%s\t%d bytes\t%s\n", item.Name, item.Size, sensitivity)
+		}
+		return 0
+	}
+	preview, err := client.PreviewDiagnostics(context.Background(), request)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	for _, item := range preview.Items {
+		sensitivity := "已脱敏"
+		if item.Sensitive {
+			sensitivity = "敏感"
+		}
+		fmt.Fprintf(stderr, "%s\t%d bytes\t%s\n", item.Name, item.Size, sensitivity)
+	}
+	result, err := client.CreateDiagnostics(context.Background(), request)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *jsonOutput {
+		_ = json.NewEncoder(stdout).Encode(result)
+	} else {
+		fmt.Fprintf(stdout, "Diagnostics: %s (%d bytes, sha256:%s)\n", result.FileName, result.Size, result.SHA256)
+	}
+	return 0
+}
+
 func submitSourceAction(
 	endpoint string,
 	action runtimeapi.Action,
@@ -1146,7 +1318,7 @@ func submitSourceAction(
 ) int {
 	client, err := runtimeipc.NewClient(endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -1180,7 +1352,7 @@ func submitSourceDraft(
 ) int {
 	client, err := runtimeipc.NewClient(endpoint, buildinfo.Current().Version)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
 		return 1
 	}
 	defer client.CloseIdleConnections()
@@ -1372,18 +1544,19 @@ func writeClientFailure(stdout io.Writer, stderr io.Writer, asJSON bool, err err
 }
 
 func writeStatusError(stdout io.Writer, stderr io.Writer, asJSON bool, clientError *runtimeipc.ClientError) int {
+	message := runtimeprivacy.RedactText(clientError.Message)
 	if asJSON {
 		_ = json.NewEncoder(stdout).Encode(runtimeapi.ErrorEnvelope{
 			ProtocolVersion: runtimeapi.ProtocolVersion,
 			Error: runtimeapi.ProtocolError{
 				Code:      clientError.Code,
-				Message:   clientError.Message,
+				Message:   message,
 				Retryable: clientError.Retryable,
 			},
 			CurrentRevision: clientError.CurrentRevision,
 		})
 	} else {
-		writeCLIError(stderr, clientError.Code, clientError.Message, clientError.Retryable)
+		writeCLIError(stderr, clientError.Code, message, clientError.Retryable)
 	}
 	if clientError.Code == runtimeapi.ErrorProtocolUnsupported {
 		return 4
@@ -1398,7 +1571,7 @@ func writeStatusError(stdout io.Writer, stderr io.Writer, asJSON bool, clientErr
 }
 
 func writeCLIError(writer io.Writer, code string, message string, retryable bool) {
-	fmt.Fprintf(writer, "%s: %s", code, message)
+	fmt.Fprintf(writer, "%s: %s", code, runtimeprivacy.RedactText(message))
 	if retryable {
 		fmt.Fprint(writer, " (retryable)")
 	}

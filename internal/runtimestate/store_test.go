@@ -2,10 +2,13 @@ package runtimestate
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"go.etcd.io/bbolt"
 )
 
 func TestStorePersistsInstallationAndInitialSnapshot(t *testing.T) {
@@ -90,5 +93,50 @@ func TestOpenRejectsRelativeStateRoot(t *testing.T) {
 	if store, err := Open("runtime-state"); err == nil {
 		_ = store.Close()
 		t.Fatal("Open accepted a relative Runtime state root")
+	}
+}
+
+func TestOpenInitializesAuditCursorInExistingState(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close Runtime state: %v", err)
+	}
+
+	db, err := bbolt.Open(filepath.Join(root, "runtime.db"), 0600, nil)
+	if err != nil {
+		t.Fatalf("open raw Runtime database: %v", err)
+	}
+	if err := db.Update(func(transaction *bbolt.Tx) error {
+		metadata := transaction.Bucket(metadataBucket)
+		if metadata.Get(eventCursorKey) == nil {
+			return errors.New("existing Runtime state has no event cursor")
+		}
+		return metadata.Delete(auditCursorKey)
+	}); err != nil {
+		_ = db.Close()
+		t.Fatalf("remove audit cursor: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw Runtime database: %v", err)
+	}
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatalf("reopen Runtime state: %v", err)
+	}
+	defer reopened.Close()
+	auditCursorExists := false
+	if err := reopened.db.View(func(transaction *bbolt.Tx) error {
+		auditCursorExists = transaction.Bucket(metadataBucket).Get(auditCursorKey) != nil
+		return nil
+	}); err != nil {
+		t.Fatalf("read audit cursor: %v", err)
+	}
+	if !auditCursorExists {
+		t.Fatal("audit cursor was not initialized")
 	}
 }

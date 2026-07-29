@@ -171,6 +171,45 @@ fn runtime_verify_proxy(bridge: State<'_, RuntimeBridge>) -> Result<Value, Bridg
     bridge.verify_proxy()
 }
 
+#[tauri::command]
+fn runtime_reveal_source_url(
+    bridge: State<'_, RuntimeBridge>,
+    source_id: String,
+    confirm: bool,
+) -> Result<Value, BridgeError> {
+    bridge.reveal_source_url(&source_id, confirm)
+}
+
+#[tauri::command]
+fn runtime_preview_diagnostics(
+    bridge: State<'_, RuntimeBridge>,
+    include_raw_config: bool,
+    include_full_logs: bool,
+    include_network_info: bool,
+) -> Result<Value, BridgeError> {
+    bridge.preview_diagnostics(
+        include_raw_config,
+        include_full_logs,
+        include_network_info,
+    )
+}
+
+#[tauri::command]
+fn runtime_create_diagnostics(
+    bridge: State<'_, RuntimeBridge>,
+    include_raw_config: bool,
+    include_full_logs: bool,
+    include_network_info: bool,
+    confirm_sensitive: bool,
+) -> Result<Value, BridgeError> {
+    bridge.create_diagnostics(
+        include_raw_config,
+        include_full_logs,
+        include_network_info,
+        confirm_sensitive,
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -197,7 +236,10 @@ pub fn run() {
             runtime_get_operation,
             runtime_wait_operation,
             runtime_cancel_operation,
-            runtime_verify_proxy
+            runtime_verify_proxy,
+            runtime_reveal_source_url,
+            runtime_preview_diagnostics,
+            runtime_create_diagnostics
         ])
         .run(tauri::generate_context!())
         .expect("could not run Submux Runtime GUI");

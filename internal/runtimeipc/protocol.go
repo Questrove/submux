@@ -11,6 +11,7 @@ import (
 const (
 	HeaderRequestID       = "X-Submux-Request-ID"
 	HeaderProtocolVersion = "X-Submux-Protocol-Version"
+	HeaderClientType      = "X-Submux-Client-Type"
 	HeaderClientVersion   = "X-Submux-Client-Version"
 	HeaderContentSize     = "X-Submux-Content-Size"
 	HeaderContentSHA256   = "X-Submux-Content-SHA256"

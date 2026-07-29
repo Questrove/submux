@@ -106,7 +106,9 @@
           <button id="switch-source-cached" class="secondary" disabled>刷新失败时允许缓存切换</button>
           <button id="delete-source" class="danger" disabled>删除所选来源</button>
           <button id="apply-source" disabled>重新应用当前来源</button>
+          <button id="reveal-source-url" class="secondary" disabled>显示原始地址</button>
         </div>
+        <pre id="revealed-source-url" class="hidden"></pre>
         <hr />
         <h3>添加远程或 Submux 输出来源</h3>
         <div class="form-grid">
@@ -191,6 +193,28 @@
         <div class="actions">
           <button id="add-imported-source">校验并添加本机来源</button>
         </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">LOCAL DIAGNOSTICS</p>
+            <h2>诊断包</h2>
+          </div>
+        </div>
+        <p id="sensitive-warning" class="notice">
+          敏感内容可能包含访问凭据、配置正文、完整日志或本机信息；仅在确认当前显示与保存环境安全时继续。
+        </p>
+        <div class="check-grid">
+          <label><input id="diagnostics-raw-config" type="checkbox" /> 包含原始配置</label>
+          <label><input id="diagnostics-full-logs" type="checkbox" /> 包含完整日志</label>
+          <label><input id="diagnostics-network-info" type="checkbox" /> 包含本机网络信息</label>
+        </div>
+        <div class="actions">
+          <button id="preview-diagnostics" class="secondary">预览内容</button>
+          <button id="create-diagnostics">保存到本机</button>
+        </div>
+        <pre id="diagnostics-preview">尚未预览诊断包。</pre>
       </section>
 
       <section class="panel">

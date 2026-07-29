@@ -649,6 +649,13 @@ func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
 	var overrideGetOut bytes.Buffer
 	stderr.Reset()
 	exitCode = runOverrideGet([]string{"--endpoint", endpoint}, &overrideGetOut, &stderr)
+	if exitCode != 2 || !strings.Contains(stderr.String(), runtimeapi.SensitiveDataWarning) {
+		cancel()
+		t.Fatalf("unconfirmed override get exit=%d stdout=%q stderr=%s", exitCode, overrideGetOut.String(), stderr.String())
+	}
+	overrideGetOut.Reset()
+	stderr.Reset()
+	exitCode = runOverrideGet([]string{"--endpoint", endpoint, "--reveal"}, &overrideGetOut, &stderr)
 	if exitCode != 0 || overrideGetOut.String() != overrideYAML {
 		cancel()
 		t.Fatalf("override get exit=%d stdout=%q stderr=%s", exitCode, overrideGetOut.String(), stderr.String())
@@ -683,6 +690,58 @@ func TestOpenedContentFileMustMatchInspectedFile(t *testing.T) {
 	}
 	if err := validateOpenedSmallRegularFile(first, second, 1024); err == nil {
 		t.Fatal("accepted a content file that changed while opening")
+	}
+}
+
+func TestSensitiveCLICommandsUseSharedWarningAndRedactErrors(t *testing.T) {
+	sourceID := "src_" + strings.Repeat("a", 32)
+	for _, test := range []struct {
+		name string
+		run  func(*bytes.Buffer, *bytes.Buffer) int
+	}{
+		{
+			name: "source reveal",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return runSourceRevealURL(
+					[]string{"--endpoint", "", "--reveal", sourceID},
+					stdout,
+					stderr,
+				)
+			},
+		},
+		{
+			name: "diagnostics preview",
+			run: func(stdout, stderr *bytes.Buffer) int {
+				return runDiagnostics(
+					[]string{"preview", "--endpoint", ""},
+					stdout,
+					stderr,
+				)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			if exitCode := test.run(&stdout, &stderr); exitCode == 0 {
+				t.Fatalf("sensitive command unexpectedly succeeded: stdout=%s stderr=%s", stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), runtimeapi.SensitiveDataWarning) {
+				t.Fatalf("sensitive warning missing: %s", stderr.String())
+			}
+		})
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	writeStatusError(&stdout, &stderr, true, &runtimeipc.ClientError{
+		Code:    runtimeapi.ErrorServiceUnavailable,
+		Message: `GET https://user:pass@[2001:db8::1]/config?token=one&token=two failed at C:\Users\Test\config.yaml`,
+	})
+	for _, secret := range []string{"user", "pass", "one", "two", `C:\Users\Test`} {
+		if strings.Contains(stdout.String(), secret) {
+			t.Fatalf("JSON CLI error leaked %q: %s", secret, stdout.String())
+		}
 	}
 }
 

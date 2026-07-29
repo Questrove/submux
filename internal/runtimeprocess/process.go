@@ -20,6 +20,8 @@ type Process struct {
 	ConfigPath string
 	DataDir    string
 	SafePaths  []string
+	Stdout     io.Writer
+	Stderr     io.Writer
 
 	mu            sync.Mutex
 	cmd           *exec.Cmd
@@ -78,8 +80,14 @@ func (p *Process) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	command.Stdout = io.Discard
-	command.Stderr = io.Discard
+	command.Stdout = p.Stdout
+	if command.Stdout == nil {
+		command.Stdout = io.Discard
+	}
+	command.Stderr = p.Stderr
+	if command.Stderr == nil {
+		command.Stderr = io.Discard
+	}
 	configureCommand(command)
 	if err := command.Start(); err != nil {
 		return fmt.Errorf("start Mihomo: %w", err)
@@ -93,11 +101,19 @@ func (p *Process) Start(ctx context.Context) error {
 	p.startedAt = startedAt
 	go func() {
 		waitErr := command.Wait()
+		flushWriter(command.Stdout)
+		flushWriter(command.Stderr)
 		done <- waitErr
 		close(done)
 		p.finishRun(command, runID, startedAt, waitErr, time.Now().UTC())
 	}()
 	return nil
+}
+
+func flushWriter(writer io.Writer) {
+	if flusher, ok := writer.(interface{ Flush() error }); ok {
+		_ = flusher.Flush()
+	}
 }
 
 func (p *Process) finishRun(

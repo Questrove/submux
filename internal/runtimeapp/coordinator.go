@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimeprivacy"
 	"submux/internal/runtimestate"
 )
 
@@ -33,6 +34,11 @@ type ScheduledActionProvider interface {
 type RecoveryService interface {
 	RecoverStartup(context.Context) error
 	Run(context.Context) error
+}
+
+type DiagnosticsService interface {
+	Preview(context.Context, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsPreview, error)
+	Create(context.Context, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error)
 }
 
 type PublicError struct {
@@ -72,6 +78,7 @@ type Coordinator struct {
 	State         *runtimestate.Store
 	Executor      ActionExecutor
 	Recovery      RecoveryService
+	Diagnostics   DiagnosticsService
 	Version       string
 	Now           func() time.Time
 	QueueCapacity int
@@ -118,6 +125,7 @@ func (c *Coordinator) UploadImport(
 func (c *Coordinator) Execute(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
+	clientType string,
 	clientVersion string,
 	request runtimeapi.CreateOperationRequest,
 ) (runtimeapi.Operation, bool, error) {
@@ -134,7 +142,7 @@ func (c *Coordinator) Execute(
 	if capacity <= 0 {
 		capacity = DefaultQueueCapacity
 	}
-	operation, duplicate, err := c.State.SubmitOperation(peer, clientVersion, request, capacity, c.now())
+	operation, duplicate, err := c.State.SubmitOperation(peer, clientType, clientVersion, request, capacity, c.now())
 	if err != nil {
 		return runtimeapi.Operation{}, false, err
 	}
@@ -194,7 +202,11 @@ func (c *Coordinator) PreviewCandidate(
 
 func (c *Coordinator) GetAdvancedOverride(
 	ctx context.Context,
-	_ runtimeapi.PeerIdentity,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	confirm bool,
 ) (runtimeapi.AdvancedOverrideDocument, error) {
 	if err := ctx.Err(); err != nil {
 		return runtimeapi.AdvancedOverrideDocument{}, err
@@ -202,7 +214,36 @@ func (c *Coordinator) GetAdvancedOverride(
 	if c == nil || c.State == nil {
 		return runtimeapi.AdvancedOverrideDocument{}, errors.New("Runtime state is unavailable")
 	}
+	if !confirm {
+		return runtimeapi.AdvancedOverrideDocument{}, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Reading the advanced override requires an explicit confirmation",
+		}
+	}
 	body, record, err := c.State.AdvancedOverride()
+	result := "succeeded"
+	var auditError *runtimeapi.ProtocolError
+	if err != nil {
+		result = "failed"
+		auditError = &runtimeapi.ProtocolError{
+			Code:    runtimeapi.ErrorServiceUnavailable,
+			Message: "The Runtime advanced override could not be read",
+		}
+	}
+	if _, auditErr := c.State.RecordAudit(runtimeapi.AuditRecord{
+		RequestID:     requestID,
+		Actor:         peer.Key(),
+		ClientType:    clientType,
+		ClientVersion: clientVersion,
+		Action:        "override.reveal",
+		ObjectID:      "advanced-override",
+		Stage:         "completed",
+		Result:        result,
+		At:            c.now(),
+		Error:         auditError,
+	}); auditErr != nil {
+		return runtimeapi.AdvancedOverrideDocument{}, auditErr
+	}
 	if err != nil {
 		return runtimeapi.AdvancedOverrideDocument{}, err
 	}
@@ -215,6 +256,8 @@ func (c *Coordinator) GetAdvancedOverride(
 func (c *Coordinator) CancelOperation(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
 	id string,
 	request runtimeapi.CancelOperationRequest,
 ) (runtimeapi.Operation, bool, error) {
@@ -224,7 +267,7 @@ func (c *Coordinator) CancelOperation(
 	if c == nil || c.State == nil {
 		return runtimeapi.Operation{}, false, errors.New("Runtime state is unavailable")
 	}
-	operation, duplicate, err := c.State.CancelOperation(peer, id, request, c.now())
+	operation, duplicate, err := c.State.CancelOperation(peer, clientType, clientVersion, id, request, c.now())
 	if err != nil {
 		return runtimeapi.Operation{}, false, err
 	}
@@ -237,6 +280,129 @@ func (c *Coordinator) CancelOperation(
 		}
 	}
 	return operation, duplicate, nil
+}
+
+func (c *Coordinator) RevealSourceURL(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.RevealSourceURLRequest,
+) (runtimeapi.RevealSourceURLResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.RevealSourceURLResponse{}, err
+	}
+	if c == nil || c.State == nil {
+		return runtimeapi.RevealSourceURLResponse{}, errors.New("Runtime state is unavailable")
+	}
+	if !request.Confirm || !validSourceID(request.SourceID) {
+		return runtimeapi.RevealSourceURLResponse{}, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Revealing a source URL requires an explicit confirmation and a valid source ID",
+		}
+	}
+	record, err := c.State.GetRemoteSource(request.SourceID)
+	result := "succeeded"
+	var auditError *runtimeapi.ProtocolError
+	if err != nil {
+		result = "failed"
+		auditError = &runtimeapi.ProtocolError{
+			Code:    runtimeapi.ErrorNotFound,
+			Message: "The requested Runtime configuration source was not found",
+		}
+	}
+	if _, auditErr := c.State.RecordAudit(runtimeapi.AuditRecord{
+		RequestID:     requestID,
+		Actor:         peer.Key(),
+		ClientType:    clientType,
+		ClientVersion: clientVersion,
+		Action:        "source.reveal_url",
+		ObjectID:      request.SourceID,
+		Stage:         "completed",
+		Result:        result,
+		At:            c.now(),
+		Error:         auditError,
+	}); auditErr != nil {
+		return runtimeapi.RevealSourceURLResponse{}, auditErr
+	}
+	if err != nil {
+		return runtimeapi.RevealSourceURLResponse{}, &PublicError{
+			Code:    runtimeapi.ErrorNotFound,
+			Message: "The requested Runtime configuration source was not found",
+			Cause:   err,
+		}
+	}
+	return runtimeapi.RevealSourceURLResponse{SourceID: record.ID, URL: record.URL}, nil
+}
+
+func (c *Coordinator) PreviewDiagnostics(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.DiagnosticsRequest,
+) (runtimeapi.DiagnosticsPreview, error) {
+	if c == nil || c.State == nil || c.Diagnostics == nil {
+		return runtimeapi.DiagnosticsPreview{}, errors.New("Runtime diagnostics service is unavailable")
+	}
+	preview, err := c.Diagnostics.Preview(ctx, request)
+	result := "succeeded"
+	var auditError *runtimeapi.ProtocolError
+	if err != nil {
+		result = "failed"
+		auditError = &runtimeapi.ProtocolError{Code: runtimeapi.ErrorInvalidRequest, Message: runtimeprivacy.RedactError(err)}
+	}
+	if _, auditErr := c.State.RecordAudit(runtimeapi.AuditRecord{
+		RequestID:     requestID,
+		Actor:         peer.Key(),
+		ClientType:    clientType,
+		ClientVersion: clientVersion,
+		Action:        "diagnostics.preview",
+		Stage:         "completed",
+		Result:        result,
+		At:            c.now(),
+		Error:         auditError,
+	}); auditErr != nil {
+		return runtimeapi.DiagnosticsPreview{}, auditErr
+	}
+	return preview, err
+}
+
+func (c *Coordinator) CreateDiagnostics(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.DiagnosticsRequest,
+) (runtimeapi.DiagnosticsResult, error) {
+	if c == nil || c.State == nil || c.Diagnostics == nil {
+		return runtimeapi.DiagnosticsResult{}, errors.New("Runtime diagnostics service is unavailable")
+	}
+	result, err := c.Diagnostics.Create(ctx, request)
+	outcome := "succeeded"
+	var auditError *runtimeapi.ProtocolError
+	if err != nil {
+		outcome = "failed"
+		auditError = &runtimeapi.ProtocolError{Code: runtimeapi.ErrorServiceUnavailable, Message: runtimeprivacy.RedactError(err)}
+	}
+	if _, auditErr := c.State.RecordAudit(runtimeapi.AuditRecord{
+		RequestID:     requestID,
+		Actor:         peer.Key(),
+		ClientType:    clientType,
+		ClientVersion: clientVersion,
+		Action:        "diagnostics.create",
+		ObjectID:      result.FileName,
+		Stage:         "completed",
+		Result:        outcome,
+		At:            c.now(),
+		Error:         auditError,
+	}); auditErr != nil {
+		return runtimeapi.DiagnosticsResult{}, auditErr
+	}
+	return result, err
 }
 
 func (c *Coordinator) VerifyProxy(ctx context.Context) (runtimeapi.ProxyVerification, error) {
@@ -334,7 +500,7 @@ func (c *Coordinator) scheduleDueActions(ctx context.Context) (bool, error) {
 		if err := validateAction(action); err != nil {
 			return false, err
 		}
-		_, _, err := c.Execute(ctx, peer, c.Version, runtimeapi.CreateOperationRequest{
+		_, _, err := c.Execute(ctx, peer, "runtime", c.Version, runtimeapi.CreateOperationRequest{
 			RequestID:  fmt.Sprintf("scheduled-%d-%d", now.UnixNano(), index),
 			IfRevision: snapshot.Revision,
 			Action:     action,

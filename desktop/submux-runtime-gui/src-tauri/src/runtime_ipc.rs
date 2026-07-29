@@ -136,7 +136,14 @@ impl RuntimeBridge {
     }
 
     pub fn get_advanced_override(&self) -> Result<Value, BridgeError> {
-        self.call_json("GET", "/v1/advanced-override", None, &[], &[], None)
+        self.call_json(
+            "GET",
+            "/v1/advanced-override?reveal=1",
+            None,
+            &[],
+            &[],
+            None,
+        )
     }
 
     pub fn set_advanced_override(&self, content: &[u8]) -> Result<Value, BridgeError> {
@@ -453,6 +460,79 @@ impl RuntimeBridge {
         self.call_json("GET", "/v1/proxy/verify", None, &[], &[], None)
     }
 
+    pub fn reveal_source_url(
+        &self,
+        source_id: &str,
+        confirm: bool,
+    ) -> Result<Value, BridgeError> {
+        validate_source_id(source_id)?;
+        if !confirm {
+            return Err(BridgeError::request(
+                "Revealing a source URL requires explicit confirmation",
+            ));
+        }
+        let body = serde_json::to_vec(&json!({
+            "source_id": source_id,
+            "confirm": true,
+        }))
+        .map_err(BridgeError::internal)?;
+        self.call_json(
+            "POST",
+            "/v1/sources/reveal-url",
+            Some("application/json"),
+            &[],
+            &body,
+            None,
+        )
+    }
+
+    pub fn preview_diagnostics(
+        &self,
+        include_raw_config: bool,
+        include_full_logs: bool,
+        include_network_info: bool,
+    ) -> Result<Value, BridgeError> {
+        let body = serde_json::to_vec(&json!({
+            "include_raw_config": include_raw_config,
+            "include_full_logs": include_full_logs,
+            "include_network_info": include_network_info,
+        }))
+        .map_err(BridgeError::internal)?;
+        self.call_json(
+            "POST",
+            "/v1/diagnostics/preview",
+            Some("application/json"),
+            &[],
+            &body,
+            None,
+        )
+    }
+
+    pub fn create_diagnostics(
+        &self,
+        include_raw_config: bool,
+        include_full_logs: bool,
+        include_network_info: bool,
+        confirm_sensitive: bool,
+    ) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        let body = serde_json::to_vec(&json!({
+            "include_raw_config": include_raw_config,
+            "include_full_logs": include_full_logs,
+            "include_network_info": include_network_info,
+            "confirm_sensitive": confirm_sensitive,
+        }))
+        .map_err(BridgeError::internal)?;
+        self.call_json(
+            "POST",
+            "/v1/diagnostics/create",
+            Some("application/json"),
+            &[],
+            &body,
+            None,
+        )
+    }
+
     fn ensure_compatible(&self) -> Result<Value, BridgeError> {
         let handshake = self.handshake()?;
         if !handshake.compatible {
@@ -521,6 +601,7 @@ impl RuntimeBridge {
              Host: runtime\r\n\
              X-Submux-Request-ID: {request_id}\r\n\
              X-Submux-Protocol-Version: {PROTOCOL_VERSION}\r\n\
+             X-Submux-Client-Type: gui\r\n\
              X-Submux-Client-Version: {}\r\n\
              Content-Length: {}\r\n\
              Connection: close\r\n",

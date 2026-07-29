@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -21,6 +22,7 @@ var (
 
 	revisionKey              = []byte("revision")
 	eventCursorKey           = []byte("event_cursor")
+	auditCursorKey           = []byte("audit_cursor")
 	installationIDKey        = []byte("installation_id")
 	createdAtKey             = []byte("created_at")
 	mihomoStateKey           = []byte("mihomo_state")
@@ -40,8 +42,9 @@ var (
 )
 
 type Store struct {
-	db   *bbolt.DB
-	root string
+	db       *bbolt.DB
+	root     string
+	sourceMu sync.Mutex
 }
 
 func Open(root string) (*Store, error) {
@@ -172,6 +175,11 @@ func (s *Store) initialize() error {
 		}
 		if metadata.Get(eventCursorKey) == nil {
 			if err := metadata.Put(eventCursorKey, encodeUint64(0)); err != nil {
+				return err
+			}
+		}
+		if metadata.Get(auditCursorKey) == nil {
+			if err := metadata.Put(auditCursorKey, encodeUint64(0)); err != nil {
 				return err
 			}
 		}

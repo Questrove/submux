@@ -27,20 +27,20 @@ func TestOperationPersistenceIdempotencyRevisionAndCancellation(t *testing.T) {
 		IfRevision: 1,
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
 	}
-	operation, duplicate, err := store.SubmitOperation(peer, "test", request, 1, now)
+	operation, duplicate, err := store.SubmitOperation(peer, "test", "test", request, 1, now)
 	if err != nil || duplicate {
 		t.Fatalf("submit operation: duplicate=%v err=%v", duplicate, err)
 	}
 	if operation.State != runtimeapi.OperationQueued {
 		t.Fatalf("operation state = %q", operation.State)
 	}
-	repeated, duplicate, err := store.SubmitOperation(peer, "test", request, 1, now.Add(time.Second))
+	repeated, duplicate, err := store.SubmitOperation(peer, "test", "test", request, 1, now.Add(time.Second))
 	if err != nil || !duplicate || repeated.ID != operation.ID {
 		t.Fatalf("repeat operation = %#v duplicate=%v err=%v", repeated, duplicate, err)
 	}
 	conflicting := request
 	conflicting.Action.Kind = runtimeapi.ActionStopProxy
-	if _, _, err := store.SubmitOperation(peer, "test", conflicting, 1, now); !errors.Is(err, ErrRequestConflict) {
+	if _, _, err := store.SubmitOperation(peer, "test", "test", conflicting, 1, now); !errors.Is(err, ErrRequestConflict) {
 		t.Fatalf("request ID conflict error = %v", err)
 	}
 	newRequest := runtimeapi.CreateOperationRequest{
@@ -49,14 +49,14 @@ func TestOperationPersistenceIdempotencyRevisionAndCancellation(t *testing.T) {
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStopProxy},
 	}
 	var revisionError *RevisionConflictError
-	if _, _, err := store.SubmitOperation(peer, "test", newRequest, 1, now); !errors.As(err, &revisionError) || revisionError.Current != 2 {
+	if _, _, err := store.SubmitOperation(peer, "test", "test", newRequest, 1, now); !errors.As(err, &revisionError) || revisionError.Current != 2 {
 		t.Fatalf("revision conflict = %#v / %v", revisionError, err)
 	}
 	newRequest.IfRevision = 2
-	if _, _, err := store.SubmitOperation(peer, "test", newRequest, 1, now); !errors.Is(err, ErrBusy) {
+	if _, _, err := store.SubmitOperation(peer, "test", "test", newRequest, 1, now); !errors.Is(err, ErrBusy) {
 		t.Fatalf("queue capacity error = %v", err)
 	}
-	if _, _, err := store.CancelOperation(peer, operation.ID, runtimeapi.CancelOperationRequest{
+	if _, _, err := store.CancelOperation(peer, "test", "test", operation.ID, runtimeapi.CancelOperationRequest{
 		RequestID:  request.RequestID,
 		IfRevision: 2,
 	}, now); !errors.Is(err, ErrRequestConflict) {
@@ -64,18 +64,18 @@ func TestOperationPersistenceIdempotencyRevisionAndCancellation(t *testing.T) {
 	}
 
 	cancelRequest := runtimeapi.CancelOperationRequest{RequestID: "cancel-one", IfRevision: 2}
-	cancelled, duplicate, err := store.CancelOperation(canceller, operation.ID, cancelRequest, now.Add(time.Second))
+	cancelled, duplicate, err := store.CancelOperation(canceller, "test", "test", operation.ID, cancelRequest, now.Add(time.Second))
 	if err != nil || duplicate || cancelled.State != runtimeapi.OperationCancelled {
 		t.Fatalf("cancel operation = %#v duplicate=%v err=%v", cancelled, duplicate, err)
 	}
 	if cancelled.CallerIdentity != peer.Key() || cancelled.CancelledBy != canceller.Key() {
 		t.Fatalf("cancellation identities = caller %q canceller %q", cancelled.CallerIdentity, cancelled.CancelledBy)
 	}
-	repeatedCancel, duplicate, err := store.CancelOperation(canceller, operation.ID, cancelRequest, now.Add(2*time.Second))
+	repeatedCancel, duplicate, err := store.CancelOperation(canceller, "test", "test", operation.ID, cancelRequest, now.Add(2*time.Second))
 	if err != nil || !duplicate || repeatedCancel.State != runtimeapi.OperationCancelled {
 		t.Fatalf("repeat cancellation = %#v duplicate=%v err=%v", repeatedCancel, duplicate, err)
 	}
-	if _, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	if _, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  cancelRequest.RequestID,
 		IfRevision: 3,
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStopProxy},
@@ -99,7 +99,7 @@ func TestOperationStageAndCrashRecovery(t *testing.T) {
 	}
 	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	operation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	operation, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "request-one",
 		IfRevision: 1,
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
@@ -121,7 +121,7 @@ func TestOperationStageAndCrashRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("observe Runtime state: %v", err)
 	}
-	if _, _, err := store.CancelOperation(peer, operation.ID, runtimeapi.CancelOperationRequest{
+	if _, _, err := store.CancelOperation(peer, "test", "test", operation.ID, runtimeapi.CancelOperationRequest{
 		RequestID:  "cancel-one",
 		IfRevision: snapshot.Revision,
 	}, now.Add(3*time.Second)); !errors.Is(err, ErrNotCancellable) {
@@ -156,7 +156,7 @@ func TestQueuedOperationRemainsRunnableAfterRuntimeRestart(t *testing.T) {
 	}
 	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	queued, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	queued, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "queued-before-restart",
 		IfRevision: 1,
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
@@ -195,7 +195,7 @@ func TestBeginAndCancelRaceKeepsOnePersistedTerminalOutcome(t *testing.T) {
 	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
 	canceller := runtimeapi.PeerIdentity{Platform: "test", UID: 1001}
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
-	operation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	operation, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "race-operation",
 		IfRevision: 1,
 		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
@@ -218,7 +218,7 @@ func TestBeginAndCancelRaceKeepsOnePersistedTerminalOutcome(t *testing.T) {
 		defer wait.Done()
 		<-start
 		request := runtimeapi.CancelOperationRequest{RequestID: "race-cancel", IfRevision: 2}
-		_, _, cancelErr = store.CancelOperation(canceller, operation.ID, request, now.Add(time.Second))
+		_, _, cancelErr = store.CancelOperation(canceller, "test", "test", operation.ID, request, now.Add(time.Second))
 		if !errors.Is(cancelErr, ErrRevisionConflict) {
 			return
 		}
@@ -228,7 +228,7 @@ func TestBeginAndCancelRaceKeepsOnePersistedTerminalOutcome(t *testing.T) {
 			return
 		}
 		request.IfRevision = snapshot.Revision
-		_, _, cancelErr = store.CancelOperation(canceller, operation.ID, request, now.Add(2*time.Second))
+		_, _, cancelErr = store.CancelOperation(canceller, "test", "test", operation.ID, request, now.Add(2*time.Second))
 	}()
 	close(start)
 	wait.Wait()
@@ -268,7 +268,7 @@ func TestPreparedConfigurationRemainsStoppedUntilExplicitStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upload Runtime import: %v", err)
 	}
-	operation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	operation, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "prepare-config",
 		IfRevision: 1,
 		Action: runtimeapi.Action{
@@ -299,7 +299,7 @@ func TestPreparedConfigurationRemainsStoppedUntilExplicitStart(t *testing.T) {
 		t.Fatalf("prepared Runtime snapshot = %#v", snapshot)
 	}
 
-	sourceOperation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+	sourceOperation, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
 		RequestID:  "prepare-source",
 		IfRevision: snapshot.Revision,
 		Action: runtimeapi.Action{

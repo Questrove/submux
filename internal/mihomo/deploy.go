@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +79,8 @@ type deploymentMetadata struct {
 	ProxyKind      string   `json:"proxy_kind,omitempty"`
 	ProxyAddresses []string `json:"proxy_addresses,omitempty"`
 }
+
+const successfulHistoryLimit = 3
 
 func ProxyEndpoint(config []byte) (int, string, error) {
 	listeners, err := ProxyListeners(config)
@@ -179,7 +182,7 @@ func (d *Deployer) deploy(
 		Revision:       revision,
 		SourceHash:     result.SourceHash,
 		CandidateHash:  result.CandidateHash,
-		AppliedAt:      time.Now().UTC().Format(time.RFC3339),
+		AppliedAt:      time.Now().UTC().Format(time.RFC3339Nano),
 		ProxyPort:      result.ProxyPort,
 		ProxyKind:      result.ProxyKind,
 		ProxyAddresses: append([]string(nil), result.ProxyAddresses...),
@@ -231,6 +234,9 @@ func (d *Deployer) deploy(
 	}
 	if activationErr == nil {
 		result.Status = "active"
+		if historyErr := archiveSuccessfulDeployment(root, current, metadata); historyErr != nil {
+			result.Error = "configuration is active, but its successful history copy could not be retained"
+		}
 		return result, nil
 	}
 
@@ -425,6 +431,162 @@ func removeManagedConfigDir(root, path string) error {
 	default:
 		return fmt.Errorf("refusing to remove unmanaged directory %q", filepath.Base(path))
 	}
+}
+
+func archiveSuccessfulDeployment(root, current string, metadata deploymentMetadata) error {
+	historyRoot := filepath.Join(root, "history")
+	if err := ensureSuccessfulHistoryRoot(root, historyRoot); err != nil {
+		return err
+	}
+	entryName := historyEntryName(metadata)
+	finalPath := filepath.Join(historyRoot, entryName)
+	stagingPath := filepath.Join(historyRoot, "."+entryName+".tmp")
+	if err := removeSuccessfulHistoryEntry(historyRoot, stagingPath); err != nil {
+		return err
+	}
+	if err := copyDeploymentDirectory(current, stagingPath); err != nil {
+		_ = removeSuccessfulHistoryEntry(historyRoot, stagingPath)
+		return err
+	}
+	if err := os.Rename(stagingPath, finalPath); err != nil {
+		_ = removeSuccessfulHistoryEntry(historyRoot, stagingPath)
+		return fmt.Errorf("commit successful configuration history: %w", err)
+	}
+	if err := pruneSuccessfulHistory(historyRoot, successfulHistoryLimit); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureSuccessfulHistoryRoot(root, historyRoot string) error {
+	if filepath.Dir(historyRoot) != root || filepath.Base(historyRoot) != "history" {
+		return errors.New("invalid successful configuration history root")
+	}
+	info, err := os.Lstat(historyRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.Mkdir(historyRoot, 0700); err != nil {
+			return err
+		}
+		info, err = os.Lstat(historyRoot)
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("successful configuration history must be a real directory")
+	}
+	linked, err := safepath.ContainsLink(historyRoot)
+	if err != nil {
+		return fmt.Errorf("inspect successful configuration history: %w", err)
+	}
+	if linked {
+		return errors.New("successful configuration history must not contain symbolic or reparse links")
+	}
+	return os.Chmod(historyRoot, 0700)
+}
+
+func historyEntryName(metadata deploymentMetadata) string {
+	appliedAt, err := time.Parse(time.RFC3339Nano, metadata.AppliedAt)
+	if err != nil {
+		appliedAt = time.Now().UTC()
+	}
+	digest := strings.ToLower(metadata.CandidateHash)
+	decoded, decodeErr := hex.DecodeString(digest)
+	if decodeErr != nil || len(decoded) != sha256.Size {
+		fallback := sha256.Sum256([]byte(metadata.CandidateHash))
+		digest = hex.EncodeToString(fallback[:])
+	}
+	return appliedAt.UTC().Format("20060102T150405.000000000Z") + "-" + digest[:16]
+}
+
+func copyDeploymentDirectory(source, target string) error {
+	if _, err := verifyOptionalDeploymentDirectory(source); err != nil {
+		return err
+	}
+	if err := os.Mkdir(target, 0700); err != nil {
+		return err
+	}
+	for _, name := range []string{"source.yaml", "config.yaml", "metadata.json"} {
+		value, err := os.ReadFile(filepath.Join(source, name))
+		if err != nil {
+			return err
+		}
+		if err := writePrivateFile(filepath.Join(target, name), value); err != nil {
+			return err
+		}
+	}
+	if _, err := verifyOptionalDeploymentDirectory(target); err != nil {
+		return err
+	}
+	return nil
+}
+
+func pruneSuccessfulHistory(historyRoot string, limit int) error {
+	entries, err := os.ReadDir(historyRoot)
+	if err != nil {
+		return err
+	}
+	type historyEntry struct {
+		path      string
+		appliedAt time.Time
+	}
+	history := make([]historyEntry, 0, len(entries))
+	for _, entry := range entries {
+		path := filepath.Join(historyRoot, entry.Name())
+		if strings.HasPrefix(entry.Name(), ".") && strings.HasSuffix(entry.Name(), ".tmp") {
+			if err := removeSuccessfulHistoryEntry(historyRoot, path); err != nil {
+				return err
+			}
+			continue
+		}
+		if !entry.IsDir() {
+			return errors.New("successful configuration history contains an unmanaged file")
+		}
+		if _, err := verifyOptionalDeploymentDirectory(path); err != nil {
+			return err
+		}
+		metadata, err := readDeploymentMetadata(filepath.Join(path, "metadata.json"))
+		if err != nil {
+			return err
+		}
+		appliedAt, err := time.Parse(time.RFC3339Nano, metadata.AppliedAt)
+		if err != nil {
+			return errors.New("successful configuration history metadata has an invalid application time")
+		}
+		history = append(history, historyEntry{path: path, appliedAt: appliedAt})
+	}
+	sort.Slice(history, func(left, right int) bool {
+		if history[left].appliedAt.Equal(history[right].appliedAt) {
+			return history[left].path < history[right].path
+		}
+		return history[left].appliedAt.Before(history[right].appliedAt)
+	})
+	for len(history) > limit {
+		if err := removeSuccessfulHistoryEntry(historyRoot, history[0].path); err != nil {
+			return err
+		}
+		history = history[1:]
+	}
+	return nil
+}
+
+func removeSuccessfulHistoryEntry(historyRoot, path string) error {
+	if filepath.Dir(path) != historyRoot {
+		return errors.New("refusing to remove a path outside successful configuration history")
+	}
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	linked, err := safepath.ContainsLink(path)
+	if err != nil {
+		return fmt.Errorf("inspect successful configuration history entry: %w", err)
+	}
+	if linked {
+		return errors.New("refusing to remove a linked successful configuration history entry")
+	}
+	return os.RemoveAll(path)
 }
 
 func verifyOptionalDeploymentDirectory(path string) (bool, error) {

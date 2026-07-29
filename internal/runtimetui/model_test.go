@@ -2,6 +2,7 @@ package runtimetui
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -12,16 +13,20 @@ import (
 )
 
 type fakeClient struct {
-	snapshot        runtimeapi.Snapshot
-	actions         []runtimeapi.Action
-	uploaded        []byte
-	uploadedType    string
-	previewed       string
-	gotten          string
-	waited          string
-	cancelled       string
-	verifyCalls     int
-	operationSerial int
+	snapshot           runtimeapi.Snapshot
+	actions            []runtimeapi.Action
+	uploaded           []byte
+	uploadedType       string
+	previewed          string
+	gotten             string
+	waited             string
+	cancelled          string
+	verifyCalls        int
+	overrideReads      int
+	revealCalls        int
+	diagnosticPreviews int
+	diagnosticCreates  int
+	operationSerial    int
 }
 
 func (f *fakeClient) Observe(context.Context) (runtimeapi.Snapshot, error) {
@@ -34,7 +39,11 @@ func (f *fakeClient) UploadImport(_ context.Context, contentType string, body []
 	return runtimeapi.ImportContent{ID: "content_0123456789abcdef0123456789abcdef"}, nil
 }
 
-func (f *fakeClient) GetAdvancedOverride(context.Context) (runtimeapi.AdvancedOverrideDocument, error) {
+func (f *fakeClient) GetAdvancedOverride(_ context.Context, reveal bool) (runtimeapi.AdvancedOverrideDocument, error) {
+	if !reveal {
+		return runtimeapi.AdvancedOverrideDocument{}, errors.New("override reveal was not confirmed")
+	}
+	f.overrideReads++
 	return runtimeapi.AdvancedOverrideDocument{YAML: "{}\n"}, nil
 }
 
@@ -104,6 +113,34 @@ func (f *fakeClient) VerifyProxy(context.Context) (runtimeapi.ProxyVerification,
 		Kind:      "mixed",
 		Addresses: []string{"127.0.0.1:7890", "[::1]:7890"},
 	}, nil
+}
+
+func (f *fakeClient) RevealSourceURL(
+	context.Context,
+	string,
+	bool,
+) (runtimeapi.RevealSourceURLResponse, error) {
+	f.revealCalls++
+	return runtimeapi.RevealSourceURLResponse{URL: "https://example.com/config?token=secret"}, nil
+}
+
+func (f *fakeClient) PreviewDiagnostics(
+	context.Context,
+	runtimeapi.DiagnosticsRequest,
+) (runtimeapi.DiagnosticsPreview, error) {
+	f.diagnosticPreviews++
+	return runtimeapi.DiagnosticsPreview{
+		Warning: runtimeapi.SensitiveDataWarning,
+		Items:   []runtimeapi.DiagnosticItem{{Name: "snapshot.json", Included: true, Size: 10}},
+	}, nil
+}
+
+func (f *fakeClient) CreateDiagnostics(
+	context.Context,
+	runtimeapi.DiagnosticsRequest,
+) (runtimeapi.DiagnosticsResult, error) {
+	f.diagnosticCreates++
+	return runtimeapi.DiagnosticsResult{FileName: "diagnostics.zip", Size: 10}, nil
 }
 
 func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
@@ -434,6 +471,79 @@ func TestModelManagesMultipleSourceTypesAndSwitchesSelectedSource(t *testing.T) 
 	}
 }
 
+func TestSensitiveTUIActionsRequireTwoStepsAndUseSharedWarning(t *testing.T) {
+	sourceID := "src_" + strings.Repeat("e", 32)
+	client := &fakeClient{snapshot: runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        4,
+		Runtime:         runtimeapi.RuntimeStatus{Version: "dev", ServiceState: "running"},
+		Sources: runtimeapi.SourceStatus{
+			Count:           2,
+			CurrentSourceID: sourceID,
+			Items: []runtimeapi.SourceSummary{{
+				ID:             sourceID,
+				Type:           runtimeapi.SourceTypeRemoteHTTP,
+				Name:           "primary",
+				Current:        true,
+				RedactedTarget: "https://example.com:443/…",
+			}, {
+				ID:             "src_" + strings.Repeat("f", 32),
+				Type:           runtimeapi.SourceTypeRemoteHTTP,
+				Name:           "secondary",
+				RedactedTarget: "https://backup.example.com:443/…",
+			}},
+		},
+	}}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+
+	updated, command := model.Update(ctrlKey('u'))
+	model = updated.(Model)
+	if command != nil || client.revealCalls != 0 || !strings.Contains(model.status, runtimeapi.SensitiveDataWarning) {
+		t.Fatalf("first source reveal confirmation: command=%v calls=%d status=%q", command != nil, client.revealCalls, model.status)
+	}
+	updated, command = model.Update(ctrlKey('u'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("confirmed source reveal did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if client.revealCalls != 1 || !strings.Contains(model.revealedURL, "token=secret") {
+		t.Fatalf("confirmed source reveal calls=%d URL=%q", client.revealCalls, model.revealedURL)
+	}
+	updated, _ = model.Update(tea.KeyPressMsg{Code: ']'})
+	model = updated.(Model)
+	if model.revealedURL != "" || strings.HasPrefix(model.sensitiveConfirm, "reveal:") {
+		t.Fatalf("source selection retained revealed URL=%q confirmation=%q", model.revealedURL, model.sensitiveConfirm)
+	}
+
+	updated, command = model.Update(ctrlKey('g'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("diagnostics preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if client.diagnosticPreviews != 1 || client.diagnosticCreates != 0 {
+		t.Fatalf("diagnostics preview/create calls=%d/%d", client.diagnosticPreviews, client.diagnosticCreates)
+	}
+	updated, command = model.Update(ctrlKey('g'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("confirmed diagnostics creation did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if client.diagnosticCreates != 1 || model.diagnosticsFile.FileName != "diagnostics.zip" {
+		t.Fatalf("diagnostics create calls=%d result=%#v", client.diagnosticCreates, model.diagnosticsFile)
+	}
+	if !strings.Contains(model.View().Content, runtimeapi.SensitiveDataWarning) {
+		t.Fatalf("shared sensitive warning missing from TUI: %q", model.View().Content)
+	}
+}
+
 func TestOperationStatusReportsSourceSwitchAndCacheUse(t *testing.T) {
 	status := operationStatus(runtimeapi.Operation{
 		ID:    "op_switch",
@@ -515,12 +625,17 @@ func TestModelManagesResourcesOverridesAndLayeredPreviewThroughRuntimeClient(t *
 
 	updated, command = model.Update(keyPress('o'))
 	model = updated.(Model)
+	if command != nil || !strings.Contains(model.status, runtimeapi.SensitiveDataWarning) || client.overrideReads != 0 {
+		t.Fatalf("first override confirmation: command=%v reads=%d status=%q", command != nil, client.overrideReads, model.status)
+	}
+	updated, command = model.Update(keyPress('o'))
+	model = updated.(Model)
 	if command == nil {
 		t.Fatal("override read did not return a command")
 	}
 	updated, command = model.Update(command())
 	model = updated.(Model)
-	if !model.editing || model.editorMode != editorModeOverride {
+	if client.overrideReads != 1 || !model.editing || model.editorMode != editorModeOverride {
 		t.Fatalf("override editor state = editing %v mode %q", model.editing, model.editorMode)
 	}
 	model.editor.SetValue("rules:\n  - MATCH,DIRECT\n")

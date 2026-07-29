@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -175,6 +176,71 @@ func TestValidationFailurePreservesCurrentAndRuntimeFailureRollsBack(t *testing.
 	if err != nil || metadata.Revision != "rev-1" {
 		t.Fatalf("current revision after rollback: %#v, %v", metadata, err)
 	}
+}
+
+func TestSuccessfulConfigurationHistoryKeepsLatestThreeAndExcludesFailures(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "configs")
+	service := &fakeService{}
+	deployer := &Deployer{
+		Root:      root,
+		Validator: fakeValidator{},
+		Service:   service,
+		Verifier:  &sequenceVerifier{},
+	}
+	for index := 1; index <= 4; index++ {
+		source := []byte("source: " + string(rune('0'+index)) + "\n")
+		deployer.Builder = fakeBuilder{candidate: []byte("mixed-port: " + string(rune('0'+index)) + "890\n")}
+		result, err := deployer.Apply(context.Background(), "rev-"+string(rune('0'+index)), sourceHash(source), source)
+		if err != nil || result.Status != "active" || result.Error != "" {
+			t.Fatalf("deployment %d: result=%#v err=%v", index, result, err)
+		}
+	}
+
+	revisions := successfulHistoryRevisions(t, filepath.Join(root, "history"))
+	if len(revisions) != successfulHistoryLimit || revisions["rev-1"] || !revisions["rev-2"] || !revisions["rev-3"] || !revisions["rev-4"] {
+		t.Fatalf("successful configuration history=%v", revisions)
+	}
+
+	failedSource := []byte("source: failed\n")
+	deployer.Builder = fakeBuilder{candidate: []byte("mixed-port: 8899\n")}
+	deployer.Verifier = &sequenceVerifier{errors: []error{errors.New("candidate unhealthy"), nil}}
+	if result, err := deployer.Apply(context.Background(), "rev-failed", sourceHash(failedSource), failedSource); err == nil || result.Status != "rolled_back" {
+		t.Fatalf("failed deployment: result=%#v err=%v", result, err)
+	}
+	revisions = successfulHistoryRevisions(t, filepath.Join(root, "history"))
+	if len(revisions) != successfulHistoryLimit || revisions["rev-failed"] {
+		t.Fatalf("failed deployment entered successful history=%v", revisions)
+	}
+}
+
+func TestHistoryEntryNameHandlesShortCandidateHash(t *testing.T) {
+	for _, candidateHash := range []string{"short", strings.Repeat("../", 16)} {
+		name := historyEntryName(deploymentMetadata{
+			AppliedAt:     "2026-07-30T08:00:00Z",
+			CandidateHash: candidateHash,
+		})
+		parts := strings.Split(name, "-")
+		if len(parts) != 2 || len(parts[1]) != 16 || strings.ContainsAny(parts[1], `/\`) {
+			t.Fatalf("history entry name=%q", name)
+		}
+	}
+}
+
+func successfulHistoryRevisions(t *testing.T, historyRoot string) map[string]bool {
+	t.Helper()
+	entries, err := os.ReadDir(historyRoot)
+	if err != nil {
+		t.Fatalf("read successful history: %v", err)
+	}
+	revisions := make(map[string]bool, len(entries))
+	for _, entry := range entries {
+		metadata, err := readDeploymentMetadata(filepath.Join(historyRoot, entry.Name(), "metadata.json"))
+		if err != nil {
+			t.Fatalf("read successful history metadata: %v", err)
+		}
+		revisions[metadata.Revision] = true
+	}
+	return revisions
 }
 
 func TestExplicitKnownGoodRollbackSwapsVersionsAndRestoresCurrentOnFailure(t *testing.T) {
