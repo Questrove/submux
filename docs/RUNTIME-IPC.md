@@ -201,9 +201,9 @@ POST /v1/operations/{id}/cancel
 GET /v1/events?after={cursor}
 ```
 
-响应是持续的 JSON 事件流。每个事件包含递增 cursor、类型、时间、相关 Operation ID 和产生后的 Snapshot revision。事件只是提示客户端增量更新界面，Snapshot 仍是权威状态。
+成功响应的内容类型是 `application/x-ndjson`，连接保持打开，每行是一个完整 JSON 事件。每个事件包含递增 cursor、类型、时间、相关 Operation ID 和产生后的 Snapshot revision。事件只是提示客户端增量更新界面，Snapshot 仍是权威状态；连接中断时客户端可以从最后一个完整事件的 cursor 重新订阅。
 
-Runtime 保留最近 10000 个事件。游标过期时返回 `cursor_expired` 和当前最早游标，客户端重新读取 Snapshot 后再订阅，不能猜测丢失状态。
+Runtime 保留最近 10000 个事件。游标过期时返回 HTTP 410、`cursor_expired` 和当前最早连续游标，客户端重新读取 Snapshot 后使用 `latest_event_cursor` 再订阅，不能猜测丢失状态。为了保留结果未知或当前故障相关的审计记录，数据库中可能保留更早的离散事件；这些事件不会被当成可连续回放的历史。
 
 ## 修改串行化
 

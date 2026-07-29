@@ -279,6 +279,7 @@ const (
 	ErrorBusy                 = "busy"
 	ErrorNotFound             = "not_found"
 	ErrorNotCancellable       = "not_cancellable"
+	ErrorCursorExpired        = "cursor_expired"
 	ErrorContentExpired       = "content_expired"
 	ErrorContentConsumed      = "content_consumed"
 	ErrorSourceAuthentication = "source_authentication_failed"

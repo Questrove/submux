@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimestate"
 )
 
 type observerFunc func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error)
@@ -23,6 +24,20 @@ func (function observerFunc) Observe(ctx context.Context, peer runtimeapi.PeerId
 
 type operatorObserver struct {
 	observerFunc
+}
+
+type eventObserver struct {
+	observerFunc
+	events func(context.Context, runtimeapi.PeerIdentity, uint64, int) ([]runtimeapi.Event, uint64, error)
+}
+
+func (observer eventObserver) Events(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	after uint64,
+	limit int,
+) ([]runtimeapi.Event, uint64, error) {
+	return observer.events(ctx, peer, after, limit)
 }
 
 func (operatorObserver) UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error) {
@@ -105,6 +120,94 @@ func TestSnapshotHandlerValidatesProtocolAndPeer(t *testing.T) {
 	}
 	if recorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cache-Control = %q", recorder.Header().Get("Cache-Control"))
+	}
+}
+
+func TestEventHandlerStreamsMonotonicNDJSON(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	service := eventObserver{
+		observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		},
+		events: func(_ context.Context, peer runtimeapi.PeerIdentity, after uint64, limit int) ([]runtimeapi.Event, uint64, error) {
+			if peer.UID != 1000 || limit <= 0 {
+				t.Fatalf("event request peer=%#v limit=%d", peer, limit)
+			}
+			calls++
+			if calls == 1 {
+				if after != 0 {
+					t.Fatalf("initial event cursor=%d", after)
+				}
+				return []runtimeapi.Event{{
+					Cursor:           1,
+					Type:             "operation.queued",
+					At:               time.Unix(1, 0).UTC(),
+					OperationID:      "op_test",
+					SnapshotRevision: 2,
+				}}, 1, nil
+			}
+			cancel()
+			return nil, 1, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/events?after=0", nil).WithContext(ctx)
+	request.Header.Set(HeaderRequestID, "request-events")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientVersion, "test")
+	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("Content-Type") != "application/x-ndjson" {
+		t.Fatalf("Content-Type=%q", recorder.Header().Get("Content-Type"))
+	}
+	var event runtimeapi.Event
+	if err := json.NewDecoder(recorder.Body).Decode(&event); err != nil {
+		t.Fatalf("decode Runtime event: %v", err)
+	}
+	if event.Cursor != 1 || event.OperationID != "op_test" || calls < 2 {
+		t.Fatalf("streamed event=%#v calls=%d", event, calls)
+	}
+}
+
+func TestEventHandlerReturnsCursorExpiredWithEarliestCursor(t *testing.T) {
+	service := eventObserver{
+		observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		},
+		events: func(context.Context, runtimeapi.PeerIdentity, uint64, int) ([]runtimeapi.Event, uint64, error) {
+			return nil, 42, &runtimestate.CursorExpiredError{Earliest: 42}
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/events?after=1", nil)
+	request.Header.Set(HeaderRequestID, "request-events")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientVersion, "test")
+	request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "test", UID: 1000}, nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusGone {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var envelope runtimeapi.ErrorEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode Runtime event error: %v", err)
+	}
+	if envelope.Error.Code != runtimeapi.ErrorCursorExpired || envelope.EarliestCursor != 42 {
+		t.Fatalf("event error=%#v", envelope)
 	}
 }
 

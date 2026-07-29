@@ -295,6 +295,9 @@ func (s *Store) UpdateOperationStage(id, stage string, progress int, cancellable
 		if operation.State != runtimeapi.OperationRunning {
 			return ErrOperationTerminal
 		}
+		if !operation.Cancellable && cancellable {
+			return ErrNotCancellable
+		}
 		operation.Stage = stage
 		operation.Progress = progress
 		operation.Cancellable = cancellable
@@ -621,6 +624,9 @@ func advanceRevisionAndEvent(
 		SnapshotRevision: revision,
 	}
 	if err := putJSON(events, encodeUint64(cursor), event); err != nil {
+		return 0, err
+	}
+	if err := pruneEventHistory(transaction); err != nil {
 		return 0, err
 	}
 	return revision, nil

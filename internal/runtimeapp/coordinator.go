@@ -150,6 +150,24 @@ func (c *Coordinator) GetOperation(ctx context.Context, id string) (runtimeapi.O
 	return c.State.GetOperation(id)
 }
 
+func (c *Coordinator) Events(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	after uint64,
+	limit int,
+) ([]runtimeapi.Event, uint64, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
+	if peer.Key() == "" {
+		return nil, 0, errors.New("Runtime event observer identity is required")
+	}
+	if c == nil || c.State == nil {
+		return nil, 0, errors.New("Runtime state is unavailable")
+	}
+	return c.State.EventsAfter(after, limit)
+}
+
 func (c *Coordinator) PreviewCandidate(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -236,6 +254,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 	if err := c.State.GCExpiredImports(c.now()); err != nil {
 		return fmt.Errorf("clean Runtime imports: %w", err)
 	}
+	if _, err := c.State.GCOperationHistory(c.now()); err != nil {
+		return fmt.Errorf("clean Runtime operation history: %w", err)
+	}
 
 	ticker := time.NewTicker(time.Minute)
 	defer ticker.Stop()
@@ -261,6 +282,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		case now := <-ticker.C:
 			if err := c.State.GCExpiredImports(now); err != nil {
 				return fmt.Errorf("clean Runtime imports: %w", err)
+			}
+			if _, err := c.State.GCOperationHistory(now); err != nil {
+				return fmt.Errorf("clean Runtime operation history: %w", err)
 			}
 		}
 	}

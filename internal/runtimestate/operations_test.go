@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ func TestOperationPersistenceIdempotencyRevisionAndCancellation(t *testing.T) {
 	}
 	defer store.Close()
 	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
+	canceller := runtimeapi.PeerIdentity{Platform: "test", UID: 1001}
 	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
 	request := runtimeapi.CreateOperationRequest{
 		RequestID:  "request-one",
@@ -62,11 +64,14 @@ func TestOperationPersistenceIdempotencyRevisionAndCancellation(t *testing.T) {
 	}
 
 	cancelRequest := runtimeapi.CancelOperationRequest{RequestID: "cancel-one", IfRevision: 2}
-	cancelled, duplicate, err := store.CancelOperation(peer, operation.ID, cancelRequest, now.Add(time.Second))
+	cancelled, duplicate, err := store.CancelOperation(canceller, operation.ID, cancelRequest, now.Add(time.Second))
 	if err != nil || duplicate || cancelled.State != runtimeapi.OperationCancelled {
 		t.Fatalf("cancel operation = %#v duplicate=%v err=%v", cancelled, duplicate, err)
 	}
-	repeatedCancel, duplicate, err := store.CancelOperation(peer, operation.ID, cancelRequest, now.Add(2*time.Second))
+	if cancelled.CallerIdentity != peer.Key() || cancelled.CancelledBy != canceller.Key() {
+		t.Fatalf("cancellation identities = caller %q canceller %q", cancelled.CallerIdentity, cancelled.CancelledBy)
+	}
+	repeatedCancel, duplicate, err := store.CancelOperation(canceller, operation.ID, cancelRequest, now.Add(2*time.Second))
 	if err != nil || !duplicate || repeatedCancel.State != runtimeapi.OperationCancelled {
 		t.Fatalf("repeat cancellation = %#v duplicate=%v err=%v", repeatedCancel, duplicate, err)
 	}
@@ -109,6 +114,9 @@ func TestOperationStageAndCrashRecovery(t *testing.T) {
 	if err := store.UpdateOperationStage(operation.ID, "starting_proxy", 60, false, now.Add(2*time.Second)); err != nil {
 		t.Fatalf("update operation stage: %v", err)
 	}
+	if err := store.UpdateOperationStage(operation.ID, "preparing_again", 70, true, now.Add(2500*time.Millisecond)); !errors.Is(err, ErrNotCancellable) {
+		t.Fatalf("re-enable cancellation after side-effect boundary: %v", err)
+	}
 	snapshot, err := store.Observe("test", now)
 	if err != nil {
 		t.Fatalf("observe Runtime state: %v", err)
@@ -137,6 +145,105 @@ func TestOperationStageAndCrashRecovery(t *testing.T) {
 	}
 	if recovered.State != runtimeapi.OperationOutcomeUnknown || recovered.Cancellable {
 		t.Fatalf("recovered operation = %#v", recovered)
+	}
+}
+
+func TestQueuedOperationRemainsRunnableAfterRuntimeRestart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	queued, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+		RequestID:  "queued-before-restart",
+		IfRevision: 1,
+		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
+	}, 4, now)
+	if err != nil {
+		t.Fatalf("submit queued operation: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close Runtime state: %v", err)
+	}
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatalf("reopen Runtime state: %v", err)
+	}
+	defer reopened.Close()
+	if err := reopened.RecoverOperations(now.Add(time.Minute)); err != nil {
+		t.Fatalf("recover Runtime operations: %v", err)
+	}
+	recovered, err := reopened.GetOperation(queued.ID)
+	if err != nil || recovered.State != runtimeapi.OperationQueued {
+		t.Fatalf("recovered queued operation=%#v err=%v", recovered, err)
+	}
+	running, found, err := reopened.BeginNextOperation(now.Add(2 * time.Minute))
+	if err != nil || !found || running.ID != queued.ID || running.State != runtimeapi.OperationRunning {
+		t.Fatalf("begin recovered operation=%#v found=%v err=%v", running, found, err)
+	}
+}
+
+func TestBeginAndCancelRaceKeepsOnePersistedTerminalOutcome(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
+	canceller := runtimeapi.PeerIdentity{Platform: "test", UID: 1001}
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	operation, _, err := store.SubmitOperation(peer, "test", runtimeapi.CreateOperationRequest{
+		RequestID:  "race-operation",
+		IfRevision: 1,
+		Action:     runtimeapi.Action{Kind: runtimeapi.ActionStartProxy},
+	}, 4, now)
+	if err != nil {
+		t.Fatalf("submit raced operation: %v", err)
+	}
+
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	wait.Add(2)
+	var beginErr error
+	var cancelErr error
+	go func() {
+		defer wait.Done()
+		<-start
+		_, _, beginErr = store.BeginNextOperation(now.Add(time.Second))
+	}()
+	go func() {
+		defer wait.Done()
+		<-start
+		request := runtimeapi.CancelOperationRequest{RequestID: "race-cancel", IfRevision: 2}
+		_, _, cancelErr = store.CancelOperation(canceller, operation.ID, request, now.Add(time.Second))
+		if !errors.Is(cancelErr, ErrRevisionConflict) {
+			return
+		}
+		snapshot, observeErr := store.Observe("test", now.Add(time.Second))
+		if observeErr != nil {
+			cancelErr = observeErr
+			return
+		}
+		request.IfRevision = snapshot.Revision
+		_, _, cancelErr = store.CancelOperation(canceller, operation.ID, request, now.Add(2*time.Second))
+	}()
+	close(start)
+	wait.Wait()
+	if beginErr != nil || cancelErr != nil {
+		t.Fatalf("begin/cancel race: begin=%v cancel=%v", beginErr, cancelErr)
+	}
+	cancelled, err := store.GetOperation(operation.ID)
+	if err != nil ||
+		cancelled.State != runtimeapi.OperationCancelled ||
+		cancelled.CallerIdentity != peer.Key() ||
+		cancelled.CancelledBy != canceller.Key() {
+		t.Fatalf("raced operation=%#v err=%v", cancelled, err)
+	}
+	if err := store.UpdateOperationStage(operation.ID, "side_effect", 50, false, now.Add(3*time.Second)); !errors.Is(err, ErrOperationTerminal) {
+		t.Fatalf("raced cancelled operation accepted a later stage: %v", err)
 	}
 }
 

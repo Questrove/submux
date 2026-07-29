@@ -1,6 +1,7 @@
 package runtimeipc
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -30,7 +31,13 @@ type ClientError struct {
 	Message         string
 	Retryable       bool
 	CurrentRevision uint64
+	EarliestCursor  uint64
 	Cause           error
+}
+
+type RuntimeUpdate struct {
+	Event    *runtimeapi.Event
+	Snapshot *runtimeapi.Snapshot
 }
 
 func (e *ClientError) Error() string {
@@ -160,6 +167,121 @@ func (c *Client) Observe(ctx context.Context) (runtimeapi.Snapshot, error) {
 		}
 	}
 	return snapshot, nil
+}
+
+func (c *Client) WatchEvents(
+	ctx context.Context,
+	after uint64,
+	handle func(runtimeapi.Event) error,
+) error {
+	if handle == nil {
+		return &ClientError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Runtime event handler is required",
+		}
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return err
+	}
+	request, err := c.newRequest(
+		ctx,
+		http.MethodGet,
+		"/v1/events?after="+strconv.FormatUint(after, 10),
+		nil,
+		requestID,
+	)
+	if err != nil {
+		return err
+	}
+	if c == nil || c.http == nil {
+		return &ClientError{Code: runtimeapi.ErrorServiceUnavailable, Message: "Runtime client is not initialized"}
+	}
+	streamClient := *c.http
+	streamClient.Timeout = 0
+	response, err := streamClient.Do(request)
+	if err != nil {
+		if ctx != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return transportClientError(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return decodeClientError(response)
+	}
+
+	scanner := bufio.NewScanner(response.Body)
+	scanner.Buffer(make([]byte, 64<<10), MaxResponseBytes)
+	for scanner.Scan() {
+		var event runtimeapi.Event
+		if err := decodeStrictJSON(bytes.NewReader(scanner.Bytes()), MaxResponseBytes, &event); err != nil {
+			return invalidEventStreamError(err)
+		}
+		if event.Cursor != after+1 || event.Type == "" || event.SnapshotRevision == 0 {
+			return invalidEventStreamError(errors.New("Runtime event sequence is invalid"))
+		}
+		after = event.Cursor
+		if err := handle(event); err != nil {
+			return err
+		}
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err := scanner.Err(); err != nil {
+		return invalidEventStreamError(err)
+	}
+	return &ClientError{
+		Code:      runtimeapi.ErrorServiceUnavailable,
+		Message:   "Runtime event stream ended before the client stopped watching",
+		Retryable: true,
+	}
+}
+
+func (c *Client) Watch(
+	ctx context.Context,
+	after uint64,
+	handle func(RuntimeUpdate) error,
+) error {
+	if handle == nil {
+		return &ClientError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Runtime update handler is required",
+		}
+	}
+	cursor := after
+	for {
+		err := c.WatchEvents(ctx, cursor, func(event runtimeapi.Event) error {
+			cursor = event.Cursor
+			return handle(RuntimeUpdate{Event: &event})
+		})
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var clientError *ClientError
+		if errors.As(err, &clientError) && clientError.Code == runtimeapi.ErrorCursorExpired {
+			snapshot, observeErr := c.Observe(ctx)
+			if observeErr != nil {
+				return observeErr
+			}
+			cursor = snapshot.LatestEventCursor
+			if err := handle(RuntimeUpdate{Snapshot: &snapshot}); err != nil {
+				return err
+			}
+			continue
+		}
+		if !errors.As(err, &clientError) || !clientError.Retryable {
+			return err
+		}
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func (c *Client) UploadImport(
@@ -448,13 +570,17 @@ func (c *Client) do(request *http.Request) (*http.Response, error) {
 	if err == nil {
 		return response, nil
 	}
+	return nil, transportClientError(err)
+}
+
+func transportClientError(err error) error {
 	code := runtimeapi.ErrorServiceUnavailable
 	message := "Submux Runtime is unavailable"
 	if errors.Is(err, os.ErrPermission) {
 		code = runtimeapi.ErrorUnauthorized
 		message = "permission to access Submux Runtime was denied"
 	}
-	return nil, &ClientError{
+	return &ClientError{
 		Code:      code,
 		Message:   message,
 		Retryable: code == runtimeapi.ErrorServiceUnavailable,
@@ -480,6 +606,7 @@ func decodeClientError(response *http.Response) error {
 		Message:         envelope.Error.Message,
 		Retryable:       envelope.Error.Retryable,
 		CurrentRevision: envelope.CurrentRevision,
+		EarliestCursor:  envelope.EarliestCursor,
 	}
 }
 
@@ -488,6 +615,15 @@ func invalidResponseError(kind string, err error) error {
 		Code:      runtimeapi.ErrorServiceUnavailable,
 		Message:   "Runtime returned an invalid " + kind,
 		Retryable: true,
+		Cause:     err,
+	}
+}
+
+func invalidEventStreamError(err error) error {
+	return &ClientError{
+		Code:      runtimeapi.ErrorServiceUnavailable,
+		Message:   "Runtime returned an invalid event stream",
+		Retryable: false,
 		Cause:     err,
 	}
 }

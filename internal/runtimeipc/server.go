@@ -20,6 +20,10 @@ type Observer interface {
 	Observe(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error)
 }
 
+type EventObserver interface {
+	Events(context.Context, runtimeapi.PeerIdentity, uint64, int) ([]runtimeapi.Event, uint64, error)
+}
+
 type Operator interface {
 	UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error)
 	GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity) (runtimeapi.AdvancedOverrideDocument, error)
@@ -32,6 +36,7 @@ type Operator interface {
 
 type Server struct {
 	observer       Observer
+	eventObserver  EventObserver
 	operator       Operator
 	authorizer     Authorizer
 	runtimeVersion string
@@ -52,12 +57,14 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		return nil, errors.New("Runtime authorizer is required")
 	}
 	operator, _ := observer.(Operator)
+	eventObserver, _ := observer.(EventObserver)
 	runtimeVersion := ""
 	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
 		runtimeVersion = provider.RuntimeVersion()
 	}
 	return &Server{
 		observer:       observer,
+		eventObserver:  eventObserver,
 		operator:       operator,
 		authorizer:     authorizer,
 		runtimeVersion: runtimeVersion,
@@ -111,6 +118,7 @@ func (s *Server) Serve(ctx context.Context, listener LocalListener) error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/snapshot", s.handleSnapshot)
+	mux.HandleFunc("/v1/events", s.handleEvents)
 	mux.HandleFunc("/v1/imports", s.handleImport)
 	mux.HandleFunc("/v1/advanced-override", s.handleAdvancedOverride)
 	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
@@ -121,6 +129,105 @@ func (s *Server) Handler() http.Handler {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
 	return mux
+}
+
+func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime events only accept GET", false)
+		return
+	}
+	if requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime events do not accept a request body", false)
+		return
+	}
+	query := request.URL.Query()
+	afterValues, exists := query["after"]
+	if !exists || len(query) != 1 || len(afterValues) != 1 || afterValues[0] == "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime event cursor is missing or invalid", false)
+		return
+	}
+	after, err := strconv.ParseUint(afterValues[0], 10, 64)
+	if err != nil {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime event cursor is missing or invalid", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.eventObserver == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime event service is unavailable", true)
+		return
+	}
+
+	events, _, err := s.eventObserver.Events(
+		request.Context(),
+		peer,
+		after,
+		runtimestate.DefaultEventBatchSize,
+	)
+	if err != nil {
+		s.writeEventError(writer, request, err)
+		return
+	}
+
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Type", "application/x-ndjson")
+	writer.Header().Set(HeaderRequestID, requestID)
+	writer.Header().Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+	writer.WriteHeader(http.StatusOK)
+	controller := http.NewResponseController(writer)
+	_ = controller.SetWriteDeadline(time.Time{})
+	flusher, _ := writer.(http.Flusher)
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	encoder := json.NewEncoder(writer)
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		for _, event := range events {
+			if err := encoder.Encode(event); err != nil {
+				return
+			}
+			after = event.Cursor
+		}
+		if len(events) > 0 && flusher != nil {
+			flusher.Flush()
+		}
+		if len(events) == runtimestate.DefaultEventBatchSize {
+			events, _, err = s.eventObserver.Events(
+				request.Context(),
+				peer,
+				after,
+				runtimestate.DefaultEventBatchSize,
+			)
+			if err != nil {
+				return
+			}
+			continue
+		}
+		select {
+		case <-request.Context().Done():
+			return
+		case <-ticker.C:
+			events, _, err = s.eventObserver.Events(
+				request.Context(),
+				peer,
+				after,
+				runtimestate.DefaultEventBatchSize,
+			)
+			if err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (s *Server) handleSnapshot(writer http.ResponseWriter, request *http.Request) {
@@ -508,6 +615,25 @@ func (s *Server) writeOperationError(writer http.ResponseWriter, request *http.R
 		s.writeError(writer, request, http.StatusForbidden, runtimeapi.ErrorUnauthorized, "Runtime imported content belongs to another caller", false)
 	default:
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime operation state is temporarily unavailable", true)
+	}
+}
+
+func (s *Server) writeEventError(writer http.ResponseWriter, request *http.Request, err error) {
+	var cursorError *runtimestate.CursorExpiredError
+	switch {
+	case errors.As(err, &cursorError):
+		s.writeErrorEnvelope(writer, request, http.StatusGone, runtimeapi.ErrorEnvelope{
+			Error: runtimeapi.ProtocolError{
+				Code:      runtimeapi.ErrorCursorExpired,
+				Message:   "Runtime event cursor has expired; read a fresh Snapshot before subscribing again",
+				Retryable: false,
+			},
+			EarliestCursor: cursorError.Earliest,
+		})
+	case errors.Is(err, runtimestate.ErrInvalidEventCursor):
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime event cursor is ahead of the current state", false)
+	default:
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime events are temporarily unavailable", true)
 	}
 }
 

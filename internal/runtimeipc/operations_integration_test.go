@@ -93,6 +93,12 @@ func TestImportOperationWaitAndVerifyOverLocalIPC(t *testing.T) {
 		t.Fatalf("create Runtime IPC client: %v", err)
 	}
 	defer client.CloseIdleConnections()
+	secondClient, err := NewClient(endpoint, "test")
+	if err != nil {
+		cancel()
+		t.Fatalf("create second Runtime IPC client: %v", err)
+	}
+	defer secondClient.CloseIdleConnections()
 	snapshot, err := client.Observe(context.Background())
 	if err != nil {
 		cancel()
@@ -126,14 +132,30 @@ func TestImportOperationWaitAndVerifyOverLocalIPC(t *testing.T) {
 		cancel()
 		t.Fatalf("create Runtime operation: %v", err)
 	}
-	finished, err := client.WaitOperation(context.Background(), operation.ID, 10*time.Millisecond)
-	if err != nil {
-		cancel()
-		t.Fatalf("wait for Runtime operation: %v", err)
+	type observedOperation struct {
+		operation runtimeapi.Operation
+		err       error
 	}
-	if finished.State != runtimeapi.OperationSucceeded || finished.Result == nil || !finished.Result.Verified {
-		cancel()
-		t.Fatalf("finished operation = %#v", finished)
+	observed := make(chan observedOperation, 2)
+	for _, observingClient := range []*Client{client, secondClient} {
+		go func(value *Client) {
+			finished, waitErr := value.WaitOperation(context.Background(), operation.ID, 10*time.Millisecond)
+			observed <- observedOperation{operation: finished, err: waitErr}
+		}(observingClient)
+	}
+	for index := 0; index < 2; index++ {
+		result := <-observed
+		if result.err != nil {
+			cancel()
+			t.Fatalf("client %d wait for Runtime operation: %v", index, result.err)
+		}
+		if result.operation.ID != operation.ID ||
+			result.operation.State != runtimeapi.OperationSucceeded ||
+			result.operation.Result == nil ||
+			!result.operation.Result.Verified {
+			cancel()
+			t.Fatalf("client %d finished operation = %#v", index, result.operation)
+		}
 	}
 	repeated, err := client.Execute(context.Background(), request)
 	if err != nil || repeated.ID != operation.ID {
