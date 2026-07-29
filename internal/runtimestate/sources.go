@@ -23,9 +23,11 @@ var (
 	currentSourceIDKey  = []byte("current_source_id")
 	ErrSourceNotFound   = errors.New("Runtime configuration source was not found")
 	ErrSourceIDConflict = errors.New("Runtime configuration source ID already exists")
+	ErrCurrentSource    = errors.New("Runtime configuration source is current")
+	ErrSourceChanged    = errors.New("Runtime current configuration source changed")
 )
 
-type RemoteSourceRecord struct {
+type SourceRecord struct {
 	ID                     string     `json:"id"`
 	Type                   string     `json:"type"`
 	Name                   string     `json:"name"`
@@ -59,6 +61,8 @@ type RemoteSourceRecord struct {
 	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
+type RemoteSourceRecord = SourceRecord
+
 type SourceRefreshSuccess struct {
 	ETag            string
 	LastModified    string
@@ -81,29 +85,29 @@ type SourceRefreshFailure struct {
 	Manual        bool
 }
 
-func (s *Store) CreateRemoteSource(
-	record RemoteSourceRecord,
+func (s *Store) CreateSource(
+	record SourceRecord,
 	raw []byte,
 	candidate []byte,
 	operationID string,
 	now time.Time,
-) (RemoteSourceRecord, error) {
+) (SourceRecord, error) {
 	if s == nil || s.db == nil {
-		return RemoteSourceRecord{}, errors.New("Runtime state is not open")
+		return SourceRecord{}, errors.New("Runtime state is not open")
 	}
 	if record.ID == "" {
 		var err error
 		record.ID, err = randomIdentifier("src_")
 		if err != nil {
-			return RemoteSourceRecord{}, err
+			return SourceRecord{}, err
 		}
 	}
-	if err := validateRemoteSourceRecord(record, true); err != nil {
-		return RemoteSourceRecord{}, err
+	if err := validateSourceRecord(record, true); err != nil {
+		return SourceRecord{}, err
 	}
 	rawDigest, candidateDigest, revisionKey, err := s.writeSourceRevision(record.ID, raw, candidate)
 	if err != nil {
-		return RemoteSourceRecord{}, err
+		return SourceRecord{}, err
 	}
 	now = now.UTC()
 	record.RawSHA256 = rawDigest
@@ -132,19 +136,29 @@ func (s *Store) CreateRemoteSource(
 		return err
 	})
 	if err != nil {
-		return RemoteSourceRecord{}, err
+		return SourceRecord{}, err
 	}
 	return record, nil
 }
 
-func (s *Store) GetRemoteSource(id string) (RemoteSourceRecord, error) {
+func (s *Store) CreateRemoteSource(
+	record RemoteSourceRecord,
+	raw []byte,
+	candidate []byte,
+	operationID string,
+	now time.Time,
+) (RemoteSourceRecord, error) {
+	return s.CreateSource(record, raw, candidate, operationID, now)
+}
+
+func (s *Store) GetSource(id string) (SourceRecord, error) {
 	if s == nil || s.db == nil {
-		return RemoteSourceRecord{}, errors.New("Runtime state is not open")
+		return SourceRecord{}, errors.New("Runtime state is not open")
 	}
 	if !validSourceID(id) {
-		return RemoteSourceRecord{}, ErrSourceNotFound
+		return SourceRecord{}, ErrSourceNotFound
 	}
-	var record RemoteSourceRecord
+	var record SourceRecord
 	err := s.db.View(func(transaction *bbolt.Tx) error {
 		var err error
 		record, err = readRemoteSource(transaction.Bucket(sourcesBucket), id)
@@ -153,11 +167,22 @@ func (s *Store) GetRemoteSource(id string) (RemoteSourceRecord, error) {
 	return record, err
 }
 
-func (s *Store) CurrentRemoteSource() (RemoteSourceRecord, error) {
-	if s == nil || s.db == nil {
-		return RemoteSourceRecord{}, errors.New("Runtime state is not open")
+func (s *Store) GetRemoteSource(id string) (RemoteSourceRecord, error) {
+	record, err := s.GetSource(id)
+	if err != nil {
+		return RemoteSourceRecord{}, err
 	}
-	var record RemoteSourceRecord
+	if !remoteSourceType(record.Type) {
+		return RemoteSourceRecord{}, ErrSourceNotFound
+	}
+	return record, nil
+}
+
+func (s *Store) CurrentSource() (SourceRecord, error) {
+	if s == nil || s.db == nil {
+		return SourceRecord{}, errors.New("Runtime state is not open")
+	}
+	var record SourceRecord
 	err := s.db.View(func(transaction *bbolt.Tx) error {
 		metadata := transaction.Bucket(metadataBucket)
 		if metadata == nil {
@@ -172,6 +197,102 @@ func (s *Store) CurrentRemoteSource() (RemoteSourceRecord, error) {
 		return err
 	})
 	return record, err
+}
+
+func (s *Store) CurrentRemoteSource() (RemoteSourceRecord, error) {
+	record, err := s.CurrentSource()
+	if err != nil {
+		return RemoteSourceRecord{}, err
+	}
+	if !remoteSourceType(record.Type) {
+		return RemoteSourceRecord{}, ErrSourceNotFound
+	}
+	return record, nil
+}
+
+func (s *Store) SwitchCurrentSource(
+	expectedCurrentID string,
+	targetSourceID string,
+	operationID string,
+	now time.Time,
+) (SourceRecord, error) {
+	if s == nil || s.db == nil {
+		return SourceRecord{}, errors.New("Runtime state is not open")
+	}
+	if (expectedCurrentID != "" && !validSourceID(expectedCurrentID)) ||
+		!validSourceID(targetSourceID) {
+		return SourceRecord{}, ErrSourceNotFound
+	}
+	now = now.UTC()
+	var target SourceRecord
+	err := s.db.Update(func(transaction *bbolt.Tx) error {
+		metadata := transaction.Bucket(metadataBucket)
+		sources := transaction.Bucket(sourcesBucket)
+		if metadata == nil || sources == nil {
+			return errors.New("Runtime source state is unavailable")
+		}
+		currentID := string(metadata.Get(currentSourceIDKey))
+		if currentID != expectedCurrentID {
+			return ErrSourceChanged
+		}
+		var err error
+		target, err = readRemoteSource(sources, targetSourceID)
+		if err != nil {
+			return err
+		}
+		if currentID == targetSourceID {
+			return nil
+		}
+		if err := metadata.Put(currentSourceIDKey, []byte(targetSourceID)); err != nil {
+			return err
+		}
+		_, err = advanceRevisionAndEvent(transaction, "source.switched", operationID, now)
+		return err
+	})
+	return target, err
+}
+
+func (s *Store) DeleteSource(
+	sourceID string,
+	allowCurrent bool,
+	operationID string,
+	now time.Time,
+) (SourceRecord, error) {
+	if s == nil || s.db == nil {
+		return SourceRecord{}, errors.New("Runtime state is not open")
+	}
+	if !validSourceID(sourceID) {
+		return SourceRecord{}, ErrSourceNotFound
+	}
+	now = now.UTC()
+	var deleted SourceRecord
+	err := s.db.Update(func(transaction *bbolt.Tx) error {
+		metadata := transaction.Bucket(metadataBucket)
+		sources := transaction.Bucket(sourcesBucket)
+		if metadata == nil || sources == nil {
+			return errors.New("Runtime source state is unavailable")
+		}
+		currentID := string(metadata.Get(currentSourceIDKey))
+		if currentID == sourceID && !allowCurrent {
+			return ErrCurrentSource
+		}
+		var err error
+		deleted, err = readRemoteSource(sources, sourceID)
+		if err != nil {
+			return err
+		}
+		if err := sources.Delete([]byte(sourceID)); err != nil {
+			return err
+		}
+		if currentID == sourceID {
+			if err := metadata.Delete(currentSourceIDKey); err != nil {
+				return err
+			}
+		}
+		_, err = advanceRevisionAndEvent(transaction, "source.deleted", operationID, now)
+		return err
+	})
+	return deleted, err
 }
 
 func (s *Store) CommitRemoteSourceRefresh(
@@ -210,6 +331,9 @@ func (s *Store) CommitRemoteSourceRefresh(
 		record, err = readRemoteSource(sources, id)
 		if err != nil {
 			return err
+		}
+		if !remoteSourceType(record.Type) {
+			return ErrSourceNotFound
 		}
 		record.ETag = update.ETag
 		record.LastModified = update.LastModified
@@ -258,6 +382,9 @@ func (s *Store) RecordRemoteSourceFailure(
 		if err != nil {
 			return err
 		}
+		if !remoteSourceType(record.Type) {
+			return ErrSourceNotFound
+		}
 		record.LastRefreshResult = update.Result
 		record.LastRefreshRoute = update.Route
 		record.LastRefreshAt = timePointer(now)
@@ -298,7 +425,8 @@ func (s *Store) DueCurrentRemoteSource(now time.Time) (RemoteSourceRecord, bool,
 		if err != nil {
 			return err
 		}
-		found = record.RefreshIntervalSeconds > 0 &&
+		found = remoteSourceType(record.Type) &&
+			record.RefreshIntervalSeconds > 0 &&
 			record.NextRefreshAt != nil &&
 			!now.Before(record.NextRefreshAt.UTC())
 		return nil
@@ -332,11 +460,11 @@ func (s *Store) HasActiveSourceRefresh(sourceID string) (bool, error) {
 	return active, err
 }
 
-func (s *Store) ReadRemoteSourceRevision(record RemoteSourceRecord) ([]byte, []byte, error) {
+func (s *Store) ReadSourceRevision(record SourceRecord) ([]byte, []byte, error) {
 	if s == nil || s.root == "" {
 		return nil, nil, errors.New("Runtime state is not open")
 	}
-	if err := validateRemoteSourceRecord(record, false); err != nil {
+	if err := validateSourceRecord(record, false); err != nil {
 		return nil, nil, err
 	}
 	directory, err := s.sourceRevisionDirectory(record.ID, record.RevisionKey, false)
@@ -354,6 +482,10 @@ func (s *Store) ReadRemoteSourceRevision(record RemoteSourceRecord) ([]byte, []b
 	return raw, candidate, nil
 }
 
+func (s *Store) ReadRemoteSourceRevision(record RemoteSourceRecord) ([]byte, []byte, error) {
+	return s.ReadSourceRevision(record)
+}
+
 func sourceSummary(transaction *bbolt.Tx) (runtimeapi.SourceStatus, error) {
 	sources := transaction.Bucket(sourcesBucket)
 	metadata := transaction.Bucket(metadataBucket)
@@ -367,13 +499,14 @@ func sourceSummary(transaction *bbolt.Tx) (runtimeapi.SourceStatus, error) {
 		if err := json.Unmarshal(value, &record); err != nil {
 			return errors.New("Runtime source record is invalid")
 		}
-		if err := validateRemoteSourceRecord(record, false); err != nil {
+		if err := validateSourceRecord(record, false); err != nil {
 			return err
 		}
 		summary := runtimeapi.SourceSummary{
 			ID:                     record.ID,
 			Type:                   record.Type,
 			Name:                   record.Name,
+			Current:                record.ID == currentID,
 			RedactedTarget:         record.RedactedTarget,
 			Route:                  record.Route,
 			RefreshIntervalSeconds: record.RefreshIntervalSeconds,
@@ -415,19 +548,51 @@ func readRemoteSource(bucket *bbolt.Bucket, id string) (RemoteSourceRecord, erro
 	if record.ID != id {
 		return RemoteSourceRecord{}, errors.New("Runtime source record is invalid")
 	}
-	if err := validateRemoteSourceRecord(record, false); err != nil {
+	if err := validateSourceRecord(record, false); err != nil {
 		return RemoteSourceRecord{}, err
 	}
 	return record, nil
 }
 
-func validateRemoteSourceRecord(record RemoteSourceRecord, allowMissingRevision bool) error {
+func validateSourceRecord(record SourceRecord, allowMissingRevision bool) error {
 	if !validSourceID(record.ID) ||
-		record.Type != runtimeapi.SourceTypeRemoteHTTP ||
 		record.Name == "" ||
-		record.URL == "" ||
+		len(record.Name) > 128 ||
+		containsControl(record.Name) ||
 		record.RedactedTarget == "" ||
-		(record.Route != runtimeapi.SourceRouteDirect && record.Route != runtimeapi.SourceRouteMihomo) {
+		containsControl(record.RedactedTarget) {
+		return errors.New("Runtime source record is invalid")
+	}
+	switch record.Type {
+	case runtimeapi.SourceTypeRemoteHTTP, runtimeapi.SourceTypeSubmuxOutput:
+		if record.URL == "" ||
+			(record.Route != runtimeapi.SourceRouteDirect && record.Route != runtimeapi.SourceRouteMihomo) {
+			return errors.New("Runtime source record is invalid")
+		}
+	case runtimeapi.SourceTypeLocalImport:
+		if record.URL != "" ||
+			record.Route != "" ||
+			record.UserAgent != "" ||
+			record.Username != "" ||
+			record.Password != "" ||
+			record.AuthorizedTarget != "" ||
+			record.AllowPrivate ||
+			record.AllowHTTP ||
+			record.CustomCAPEM != "" ||
+			record.SkipTLSVerify ||
+			record.RefreshIntervalSeconds != 0 ||
+			record.TimeoutSeconds != 0 ||
+			record.MaxResponseBytes != 0 ||
+			record.ETag != "" ||
+			record.LastModified != "" ||
+			record.LastRefreshRoute != "" ||
+			record.LastManualRefreshAt != nil ||
+			record.NextRefreshAt != nil ||
+			record.FailureClass != "" ||
+			record.AttemptCount != 0 {
+			return errors.New("Runtime local source record is invalid")
+		}
+	default:
 		return errors.New("Runtime source record is invalid")
 	}
 	if allowMissingRevision {
@@ -439,6 +604,18 @@ func validateRemoteSourceRecord(record RemoteSourceRecord, allowMissingRevision 
 		return errors.New("Runtime source revision record is invalid")
 	}
 	return nil
+}
+
+func validateRemoteSourceRecord(record RemoteSourceRecord, allowMissingRevision bool) error {
+	if !remoteSourceType(record.Type) {
+		return errors.New("Runtime remote source record is invalid")
+	}
+	return validateSourceRecord(record, allowMissingRevision)
+}
+
+func remoteSourceType(sourceType string) bool {
+	return sourceType == runtimeapi.SourceTypeRemoteHTTP ||
+		sourceType == runtimeapi.SourceTypeSubmuxOutput
 }
 
 func validSourceID(id string) bool {
@@ -548,6 +725,56 @@ func (s *Store) safeSourceRoot() (string, error) {
 		return "", errors.New("Runtime source root must not contain symbolic or reparse links")
 	}
 	return root, nil
+}
+
+func (s *Store) RuntimeDataDir() (string, error) {
+	if s == nil || s.root == "" {
+		return "", errors.New("Runtime state is not open")
+	}
+	dataRoot := filepath.Join(s.root, "mihomo-data")
+	if filepath.Dir(dataRoot) != s.root {
+		return "", errors.New("Runtime data path escaped the state root")
+	}
+	if err := ensureRealDirectory(dataRoot); err != nil {
+		return "", err
+	}
+	linked, err := safepath.ContainsLink(dataRoot)
+	if err != nil {
+		return "", fmt.Errorf("inspect Runtime data directory: %w", err)
+	}
+	if linked {
+		return "", errors.New("Runtime data directory must not contain symbolic or reparse links")
+	}
+	return dataRoot, nil
+}
+
+func (s *Store) SourceRuntimeDataDir(sourceID string) (string, error) {
+	if !validSourceID(sourceID) {
+		return "", errors.New("Runtime source ID is invalid")
+	}
+	dataRoot, err := s.RuntimeDataDir()
+	if err != nil {
+		return "", err
+	}
+	sourcesRoot := filepath.Join(dataRoot, "sources")
+	sourceRoot := filepath.Join(sourcesRoot, sourceID)
+	if filepath.Dir(sourcesRoot) != dataRoot ||
+		filepath.Dir(sourceRoot) != sourcesRoot {
+		return "", errors.New("Runtime source data path escaped the state root")
+	}
+	for _, path := range []string{sourcesRoot, sourceRoot} {
+		if err := ensureRealDirectory(path); err != nil {
+			return "", err
+		}
+	}
+	linked, err := safepath.ContainsLink(sourceRoot)
+	if err != nil {
+		return "", fmt.Errorf("inspect Runtime source data directory: %w", err)
+	}
+	if linked {
+		return "", errors.New("Runtime source data directory must not contain symbolic or reparse links")
+	}
+	return sourceRoot, nil
 }
 
 func ensureRealDirectory(path string) error {

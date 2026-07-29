@@ -383,7 +383,10 @@ func validateAction(action runtimeapi.Action) error {
 			return errors.New("proxy.apply_import requires a valid content_id")
 		}
 		if action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
 			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
 			return errors.New("proxy.apply_import accepts only content_id")
@@ -391,7 +394,10 @@ func validateAction(action runtimeapi.Action) error {
 	case runtimeapi.ActionStartProxy, runtimeapi.ActionStopProxy:
 		if action.Params.ContentID != "" ||
 			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
 			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
 			return errors.New("proxy start and stop do not accept parameters")
@@ -399,14 +405,31 @@ func validateAction(action runtimeapi.Action) error {
 	case runtimeapi.ActionAddRemoteSource:
 		if !validContentID(action.Params.ContentID) ||
 			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
 			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
 			return errors.New("source.add_remote requires only a valid content_id")
 		}
+	case runtimeapi.ActionAddImportedSource:
+		if !validContentID(action.Params.ContentID) ||
+			!validResourceName(action.Params.SourceName) ||
+			action.Params.SourceID != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("source.add_imported requires content_id and source_name")
+		}
 	case runtimeapi.ActionRefreshSource:
 		if !validSourceID(action.Params.SourceID) ||
 			action.Params.ContentID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" ||
 			(action.Params.Route != "" &&
@@ -417,15 +440,43 @@ func validateAction(action runtimeapi.Action) error {
 	case runtimeapi.ActionApplySource:
 		if !validSourceID(action.Params.SourceID) ||
 			action.Params.ContentID != "" ||
+			action.Params.SourceName != "" ||
 			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
 			return errors.New("source.apply requires only a valid source_id")
 		}
+	case runtimeapi.ActionSwitchSource:
+		if !validSourceID(action.Params.SourceID) ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Confirm ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" ||
+			(action.Params.Route != "" &&
+				action.Params.Route != runtimeapi.SourceRouteDirect &&
+				action.Params.Route != runtimeapi.SourceRouteMihomo) {
+			return errors.New("source.switch requires source_id and optional route or use_cached")
+		}
+	case runtimeapi.ActionDeleteSource:
+		if !validSourceID(action.Params.SourceID) ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("source.delete requires source_id and optional confirmation")
+		}
 	case runtimeapi.ActionAddManagedResource:
 		if !validContentID(action.Params.ContentID) ||
 			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
 			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
 			!validResourceKind(action.Params.ResourceKind) ||
 			!validResourceName(action.Params.ResourceName) {
 			return errors.New("resource.add requires content_id, resource_kind, and resource_name")
@@ -433,7 +484,10 @@ func validateAction(action runtimeapi.Action) error {
 	case runtimeapi.ActionSetAdvancedOverride:
 		if !validContentID(action.Params.ContentID) ||
 			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
 			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
 			return errors.New("override.set requires only a valid content_id")
@@ -496,10 +550,16 @@ func publicExecutionMessage(kind string) string {
 		return "Mihomo could not stop the explicit proxy"
 	case runtimeapi.ActionAddRemoteSource:
 		return "Runtime could not add the remote configuration source"
+	case runtimeapi.ActionAddImportedSource:
+		return "Runtime could not add the imported configuration source"
 	case runtimeapi.ActionRefreshSource:
 		return "Runtime could not refresh the remote configuration source"
 	case runtimeapi.ActionApplySource:
-		return "Runtime could not apply the current remote configuration source"
+		return "Runtime could not apply the current configuration source"
+	case runtimeapi.ActionSwitchSource:
+		return "Runtime could not switch the current configuration source"
+	case runtimeapi.ActionDeleteSource:
+		return "Runtime could not delete the configuration source"
 	case runtimeapi.ActionAddManagedResource:
 		return "Runtime could not import the managed resource"
 	case runtimeapi.ActionSetAdvancedOverride:

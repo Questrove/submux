@@ -2,6 +2,7 @@ package runtimestate
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -196,5 +197,121 @@ func TestDueCurrentRemoteSourceAndActiveRefreshDetection(t *testing.T) {
 	active, err := store.HasActiveSourceRefresh(record.ID)
 	if err != nil || !active {
 		t.Fatalf("active refresh = %v, err=%v", active, err)
+	}
+}
+
+func TestSourceTypesCoexistAndCurrentSourceSwitchIsCompareAndSwap(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+	remote, err := store.CreateSource(SourceRecord{
+		Type:                   runtimeapi.SourceTypeSubmuxOutput,
+		Name:                   "submux output",
+		URL:                    "https://submux.example/output.yaml",
+		RedactedTarget:         "https://submux.example:443/…",
+		Route:                  runtimeapi.SourceRouteDirect,
+		RefreshIntervalSeconds: 900,
+		TimeoutSeconds:         30,
+		MaxResponseBytes:       8 << 20,
+	}, []byte("remote"), []byte("candidate-remote"), "op_remote", now)
+	if err != nil {
+		t.Fatalf("create submux output source: %v", err)
+	}
+	local, err := store.CreateSource(SourceRecord{
+		Type:              runtimeapi.SourceTypeLocalImport,
+		Name:              "offline copy",
+		RedactedTarget:    "Runtime-managed local copy",
+		LastRefreshResult: "imported",
+	}, []byte("local"), []byte("candidate-local"), "op_local", now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("create local source: %v", err)
+	}
+	current, err := store.CurrentSource()
+	if err != nil || current.ID != remote.ID {
+		t.Fatalf("initial current source = %#v err=%v", current, err)
+	}
+
+	switched, err := store.SwitchCurrentSource(remote.ID, local.ID, "op_switch", now.Add(2*time.Second))
+	if err != nil || switched.ID != local.ID {
+		t.Fatalf("switch current source = %#v err=%v", switched, err)
+	}
+	if _, err := store.SwitchCurrentSource(remote.ID, remote.ID, "op_stale", now.Add(3*time.Second)); !errors.Is(err, ErrSourceChanged) {
+		t.Fatalf("stale source switch error = %v", err)
+	}
+	snapshot, err := store.Observe("dev", now.Add(4*time.Second))
+	if err != nil {
+		t.Fatalf("observe switched sources: %v", err)
+	}
+	if snapshot.Sources.Count != 2 || snapshot.Sources.CurrentSourceID != local.ID {
+		t.Fatalf("source status = %#v", snapshot.Sources)
+	}
+	for _, item := range snapshot.Sources.Items {
+		if item.Current != (item.ID == local.ID) {
+			t.Fatalf("source current marker = %#v", item)
+		}
+	}
+}
+
+func TestDeleteSourceProtectsCurrentAndSourceDataDirectoriesAreIsolated(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+	first, err := store.CreateSource(SourceRecord{
+		Type:              runtimeapi.SourceTypeLocalImport,
+		Name:              "first",
+		RedactedTarget:    "Runtime-managed local copy",
+		LastRefreshResult: "imported",
+	}, []byte("first"), []byte("candidate-first"), "op_first", now)
+	if err != nil {
+		t.Fatalf("create first source: %v", err)
+	}
+	second, err := store.CreateSource(SourceRecord{
+		Type:              runtimeapi.SourceTypeLocalImport,
+		Name:              "second",
+		RedactedTarget:    "Runtime-managed local copy",
+		LastRefreshResult: "imported",
+	}, []byte("second"), []byte("candidate-second"), "op_second", now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("create second source: %v", err)
+	}
+	firstData, err := store.SourceRuntimeDataDir(first.ID)
+	if err != nil {
+		t.Fatalf("create first source data directory: %v", err)
+	}
+	secondData, err := store.SourceRuntimeDataDir(second.ID)
+	if err != nil {
+		t.Fatalf("create second source data directory: %v", err)
+	}
+	if firstData == secondData || filepath.Dir(firstData) != filepath.Dir(secondData) {
+		t.Fatalf("source data directories = %q / %q", firstData, secondData)
+	}
+	defaultData, err := store.RuntimeDataDir()
+	if err != nil {
+		t.Fatalf("create default Runtime data directory: %v", err)
+	}
+	if filepath.Dir(filepath.Dir(firstData)) != defaultData ||
+		strings.Contains(defaultData, first.ID) ||
+		strings.Contains(defaultData, second.ID) {
+		t.Fatalf("default/source data directories = %q / %q / %q", defaultData, firstData, secondData)
+	}
+	if _, err := store.DeleteSource(first.ID, false, "op_protected", now.Add(2*time.Second)); !errors.Is(err, ErrCurrentSource) {
+		t.Fatalf("delete protected current source error = %v", err)
+	}
+	if _, err := store.DeleteSource(second.ID, false, "op_delete_second", now.Add(3*time.Second)); err != nil {
+		t.Fatalf("delete non-current source: %v", err)
+	}
+	if _, err := store.DeleteSource(first.ID, true, "op_delete_current", now.Add(4*time.Second)); err != nil {
+		t.Fatalf("delete confirmed current source: %v", err)
+	}
+	if _, err := store.CurrentSource(); !errors.Is(err, ErrSourceNotFound) {
+		t.Fatalf("current source after deletion error = %v", err)
 	}
 }

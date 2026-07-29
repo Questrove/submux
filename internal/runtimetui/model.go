@@ -30,32 +30,39 @@ type Client interface {
 }
 
 type Model struct {
-	ctx           context.Context
-	client        Client
-	editor        textarea.Model
-	editing       bool
-	editorMode    string
-	busy          bool
-	width         int
-	height        int
-	snapshot      runtimeapi.Snapshot
-	preview       runtimeapi.CandidatePreview
-	lastOperation runtimeapi.Operation
-	verification  runtimeapi.ProxyVerification
-	status        string
-	err           error
+	ctx              context.Context
+	client           Client
+	editor           textarea.Model
+	editing          bool
+	editorMode       string
+	busy             bool
+	width            int
+	height           int
+	snapshot         runtimeapi.Snapshot
+	selectedSourceID string
+	preview          runtimeapi.CandidatePreview
+	lastOperation    runtimeapi.Operation
+	verification     runtimeapi.ProxyVerification
+	status           string
+	err              error
 }
 
 const (
-	editorModeConfig   = "config"
-	editorModeSource   = "source"
-	editorModeResource = "resource"
-	editorModeOverride = "override"
+	editorModeConfig         = "config"
+	editorModeSource         = "source"
+	editorModeImportedSource = "imported_source"
+	editorModeResource       = "resource"
+	editorModeOverride       = "override"
 )
 
 type resourceDraft struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
+	Content string `json:"content"`
+}
+
+type importedSourceDraft struct {
+	Name    string `json:"name"`
 	Content string `json:"content"`
 }
 
@@ -156,6 +163,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.SetHeight(height)
 	case snapshotMsg:
 		m.snapshot = message.snapshot
+		m.syncSelectedSource()
 		m.busy = false
 		m.err = nil
 		m.status = "状态已更新"
@@ -174,7 +182,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.editor.Blur()
 		}
 		m.err = nil
-		m.status = fmt.Sprintf("运行操作 %s：%s / %s", message.operation.ID, message.operation.State, message.operation.Stage)
+		m.status = operationStatus(message.operation)
 		if operationTerminal(message.operation.State) {
 			return m, m.observeCmd()
 		}
@@ -235,6 +243,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.status = "正在上传并添加远程来源…"
 					return m, m.addSourceCmd(body)
+				}
+				if m.editorMode == editorModeImportedSource {
+					var draft importedSourceDraft
+					if err := json.Unmarshal(body, &draft); err != nil ||
+						strings.TrimSpace(draft.Name) == "" ||
+						strings.TrimSpace(draft.Content) == "" {
+						m.busy = false
+						m.err = errors.New("本机来源必须是包含 name 和 content 的有效 JSON")
+						m.status = m.err.Error()
+						return m, nil
+					}
+					m.status = "正在上传并添加本机配置来源…"
+					return m, m.addImportedSourceCmd(draft)
 				}
 				if m.editorMode == editorModeResource {
 					var draft resourceDraft
@@ -305,6 +326,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = nil
 			m.editor.SetValue(defaultSourceDraft())
 			m.status = "编辑来源 JSON 后按 Ctrl+S 添加，Esc 取消"
+			return m, m.editor.Focus()
+		case "n":
+			m.editing = true
+			m.editorMode = editorModeImportedSource
+			m.err = nil
+			m.editor.SetValue(defaultImportedSourceDraft())
+			m.status = "编辑本机来源 JSON 后按 Ctrl+S 添加，Esc 取消"
 			return m, m.editor.Focus()
 		case "e":
 			m.editing = true
@@ -381,19 +409,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "正在验证显式代理…"
 			return m, m.verifyCmd()
 		case "y":
-			sourceID := m.snapshot.Sources.CurrentSourceID
+			sourceID := m.selectedSource()
 			if sourceID == "" {
-				m.err = errors.New("当前没有可预览的远程来源")
+				m.err = errors.New("当前没有可预览的配置来源")
 				m.status = m.err.Error()
 				return m, nil
 			}
 			m.busy = true
-			m.status = "正在生成当前来源的最终候选配置…"
+			m.status = "正在生成所选来源的最终候选配置…"
 			return m, m.previewSourceCmd(sourceID)
 		case "f", "d", "m":
-			sourceID := m.snapshot.Sources.CurrentSourceID
+			sourceID := m.selectedSource()
 			if sourceID == "" {
-				m.err = errors.New("当前没有可刷新的远程来源")
+				m.err = errors.New("当前没有可刷新的配置来源")
 				m.status = m.err.Error()
 				return m, nil
 			}
@@ -411,6 +439,65 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				Params: runtimeapi.ActionParams{
 					SourceID: sourceID,
 					Route:    route,
+				},
+			})
+		case "[", "]":
+			m.selectAdjacentSource(key.String() == "]")
+			m.err = nil
+			if source := m.selectedSourceSummary(); source != nil {
+				m.status = fmt.Sprintf("已选择来源：%s（%s）", source.Name, source.Type)
+			}
+			return m, nil
+		case "t", "k":
+			sourceID := m.selectedSource()
+			if sourceID == "" {
+				m.err = errors.New("当前没有可切换的配置来源")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.busy = true
+			useCached := key.String() == "k"
+			if useCached {
+				m.status = "正在刷新并切换来源；刷新失败时允许使用已验证缓存…"
+			} else {
+				m.status = "正在刷新并切换来源…"
+			}
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind: runtimeapi.ActionSwitchSource,
+				Params: runtimeapi.ActionParams{
+					SourceID:  sourceID,
+					UseCached: useCached,
+				},
+			})
+		case "z":
+			sourceID := m.selectedSource()
+			if sourceID == "" {
+				m.err = errors.New("当前没有可删除的配置来源")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.busy = true
+			m.status = "正在删除所选来源…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind: runtimeapi.ActionDeleteSource,
+				Params: runtimeapi.ActionParams{
+					SourceID: sourceID,
+				},
+			})
+		case "ctrl+d":
+			sourceID := m.selectedSource()
+			if sourceID == "" {
+				m.err = errors.New("当前没有可删除的配置来源")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.busy = true
+			m.status = "正在确认删除所选来源…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind: runtimeapi.ActionDeleteSource,
+				Params: runtimeapi.ActionParams{
+					SourceID: sourceID,
+					Confirm:  true,
 				},
 			})
 		case "p":
@@ -440,6 +527,9 @@ func (m Model) View() tea.View {
 		if m.editorMode == editorModeSource {
 			editorTitle = "Submux Runtime · 添加远程配置来源"
 			editorHelp = "Ctrl+S 添加来源 · Esc 取消；高风险设置必须填写精确 authorized_target"
+		} else if m.editorMode == editorModeImportedSource {
+			editorTitle = "Submux Runtime · 添加本机配置来源"
+			editorHelp = "Ctrl+S 上传副本并添加来源 · Esc 取消；原文件路径不会保存"
 		} else if m.editorMode == editorModeResource {
 			editorTitle = "Submux Runtime · 添加托管资源"
 			editorHelp = "Ctrl+S 上传内容并添加 · Esc 取消；只接受约定的资源类型"
@@ -489,7 +579,23 @@ func (m Model) View() tea.View {
 	if len(m.snapshot.Sources.Items) > 0 {
 		lines = append(lines, "", labelStyle.Render("配置来源"))
 		for _, source := range m.snapshot.Sources.Items {
-			line := fmt.Sprintf("%s · %s · %s", source.ID, source.RedactedTarget, source.Route)
+			selection := "  "
+			if source.ID == m.selectedSourceID {
+				selection = "▶ "
+			}
+			current := ""
+			if source.Current || source.ID == m.snapshot.Sources.CurrentSourceID {
+				current = " [当前]"
+			}
+			line := fmt.Sprintf("%s%s%s · %s · %s · %s · %s",
+				selection,
+				source.Name,
+				current,
+				source.Type,
+				source.ID,
+				source.RedactedTarget,
+				source.Route,
+			)
 			if source.LastRefreshResult != "" {
 				line += " · " + source.LastRefreshResult
 			}
@@ -521,7 +627,7 @@ func (m Model) View() tea.View {
 		"",
 		renderStatus(m.status, m.err, m.busy),
 		"",
-		mutedStyle.Render("i 导入/预览 · u 添加来源 · y 预览当前来源 · e 添加资源 · o 编辑高级覆盖 · f/d/m 刷新来源 · p 应用来源 · a 应用导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		mutedStyle.Render("[/] 选择来源 · u 添加远程来源 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -563,6 +669,34 @@ func (m Model) addSourceCmd(body []byte) tea.Cmd {
 				Kind: runtimeapi.ActionAddRemoteSource,
 				Params: runtimeapi.ActionParams{
 					ContentID: content.ID,
+				},
+			},
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return operationMsg{operation: operation}
+	}
+}
+
+func (m Model) addImportedSourceCmd(draft importedSourceDraft) tea.Cmd {
+	revision := m.snapshot.Revision
+	return func() tea.Msg {
+		content, err := m.client.UploadImport(
+			m.ctx,
+			"application/x-yaml",
+			[]byte(draft.Content),
+		)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		operation, err := m.client.Execute(m.ctx, runtimeapi.CreateOperationRequest{
+			IfRevision: revision,
+			Action: runtimeapi.Action{
+				Kind: runtimeapi.ActionAddImportedSource,
+				Params: runtimeapi.ActionParams{
+					ContentID:  content.ID,
+					SourceName: draft.Name,
 				},
 			},
 		})
@@ -748,6 +882,89 @@ func publicErrorMessage(err error) string {
 	return err.Error()
 }
 
+func operationStatus(operation runtimeapi.Operation) string {
+	status := fmt.Sprintf("运行操作 %s：%s / %s", operation.ID, operation.State, operation.Stage)
+	if operation.Result == nil {
+		return status
+	}
+	switch operation.Action.Kind {
+	case runtimeapi.ActionSwitchSource:
+		cache := ""
+		if operation.Result.UsedCachedSource {
+			cache = "，使用已验证缓存"
+		}
+		return fmt.Sprintf("%s；来源 %s → %s%s",
+			status,
+			valueOr(operation.Result.PreviousSourceID, "无"),
+			valueOr(operation.Result.SourceID, "无"),
+			cache,
+		)
+	case runtimeapi.ActionDeleteSource:
+		if operation.Result.Deleted {
+			return fmt.Sprintf("%s；已删除来源 %s", status, operation.Result.SourceID)
+		}
+	}
+	return status
+}
+
+func (m *Model) syncSelectedSource() {
+	if len(m.snapshot.Sources.Items) == 0 {
+		m.selectedSourceID = ""
+		return
+	}
+	for _, source := range m.snapshot.Sources.Items {
+		if source.ID == m.selectedSourceID {
+			return
+		}
+	}
+	if m.snapshot.Sources.CurrentSourceID != "" {
+		for _, source := range m.snapshot.Sources.Items {
+			if source.ID == m.snapshot.Sources.CurrentSourceID {
+				m.selectedSourceID = source.ID
+				return
+			}
+		}
+	}
+	m.selectedSourceID = m.snapshot.Sources.Items[0].ID
+}
+
+func (m *Model) selectAdjacentSource(forward bool) {
+	items := m.snapshot.Sources.Items
+	if len(items) == 0 {
+		m.selectedSourceID = ""
+		return
+	}
+	index := 0
+	for candidateIndex, source := range items {
+		if source.ID == m.selectedSourceID {
+			index = candidateIndex
+			break
+		}
+	}
+	if forward {
+		index = (index + 1) % len(items)
+	} else {
+		index = (index - 1 + len(items)) % len(items)
+	}
+	m.selectedSourceID = items[index].ID
+}
+
+func (m Model) selectedSource() string {
+	if m.selectedSourceID != "" {
+		return m.selectedSourceID
+	}
+	return m.snapshot.Sources.CurrentSourceID
+}
+
+func (m Model) selectedSourceSummary() *runtimeapi.SourceSummary {
+	for index := range m.snapshot.Sources.Items {
+		if m.snapshot.Sources.Items[index].ID == m.selectedSource() {
+			return &m.snapshot.Sources.Items[index]
+		}
+	}
+	return nil
+}
+
 func valueOr(value, fallback string) string {
 	if value == "" {
 		return fallback
@@ -776,6 +993,7 @@ func operationTerminal(state string) bool {
 
 func defaultSourceDraft() string {
 	return `{
+  "type": "remote_http",
   "name": "primary",
   "url": "https://example.com/config.yaml",
   "route": "direct",
@@ -787,6 +1005,13 @@ func defaultSourceDraft() string {
   "refresh_interval_seconds": 21600,
   "timeout_seconds": 30,
   "max_response_bytes": 8388608
+}`
+}
+
+func defaultImportedSourceDraft() string {
+	return `{
+  "name": "local-copy",
+  "content": "proxies: []\nrules:\n  - MATCH,DIRECT\n"
 }`
 }
 

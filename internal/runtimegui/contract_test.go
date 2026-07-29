@@ -31,10 +31,13 @@ func TestWebViewOnlyUsesAllowlistedTauriCommands(t *testing.T) {
 		"runtime_preview_override",
 		"runtime_apply_candidate",
 		"runtime_add_remote_source",
+		"runtime_add_imported_source",
 		"runtime_get_advanced_override",
 		"runtime_set_advanced_override",
 		"runtime_add_managed_resource",
 		"runtime_refresh_source",
+		"runtime_switch_source",
+		"runtime_delete_source",
 		"runtime_apply_source",
 		"runtime_start_proxy",
 		"runtime_stop_proxy",
@@ -45,6 +48,38 @@ func TestWebViewOnlyUsesAllowlistedTauriCommands(t *testing.T) {
 	} {
 		if !strings.Contains(script, `"`+command+`"`) {
 			t.Fatalf("WebView does not invoke %q", command)
+		}
+	}
+}
+
+func TestGUIExposesMultipleSourceManagementControls(t *testing.T) {
+	page := readGUIFile(t, "ui", "index.html")
+	for _, id := range []string{
+		`id="selected-source"`,
+		`id="remote-source-type"`,
+		`id="local-source-name"`,
+		`id="local-source-yaml"`,
+		`id="add-imported-source"`,
+		`id="switch-source"`,
+		`id="switch-source-cached"`,
+		`id="delete-source"`,
+	} {
+		if !strings.Contains(page, id) {
+			t.Fatalf("GUI source management control %s is missing", id)
+		}
+	}
+
+	script := readGUIFile(t, "ui", "app.js")
+	for _, field := range []string{
+		"selectedSourceId",
+		"source.current",
+		"source.type",
+		"used_cached_source",
+		"previous_source_id",
+		"confirmCurrent",
+	} {
+		if !strings.Contains(script, field) {
+			t.Fatalf("GUI does not render or submit source state field %q", field)
 		}
 	}
 }

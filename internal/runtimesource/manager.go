@@ -61,22 +61,97 @@ type Manager struct {
 	Random    func() float64
 }
 
+type SwitchPreparation struct {
+	Record        runtimestate.SourceRecord
+	RefreshResult *runtimeapi.OperationResult
+	UsedCached    bool
+}
+
 func (m *Manager) Execute(
 	ctx context.Context,
 	operation runtimeapi.Operation,
 	report Reporter,
 ) (*runtimeapi.OperationResult, error) {
-	if m == nil || m.State == nil || m.Fetcher == nil || m.Validator == nil {
+	if m == nil || m.State == nil || m.Validator == nil {
 		return nil, errors.New("Runtime source manager is incomplete")
 	}
 	switch operation.Action.Kind {
 	case runtimeapi.ActionAddRemoteSource:
+		if m.Fetcher == nil {
+			return nil, errors.New("Runtime source fetcher is unavailable")
+		}
 		return m.addRemoteSource(ctx, operation, report)
+	case runtimeapi.ActionAddImportedSource:
+		return m.addImportedSource(ctx, operation, report)
 	case runtimeapi.ActionRefreshSource:
+		if m.Fetcher == nil {
+			return nil, errors.New("Runtime source fetcher is unavailable")
+		}
 		return m.refreshSource(ctx, operation, report)
 	default:
 		return nil, errors.New("Runtime source action is unsupported")
 	}
+}
+
+func (m *Manager) PrepareSwitch(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report Reporter,
+) (SwitchPreparation, error) {
+	if m == nil || m.State == nil || m.Validator == nil {
+		return SwitchPreparation{}, errors.New("Runtime source manager is incomplete")
+	}
+	record, err := m.State.GetSource(operation.Action.Params.SourceID)
+	if err != nil {
+		return SwitchPreparation{}, &ManagerError{
+			Code:    runtimeapi.ErrorNotFound,
+			Message: "The selected Runtime configuration source is unavailable",
+			Cause:   err,
+		}
+	}
+	if record.Type == runtimeapi.SourceTypeLocalImport {
+		return SwitchPreparation{Record: record}, nil
+	}
+	if m.Fetcher == nil {
+		return SwitchPreparation{}, errors.New("Runtime source fetcher is unavailable")
+	}
+	refreshOperation := operation
+	refreshOperation.Action = runtimeapi.Action{
+		Kind: runtimeapi.ActionRefreshSource,
+		Params: runtimeapi.ActionParams{
+			SourceID: record.ID,
+			Route:    operation.Action.Params.Route,
+		},
+	}
+	refreshResult, refreshErr := m.refreshSource(ctx, refreshOperation, report)
+	if refreshErr == nil {
+		record, err = m.State.GetSource(record.ID)
+		if err != nil {
+			return SwitchPreparation{}, err
+		}
+		return SwitchPreparation{Record: record, RefreshResult: refreshResult}, nil
+	}
+	if !operation.Action.Params.UseCached {
+		return SwitchPreparation{}, refreshErr
+	}
+	record, err = m.State.GetSource(record.ID)
+	if err != nil {
+		return SwitchPreparation{}, errors.Join(refreshErr, err)
+	}
+	if record.RevisionKey == "" || record.CandidateSHA256 == "" {
+		return SwitchPreparation{}, refreshErr
+	}
+	return SwitchPreparation{
+		Record:     record,
+		UsedCached: true,
+		RefreshResult: &runtimeapi.OperationResult{
+			CandidateSHA256: record.CandidateSHA256,
+			SourceID:        record.ID,
+			RefreshResult:   record.LastRefreshResult,
+			RefreshRoute:    record.LastRefreshRoute,
+			NextRefreshAt:   cloneTime(record.NextRefreshAt),
+		},
+	}, nil
 }
 
 func (m *Manager) DueActions(now time.Time) ([]runtimeapi.Action, error) {
@@ -196,6 +271,76 @@ func (m *Manager) addRemoteSource(
 		RefreshResult:   record.LastRefreshResult,
 		RefreshRoute:    record.LastRefreshRoute,
 		NextRefreshAt:   cloneTime(record.NextRefreshAt),
+	}, nil
+}
+
+func (m *Manager) addImportedSource(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report Reporter,
+) (*runtimeapi.OperationResult, error) {
+	if err := report("reading_imported_source", 10, true); err != nil {
+		return nil, err
+	}
+	body, content, err := m.State.ConsumeImport(
+		operation.Action.Params.ContentID,
+		operation.CallerIdentity,
+		operation.ID,
+		m.now(),
+	)
+	if err != nil {
+		return nil, &ManagerError{
+			Code:    sourceImportErrorCode(err),
+			Message: "The imported source content is unavailable or no longer usable",
+			Cause:   err,
+		}
+	}
+	if !isYAMLContentType(content.ContentType) {
+		return nil, &ManagerError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The imported source content must be YAML",
+		}
+	}
+	name := strings.TrimSpace(operation.Action.Params.SourceName)
+	if name == "" || len(name) > 128 || hasControl(name) {
+		return nil, &ManagerError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The imported source name is invalid",
+		}
+	}
+	if err := report("validating_imported_source", 55, true); err != nil {
+		return nil, err
+	}
+	candidate, err := m.Validator.ValidateSourceCandidate(ctx, body)
+	if err != nil {
+		return nil, &ManagerError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Mihomo rejected the imported source candidate",
+			Cause:   err,
+		}
+	}
+	if err := validateCandidateDigest(candidate); err != nil {
+		return nil, err
+	}
+	now := m.now()
+	record := runtimestate.SourceRecord{
+		Type:              runtimeapi.SourceTypeLocalImport,
+		Name:              name,
+		RedactedTarget:    "Runtime-managed local copy",
+		LastRefreshResult: "imported",
+		LastRefreshAt:     timePointer(now),
+	}
+	if err := report("saving_imported_source", 85, false); err != nil {
+		return nil, err
+	}
+	record, err = m.State.CreateSource(record, body, candidate.YAML, operation.ID, now)
+	if err != nil {
+		return nil, err
+	}
+	return &runtimeapi.OperationResult{
+		CandidateSHA256: candidate.SHA256,
+		SourceID:        record.ID,
+		RefreshResult:   record.LastRefreshResult,
 	}, nil
 }
 
@@ -378,7 +523,7 @@ func (m *Manager) recordRefreshFailure(
 
 func recordFromConfig(config SourceConfig) runtimestate.RemoteSourceRecord {
 	return runtimestate.RemoteSourceRecord{
-		Type:                   runtimeapi.SourceTypeRemoteHTTP,
+		Type:                   config.Type,
 		Name:                   config.Name,
 		URL:                    config.URL.String(),
 		RedactedTarget:         config.RedactedTarget,
@@ -400,6 +545,7 @@ func recordFromConfig(config SourceConfig) runtimestate.RemoteSourceRecord {
 func configFromRecord(record runtimestate.RemoteSourceRecord) (SourceConfig, error) {
 	interval := record.RefreshIntervalSeconds
 	config, err := NormalizeDraft(runtimeapi.RemoteSourceDraft{
+		Type:                   record.Type,
 		Name:                   record.Name,
 		URL:                    record.URL,
 		Route:                  record.Route,
@@ -502,6 +648,15 @@ func sourceImportErrorCode(err error) string {
 
 func normalizedContentType(contentType string) string {
 	return strings.ToLower(strings.TrimSpace(strings.Split(contentType, ";")[0]))
+}
+
+func isYAMLContentType(contentType string) bool {
+	switch normalizedContentType(contentType) {
+	case "application/yaml", "application/x-yaml", "text/yaml":
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *Manager) now() time.Time {

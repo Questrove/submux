@@ -743,7 +743,7 @@ func runSource(
 	stderr io.Writer,
 ) int {
 	if len(arguments) == 0 {
-		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|list|refresh]")
+		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|delete|import|list|refresh|switch]")
 		return 2
 	}
 	switch arguments[0] {
@@ -751,12 +751,18 @@ func runSource(
 		return runSourceAdd(arguments[1:], stdin, stdout, stderr)
 	case "apply":
 		return runSourceApply(arguments[1:], stdout, stderr)
+	case "delete":
+		return runSourceDelete(arguments[1:], stdout, stderr)
+	case "import":
+		return runSourceImport(arguments[1:], stdin, stdout, stderr)
 	case "list":
 		return runSourceList(arguments[1:], stdout, stderr)
 	case "refresh":
 		return runSourceRefresh(arguments[1:], stdout, stderr)
+	case "switch":
+		return runSourceSwitch(arguments[1:], stdout, stderr)
 	default:
-		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|list|refresh]")
+		fmt.Fprintln(stderr, "usage: submux-runtime source [add|apply|delete|import|list|refresh|switch]")
 		return 2
 	}
 }
@@ -773,6 +779,7 @@ func runSourceAdd(
 	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
 	jsonOutput := flags.Bool("json", false, "print stable JSON")
 	wait := flags.Bool("wait", true, "wait for the source operation to finish")
+	sourceType := flags.String("type", runtimeapi.SourceTypeRemoteHTTP, "source type: remote_http or submux_output")
 	name := flags.String("name", "", "source display name")
 	sourceURL := flags.String("url", "", "HTTP(S) Mihomo configuration URL")
 	route := flags.String("route", runtimeapi.SourceRouteDirect, "download route: direct or mihomo")
@@ -818,6 +825,7 @@ func runSourceAdd(
 	}
 	intervalSeconds := int64(*refreshInterval / time.Second)
 	draft := runtimeapi.RemoteSourceDraft{
+		Type:                   *sourceType,
 		Name:                   *name,
 		URL:                    *sourceURL,
 		Route:                  *route,
@@ -850,6 +858,67 @@ func runSourceAdd(
 		stdout,
 		stderr,
 	)
+}
+
+func runSourceImport(
+	arguments []string,
+	stdin io.Reader,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("source import", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", true, "wait for the source operation to finish")
+	name := flags.String("name", "", "source display name")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 || strings.TrimSpace(*name) == "" {
+		fmt.Fprintln(stderr, "source import requires --name and one <file|-> argument")
+		return 2
+	}
+	body, err := readContentArgument(flags.Arg(0), stdin, runtimestate.MaxImportBytes)
+	if err != nil {
+		fmt.Fprintf(stderr, "read imported source: %v\n", err)
+		return 1
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	content, err := client.UploadImport(context.Background(), "application/x-yaml", body)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionAddImportedSource,
+			Params: runtimeapi.ActionParams{
+				ContentID:  content.ID,
+				SourceName: *name,
+			},
+		},
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(context.Background(), operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
 }
 
 func runSourceList(arguments []string, stdout io.Writer, stderr io.Writer) int {
@@ -979,6 +1048,108 @@ func runSourceApply(arguments []string, stdout io.Writer, stderr io.Writer) int 
 	return writeOperation(stdout, *jsonOutput, operation)
 }
 
+func runSourceSwitch(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("source switch", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", true, "wait for the source operation to finish")
+	route := flags.String("route", "", "one-time refresh route: direct or mihomo")
+	useCached := flags.Bool("use-cache", false, "use the last validated revision only if refresh fails")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: submux-runtime source switch [options] <source-id>")
+		return 2
+	}
+	if *route != "" && *route != runtimeapi.SourceRouteDirect && *route != runtimeapi.SourceRouteMihomo {
+		fmt.Fprintln(stderr, "source switch --route must be direct or mihomo")
+		return 2
+	}
+	return submitSourceAction(
+		*endpoint,
+		runtimeapi.Action{
+			Kind: runtimeapi.ActionSwitchSource,
+			Params: runtimeapi.ActionParams{
+				SourceID:  flags.Arg(0),
+				Route:     *route,
+				UseCached: *useCached,
+			},
+		},
+		*wait,
+		*jsonOutput,
+		stdout,
+		stderr,
+	)
+}
+
+func runSourceDelete(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("source delete", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", true, "wait for the source operation to finish")
+	confirm := flags.Bool("confirm-current", false, "confirm deletion if Mihomo is stopped and this is the current source")
+	if err := flags.Parse(arguments); err != nil {
+		return 2
+	}
+	if flags.NArg() != 1 {
+		fmt.Fprintln(stderr, "usage: submux-runtime source delete [options] <source-id>")
+		return 2
+	}
+	return submitSourceAction(
+		*endpoint,
+		runtimeapi.Action{
+			Kind: runtimeapi.ActionDeleteSource,
+			Params: runtimeapi.ActionParams{
+				SourceID: flags.Arg(0),
+				Confirm:  *confirm,
+			},
+		},
+		*wait,
+		*jsonOutput,
+		stdout,
+		stderr,
+	)
+}
+
+func submitSourceAction(
+	endpoint string,
+	action runtimeapi.Action,
+	wait bool,
+	jsonOutput bool,
+	stdout io.Writer,
+	stderr io.Writer,
+) int {
+	client, err := runtimeipc.NewClient(endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	snapshot, err := client.Observe(context.Background())
+	if err != nil {
+		return writeClientFailure(stdout, stderr, jsonOutput, err)
+	}
+	operation, err := client.Execute(context.Background(), runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action:     action,
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, jsonOutput, err)
+	}
+	if wait {
+		operation, err = client.WaitOperation(context.Background(), operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, jsonOutput, operation)
+}
+
 func submitSourceDraft(
 	endpoint string,
 	body []byte,
@@ -1029,7 +1200,14 @@ func writeSourceStatus(writer io.Writer, status runtimeapi.SourceStatus) {
 	}
 	fmt.Fprintln(writer)
 	for _, source := range status.Items {
-		fmt.Fprintf(writer, "- %s %s via %s", source.ID, source.RedactedTarget, source.Route)
+		fmt.Fprint(writer, "- ")
+		if source.Current {
+			fmt.Fprint(writer, "[current] ")
+		}
+		fmt.Fprintf(writer, "%s (%s) %s · %s", source.Name, source.Type, source.ID, source.RedactedTarget)
+		if source.Route != "" {
+			fmt.Fprintf(writer, " via %s", source.Route)
+		}
 		if source.LastRefreshResult != "" {
 			fmt.Fprintf(writer, " · %s", source.LastRefreshResult)
 		}
@@ -1122,14 +1300,26 @@ func writeOperation(stdout io.Writer, asJSON bool, operation runtimeapi.Operatio
 	if asJSON {
 		_ = json.NewEncoder(stdout).Encode(runtimeapi.OperationResponse{Operation: operation})
 	} else {
-		fmt.Fprintf(stdout, "%s %s %s\n", operation.ID, operation.State, operation.Stage)
-		if operation.Result != nil {
-			if operation.Result.SourceID != "" {
-				fmt.Fprintf(stdout, "source %s: %s via %s\n",
-					operation.Result.SourceID,
-					operation.Result.RefreshResult,
-					operation.Result.RefreshRoute)
-			}
+			fmt.Fprintf(stdout, "%s %s %s\n", operation.ID, operation.State, operation.Stage)
+			if operation.Result != nil {
+				if operation.Result.SourceID != "" {
+					switch {
+					case operation.Result.Deleted:
+						fmt.Fprintf(stdout, "source %s deleted\n", operation.Result.SourceID)
+					case operation.Result.PreviousSourceID != "":
+						fmt.Fprintf(stdout, "source %s -> %s", operation.Result.PreviousSourceID, operation.Result.SourceID)
+						if operation.Result.UsedCachedSource {
+							fmt.Fprint(stdout, " using cached validated revision")
+						}
+						fmt.Fprintln(stdout)
+					default:
+						fmt.Fprintf(stdout, "source %s: %s", operation.Result.SourceID, operation.Result.RefreshResult)
+						if operation.Result.RefreshRoute != "" {
+							fmt.Fprintf(stdout, " via %s", operation.Result.RefreshRoute)
+						}
+						fmt.Fprintln(stdout)
+					}
+				}
 			if operation.Result.ResourceID != "" {
 				fmt.Fprintf(stdout, "resource %s: %s\n",
 					operation.Result.ResourceID,

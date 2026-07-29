@@ -6,6 +6,9 @@ const state = {
   contentId: "",
   lastOperationId: "",
   currentSourceId: "",
+  selectedSourceId: "",
+  sources: [],
+  mihomoState: "",
 };
 
 const elements = {
@@ -35,6 +38,8 @@ const elements = {
   cancelOperation: document.querySelector("#cancel-operation"),
   sourceCount: document.querySelector("#source-count"),
   sourceList: document.querySelector("#source-list"),
+  selectedSource: document.querySelector("#selected-source"),
+  sourceType: document.querySelector("#remote-source-type"),
   sourceName: document.querySelector("#remote-source-name"),
   sourceUrl: document.querySelector("#remote-source-url"),
   sourceRoute: document.querySelector("#remote-source-route"),
@@ -50,11 +55,17 @@ const elements = {
   sourceSkipTls: document.querySelector("#remote-source-skip-tls"),
   sourceCa: document.querySelector("#remote-source-ca"),
   addRemoteSource: document.querySelector("#add-remote-source"),
+  localSourceName: document.querySelector("#local-source-name"),
+  localSourceYaml: document.querySelector("#local-source-yaml"),
+  addImportedSource: document.querySelector("#add-imported-source"),
   applySource: document.querySelector("#apply-source"),
   refreshSource: document.querySelector("#refresh-source"),
   refreshSourceDirect: document.querySelector("#refresh-source-direct"),
   refreshSourceMihomo: document.querySelector("#refresh-source-mihomo"),
-  previewCurrentSource: document.querySelector("#preview-current-source"),
+  previewSelectedSource: document.querySelector("#preview-selected-source"),
+  switchSource: document.querySelector("#switch-source"),
+  switchSourceCached: document.querySelector("#switch-source-cached"),
+  deleteSource: document.querySelector("#delete-source"),
   resourceCount: document.querySelector("#resource-count"),
   resourceList: document.querySelector("#resource-list"),
   resourceName: document.querySelector("#managed-resource-name"),
@@ -74,10 +85,14 @@ const writeButtons = [
   elements.start,
   elements.stop,
   elements.addRemoteSource,
+  elements.addImportedSource,
   elements.applySource,
   elements.refreshSource,
   elements.refreshSourceDirect,
   elements.refreshSourceMihomo,
+  elements.switchSource,
+  elements.switchSourceCached,
+  elements.deleteSource,
   elements.addManagedResource,
   elements.saveAdvancedOverride,
   elements.previewAdvancedOverride,
@@ -86,18 +101,24 @@ const writeButtons = [
 function setBusy(busy, message = "") {
   state.busy = busy;
   for (const button of writeButtons) {
-    button.disabled = busy || !state.compatible || (button === elements.apply && !state.contentId);
+    button.disabled = busy || !state.compatible;
   }
+  elements.apply.disabled = busy || !state.compatible || !state.contentId;
   for (const button of [
     elements.refreshSource,
     elements.refreshSourceDirect,
     elements.refreshSourceMihomo,
-    elements.applySource,
-    elements.previewCurrentSource,
-    elements.previewAdvancedOverride,
+    elements.previewSelectedSource,
+    elements.switchSource,
+    elements.switchSourceCached,
+    elements.deleteSource,
   ]) {
-    button.disabled = busy || !state.compatible || !state.currentSourceId;
+    button.disabled = busy || !state.compatible || !state.selectedSourceId;
   }
+  elements.applySource.disabled = busy || !state.compatible || !state.currentSourceId;
+  elements.previewAdvancedOverride.disabled =
+    busy || !state.compatible || !state.currentSourceId;
+  elements.selectedSource.disabled = busy || !state.sources.length;
   elements.wait.disabled = busy || !state.lastOperationId;
   elements.getOperation.disabled = busy || !state.lastOperationId;
   elements.cancelOperation.disabled = busy || !state.compatible || !state.lastOperationId;
@@ -124,7 +145,8 @@ function errorText(error) {
 function renderSnapshot(snapshot) {
   elements.runtimeState.textContent = snapshot.runtime?.service_state || "未知";
   elements.runtimeVersion.textContent = snapshot.runtime?.version || "未知版本";
-  elements.mihomoState.textContent = snapshot.mihomo?.state || "未知";
+  state.mihomoState = snapshot.mihomo?.state || "";
+  elements.mihomoState.textContent = state.mihomoState || "未知";
   elements.runMode.textContent = `运行方式：${snapshot.run_mode || "未配置"}`;
   elements.revision.textContent = String(snapshot.revision ?? "—");
   elements.queue.textContent = `排队：${snapshot.operations?.queued ?? 0}`;
@@ -143,20 +165,43 @@ function renderSnapshot(snapshot) {
 
 function renderSources(sources) {
   const items = Array.isArray(sources.items) ? sources.items : [];
+  const previousSelection = state.selectedSourceId;
+  state.sources = items;
   state.currentSourceId = sources.current_source_id || "";
+  state.selectedSourceId = items.some((source) => source.id === previousSelection)
+    ? previousSelection
+    : state.currentSourceId || items[0]?.id || "";
   elements.sourceCount.textContent = `${items.length} 个来源`;
   elements.sourceList.replaceChildren();
+  elements.selectedSource.replaceChildren();
   if (!items.length) {
-    elements.sourceList.textContent = "尚未添加远程来源。";
+    elements.sourceList.textContent = "尚未添加配置来源。";
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "尚无来源";
+    elements.selectedSource.append(option);
+    setBusy(state.busy);
     return;
   }
   for (const source of items) {
+    const option = document.createElement("option");
+    option.value = source.id;
+    option.textContent =
+      `${source.name || source.id} · ${source.type || "未知类型"}` +
+      `${source.id === state.currentSourceId || source.current ? " · 当前" : ""}`;
+    option.selected = source.id === state.selectedSourceId;
+    elements.selectedSource.append(option);
+
     const item = document.createElement("div");
     item.className = "source-item";
     const title = document.createElement("strong");
-    title.textContent = `${source.name || source.id}${source.id === state.currentSourceId ? " · 当前" : ""}`;
+    title.textContent =
+      `${source.name || source.id} · ${source.type || "未知类型"}` +
+      `${source.id === state.currentSourceId || source.current ? " · 当前" : ""}`;
     const target = document.createElement("small");
-    target.textContent = `${source.redacted_target} · ${source.route} · ${source.last_refresh_result || "尚未刷新"}`;
+    target.textContent =
+      `${source.id} · ${source.redacted_target || "本机配置副本"} · ${source.route || "本机"}` +
+      ` · ${source.last_refresh_result || "尚未刷新"}`;
     item.append(title, target);
     if (Array.isArray(source.high_risk_settings) && source.high_risk_settings.length) {
       const risk = document.createElement("small");
@@ -166,6 +211,7 @@ function renderSources(sources) {
     }
     elements.sourceList.append(item);
   }
+  setBusy(state.busy);
 }
 
 function renderResources(resources) {
@@ -246,16 +292,16 @@ function renderCandidatePreview(preview) {
     : "最终候选配置没有可显示的字段来源。";
 }
 
-async function previewCurrentSource() {
-  if (!state.currentSourceId) return;
+async function previewSelectedSource() {
+  if (!state.selectedSourceId) return;
   state.contentId = "";
-  setBusy(true, "正在生成当前来源的最终候选配置…");
+  setBusy(true, "正在生成所选来源的最终候选配置…");
   try {
     const preview = await invoke("runtime_preview_source", {
-      sourceId: state.currentSourceId,
+      sourceId: state.selectedSourceId,
     });
     renderCandidatePreview(preview);
-    setMessage(`当前来源候选配置已校验；监听 ${preview.proxy_addresses.join("、")}。`);
+    setMessage(`所选来源候选配置已校验；监听 ${preview.proxy_addresses.join("、")}。`);
   } catch (error) {
     elements.candidateState.textContent = "预览失败";
     setMessage(errorText(error), true);
@@ -268,6 +314,18 @@ function renderOperation(operation) {
   state.lastOperationId = operation.id;
   elements.operation.textContent = JSON.stringify(operation, null, 2);
   setBusy(false);
+}
+
+function operationResultMessage(operation) {
+  const result = operation?.result || {};
+  if (operation?.action?.kind === "source.switch" && operation.state === "succeeded") {
+    const cache = result.used_cached_source ? "，使用了显式允许的已验证缓存" : "";
+    return `来源已从 ${result.previous_source_id || "无"} 切换到 ${result.source_id || "无"}${cache}。`;
+  }
+  if (operation?.action?.kind === "source.delete" && operation.state === "succeeded") {
+    return `来源 ${result.source_id || operation.action.params?.source_id || ""} 已删除。`;
+  }
+  return `运行操作已结束：${operation.state}。`;
 }
 
 async function applyCandidate() {
@@ -285,6 +343,7 @@ async function applyCandidate() {
 
 function sourceDraft() {
   return {
+    type: elements.sourceType.value,
     name: elements.sourceName.value,
     url: elements.sourceUrl.value,
     route: elements.sourceRoute.value,
@@ -300,6 +359,24 @@ function sourceDraft() {
     timeout_seconds: Number(elements.sourceTimeout.value),
     max_response_bytes: Number(elements.sourceMaxBytes.value),
   };
+}
+
+async function addImportedSource() {
+  const name = elements.localSourceName.value.trim();
+  const content = elements.localSourceYaml.value;
+  if (!name || !content.trim()) {
+    setMessage("本机来源名称和配置内容不能为空。", true);
+    return;
+  }
+  setBusy(true, "正在上传并校验本机配置来源…");
+  try {
+    renderOperation(await invoke("runtime_add_imported_source", { name, content }));
+    setMessage("本机来源操作已经进入 Runtime 队列；原文件路径不会保存。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
 }
 
 async function addRemoteSource() {
@@ -322,15 +399,64 @@ async function addRemoteSource() {
   }
 }
 
-async function refreshCurrentSource(route) {
-  if (!state.currentSourceId) return;
-  setBusy(true, "正在提交来源刷新操作…");
+async function refreshSelectedSource(route) {
+  if (!state.selectedSourceId) return;
+  setBusy(true, "正在提交所选来源刷新操作…");
   try {
     renderOperation(await invoke("runtime_refresh_source", {
-      sourceId: state.currentSourceId,
+      sourceId: state.selectedSourceId,
       route,
     }));
     setMessage("来源刷新已经进入 Runtime 运行操作队列，不会自动切换线路或来源。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function switchSelectedSource(useCached) {
+  if (!state.selectedSourceId) return;
+  setBusy(
+    true,
+    useCached
+      ? "正在刷新并切换来源；刷新失败时允许使用已验证缓存…"
+      : "正在刷新并切换来源…",
+  );
+  try {
+    renderOperation(await invoke("runtime_switch_source", {
+      sourceId: state.selectedSourceId,
+      route: "",
+      useCached,
+    }));
+    setMessage(
+      useCached
+        ? "来源切换已进入 Runtime 队列；只有刷新失败时才允许使用已验证缓存。"
+        : "来源切换已进入 Runtime 队列；远程来源必须先刷新成功。",
+    );
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function deleteSelectedSource() {
+  if (!state.selectedSourceId) return;
+  const selected = state.sources.find((source) => source.id === state.selectedSourceId);
+  const isCurrent =
+    state.selectedSourceId === state.currentSourceId || Boolean(selected?.current);
+  const prompt = isCurrent
+    ? "这是当前来源。仅当 Mihomo 已停止时才能删除；确认后当前来源会清空。继续吗？"
+    : `确认删除来源“${selected?.name || state.selectedSourceId}”吗？`;
+  if (!window.confirm(prompt)) return;
+  setBusy(true, "正在删除所选来源…");
+  try {
+    renderOperation(await invoke("runtime_delete_source", {
+      sourceId: state.selectedSourceId,
+      confirmCurrent: isCurrent,
+    }));
+    setMessage("来源删除已经进入 Runtime 队列。");
   } catch (error) {
     setMessage(errorText(error), true);
   } finally {
@@ -452,7 +578,7 @@ async function waitOperation() {
     });
     renderOperation(operation);
     await refreshStatus();
-    setMessage(`运行操作已结束：${operation.state}。`, operation.state !== "succeeded");
+    setMessage(operationResultMessage(operation), operation.state !== "succeeded");
   } catch (error) {
     setMessage(errorText(error), true);
   } finally {
@@ -528,11 +654,21 @@ elements.getOperation.addEventListener("click", getOperation);
 elements.wait.addEventListener("click", waitOperation);
 elements.cancelOperation.addEventListener("click", cancelOperation);
 elements.addRemoteSource.addEventListener("click", addRemoteSource);
+elements.addImportedSource.addEventListener("click", addImportedSource);
+elements.selectedSource.addEventListener("change", () => {
+  state.selectedSourceId = elements.selectedSource.value;
+  setBusy(state.busy);
+  const selected = state.sources.find((source) => source.id === state.selectedSourceId);
+  setMessage(`已选择来源：${selected?.name || state.selectedSourceId}。`);
+});
 elements.applySource.addEventListener("click", applyCurrentSource);
-elements.refreshSource.addEventListener("click", () => refreshCurrentSource(""));
-elements.refreshSourceDirect.addEventListener("click", () => refreshCurrentSource("direct"));
-elements.refreshSourceMihomo.addEventListener("click", () => refreshCurrentSource("mihomo"));
-elements.previewCurrentSource.addEventListener("click", previewCurrentSource);
+elements.refreshSource.addEventListener("click", () => refreshSelectedSource(""));
+elements.refreshSourceDirect.addEventListener("click", () => refreshSelectedSource("direct"));
+elements.refreshSourceMihomo.addEventListener("click", () => refreshSelectedSource("mihomo"));
+elements.previewSelectedSource.addEventListener("click", previewSelectedSource);
+elements.switchSource.addEventListener("click", () => switchSelectedSource(false));
+elements.switchSourceCached.addEventListener("click", () => switchSelectedSource(true));
+elements.deleteSource.addEventListener("click", deleteSelectedSource);
 elements.addManagedResource.addEventListener("click", addManagedResource);
 elements.loadAdvancedOverride.addEventListener("click", loadAdvancedOverride);
 elements.previewAdvancedOverride.addEventListener("click", previewAdvancedOverride);

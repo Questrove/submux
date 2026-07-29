@@ -575,24 +575,45 @@ func validAction(action runtimeapi.Action) bool {
 	case runtimeapi.ActionApplyImportedConfig:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
 			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == ""
 	case runtimeapi.ActionStartProxy, runtimeapi.ActionStopProxy:
 		return action.Params.ContentID == "" &&
 			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
 			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == ""
 	case runtimeapi.ActionAddRemoteSource:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
 			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
+	case runtimeapi.ActionAddImportedSource:
+		return validContentID(action.Params.ContentID) &&
+			action.Params.SourceID == "" &&
+			validDisplayName(action.Params.SourceName) &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == ""
 	case runtimeapi.ActionRefreshSource:
 		return validSourceID(action.Params.SourceID) &&
 			action.Params.ContentID == "" &&
+			action.Params.SourceName == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == "" &&
 			(action.Params.Route == "" ||
@@ -601,19 +622,46 @@ func validAction(action runtimeapi.Action) bool {
 	case runtimeapi.ActionApplySource:
 		return validSourceID(action.Params.SourceID) &&
 			action.Params.ContentID == "" &&
+			action.Params.SourceName == "" &&
 			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
+	case runtimeapi.ActionSwitchSource:
+		return validSourceID(action.Params.SourceID) &&
+			action.Params.ContentID == "" &&
+			action.Params.SourceName == "" &&
+			!action.Params.Confirm &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == "" &&
+			(action.Params.Route == "" ||
+				action.Params.Route == runtimeapi.SourceRouteDirect ||
+				action.Params.Route == runtimeapi.SourceRouteMihomo)
+	case runtimeapi.ActionDeleteSource:
+		return validSourceID(action.Params.SourceID) &&
+			action.Params.ContentID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == ""
 	case runtimeapi.ActionAddManagedResource:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
 			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
 			validResourceKind(action.Params.ResourceKind) &&
 			validResourceName(action.Params.ResourceName)
 	case runtimeapi.ActionSetAdvancedOverride:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
 			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == ""
 	default:
@@ -637,6 +685,18 @@ func validResourceName(name string) bool {
 	return len(name) <= 128 &&
 		validIdentifier(name, 128) &&
 		!strings.HasPrefix(name, ".")
+}
+
+func validDisplayName(name string) bool {
+	if name == "" || len(name) > 128 {
+		return false
+	}
+	for _, character := range name {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validSourceID(id string) bool {

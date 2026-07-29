@@ -1,6 +1,6 @@
 # Submux Runtime 本机 IPC
 
-本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传、分层候选配置预览、托管资源、本机高级覆盖、远程来源添加与刷新、持久化运行操作和 Tauri GUI 桥接；事件流仍按本文继续开发。
+本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、一次性内容上传、分层候选配置预览、托管资源、本机高级覆盖、三类来源的添加、刷新、切换与删除、持久化运行操作和 Tauri GUI 桥接；事件流仍按本文继续开发。
 
 ## 传输
 
@@ -97,7 +97,7 @@ POST /v1/candidates/preview
 Content-Type: application/json
 ```
 
-请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的远程 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回最终候选配置、摘要、显式代理监听、引用的托管资源，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不切换当前配置，也不启动 Mihomo。响应使用 `Cache-Control: no-store`，因为候选配置可能包含来源秘密。
+请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回最终候选配置、摘要、显式代理监听、引用的托管资源，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不切换当前配置，也不启动 Mihomo。响应使用 `Cache-Control: no-store`，因为候选配置可能包含来源秘密。
 
 ### 读取本机高级覆盖
 
@@ -133,11 +133,14 @@ Content-Type: application/json
 
 Action 使用固定 `kind` 和严格参数结构，不能承载 Shell、argv、任意环境变量、任意文件路径、下载 URL 转发或系统服务名。文件导入只提交已经上传的 `content_id`；任何特权操作都不能接收客户端提供的路径。
 
-远程来源当前使用以下 Action：
+配置来源使用以下 Action：
 
 - `source.add_remote` 只接受来源草稿的 `content_id`；
+- `source.add_imported` 只接受 YAML 的 `content_id` 和不含控制字符的 `source_name`；
 - `source.refresh` 只接受 `source_id` 和可选的一次性 `direct` 或 `mihomo` 线路；
-- `source.apply` 只接受当前来源的 `source_id`。
+- `source.apply` 只接受当前来源的 `source_id`；
+- `source.switch` 接受目标 `source_id`、可选的一次性下载线路，以及显式的 `use_cached`；
+- `source.delete` 接受 `source_id`；停止后删除当前来源还必须显式提交 `confirm`。
 
 本机配置层当前使用以下 Action：
 
@@ -145,6 +148,10 @@ Action 使用固定 `kind` 和严格参数结构，不能承载 Shell、argv、�
 - `override.set` 只接受 YAML 的 `content_id`。
 
 添加和刷新只保存通过校验的不可变来源版本，不切换运行配置，也不启动 Mihomo。`source.apply` 应用当前来源的最近有效版本；Mihomo 原先停止时仍保持停止，原先运行时必须完成健康检查后才提交。
+
+`source.switch` 对远程来源先执行刷新。刷新失败时默认终止；只有 `use_cached: true` 才能使用该目标来源最近一次通过校验的缓存。Runtime 完成目标配置应用和健康检查后才提交当前来源，失败则保留旧当前来源、旧最近可用配置和旧运行状态。操作结果返回 `source_id`、`previous_source_id` 和 `used_cached_source`，三个客户端据此显示相同结果。每个来源使用独立的 Mihomo 数据目录，策略选择、provider 缓存和兼容的 fake-IP 状态不会跨来源混用。
+
+`source.delete` 删除非当前来源时不需要额外确认。当前来源在 Mihomo 运行时不能删除；停止后必须提交 `confirm: true`。当前来源刷新失败只更新该来源的失败记录和下一次刷新时间，不会自动切换到其他来源。
 
 响应在副作用开始前返回已经持久化的 Operation：
 

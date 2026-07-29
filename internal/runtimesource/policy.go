@@ -44,6 +44,7 @@ type Resolver interface {
 }
 
 type SourceConfig struct {
+	Type                   string
 	Name                   string
 	URL                    *url.URL
 	Target                 string
@@ -63,6 +64,14 @@ type SourceConfig struct {
 }
 
 func NormalizeDraft(draft runtimeapi.RemoteSourceDraft) (SourceConfig, error) {
+	sourceType := draft.Type
+	if sourceType == "" {
+		sourceType = runtimeapi.SourceTypeRemoteHTTP
+	}
+	if sourceType != runtimeapi.SourceTypeRemoteHTTP &&
+		sourceType != runtimeapi.SourceTypeSubmuxOutput {
+		return SourceConfig{}, errors.New("remote source type is invalid")
+	}
 	name := strings.TrimSpace(draft.Name)
 	if name == "" || len(name) > 128 || hasControl(name) {
 		return SourceConfig{}, errors.New("remote source name is invalid")
@@ -155,6 +164,7 @@ func NormalizeDraft(draft runtimeapi.RemoteSourceDraft) (SourceConfig, error) {
 	}
 
 	return SourceConfig{
+		Type:                   sourceType,
 		Name:                   name,
 		URL:                    parsed,
 		Target:                 target,

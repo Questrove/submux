@@ -1,6 +1,6 @@
 # Submux Runtime 目标设计
 
-> 状态：已接受的目标架构，正在实现。仓库已经包含 Runtime 的核心部署基础、本机 IPC、单实例锁、单写者状态库、持久化运行操作、分层候选配置预览、托管资源、本机高级覆盖、显式代理配置应用、安全远程来源刷新、Bubble Tea TUI 和 Tauri GUI；多来源切换、TUN/网关模式、安装脚本和发布产物仍在开发中，当前代码不能作为可部署的 Runtime 实现。
+> 状态：已接受的目标架构，正在实现。仓库已经包含 Runtime 的核心部署基础、本机 IPC、单实例锁、单写者状态库、持久化运行操作、分层候选配置预览、托管资源、本机高级覆盖、显式代理配置应用、三类配置来源、多来源原子切换和来源级 Mihomo 状态隔离，以及共用 IPC 的 CLI、Bubble Tea TUI 和 Tauri GUI；TUN/网关模式、安装脚本和发布产物仍在开发中，当前代码不能作为可部署的 Runtime 实现。
 
 ## 定位
 
@@ -46,7 +46,10 @@ CLI ─┘                    │
 submux-runtime serve
 submux-runtime tui
 submux-runtime status --json
-submux-runtime source add <url>
+submux-runtime source add --type submux_output <url>
+submux-runtime source import --name local-copy <file>
+submux-runtime source switch [--use-cache] <source-id>
+submux-runtime source delete [--confirm-current] <source-id>
 submux-runtime resource add --name provider --kind proxy-provider-yaml <file>
 submux-runtime override set <file>
 submux-runtime proxy preview --source-id <source-id> [--override-content-id <content-id>]
@@ -152,7 +155,7 @@ Runtime 保留至少以下字段：
 
 失败后的重试间隔依次为 1 分钟、5 分钟、15 分钟和 1 小时，并且不超过正常刷新间隔。合理的 `Retry-After` 优先。手动刷新绕过失败退避，但仍受本机短时间防抖限制。网络恢复后加入随机延迟，避免大量机器同时请求。
 
-当前实现已经支持安全添加第一个远程来源、按保存线路或一次性线路刷新、导入托管资源、保存本机高级覆盖、查看分层字段来源，以及把当前来源最近一次通过校验的候选配置显式应用到 Mihomo。添加、刷新、资源导入和覆盖编辑不会应用配置或启动 Mihomo；首次应用仍保持停止，操作员需要另行执行启动。多来源的当前来源切换、编辑和删除继续按下述规则实现。
+当前实现已经支持 `submux_output`、`remote_http` 和 `local_import` 三类来源并存，按保存线路或一次性线路刷新远程来源，导入托管资源，保存本机高级覆盖，查看分层字段来源，以及从 CLI、TUI 或 GUI 选择、预览、切换和删除来源。添加、刷新、资源导入和覆盖编辑不会应用配置或启动 Mihomo；首次应用仍保持停止，操作员需要另行执行启动。
 
 切换当前来源时：
 
@@ -165,6 +168,8 @@ Runtime 保留至少以下字段：
 7. fake-IP 状态只在兼容时保留，DNS 方式或地址范围变化时清理。
 
 当前来源在 Runtime 运行时不能直接删除。操作员必须先切换来源，或者停止 Runtime 后确认删除。
+
+实现中每个来源使用独立的 Mihomo 数据目录，因此策略组选择、provider 缓存和 fake-IP 状态不会跨来源复用。切换操作先准备目标来源：远程来源必须尝试刷新，本机来源读取已经校验的不可变副本；只有操作员提交 `use_cached` 时，远程刷新失败才可以退回该来源最近一次通过校验的缓存。目标配置完成静态校验、应用和健康检查后才以比较并交换方式提交当前来源。任一步失败都会恢复旧配置、旧来源数据目录、旧当前来源和原先的运行或停止状态；当前来源刷新失败本身不会触发切换。
 
 ## 配置应用
 

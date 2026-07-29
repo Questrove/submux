@@ -65,6 +65,7 @@ type SourceSummary struct {
 	ID                     string     `json:"id"`
 	Type                   string     `json:"type"`
 	Name                   string     `json:"name"`
+	Current                bool       `json:"current"`
 	RedactedTarget         string     `json:"redacted_target"`
 	Route                  string     `json:"route"`
 	RefreshIntervalSeconds int64      `json:"refresh_interval_seconds"`
@@ -78,6 +79,7 @@ type SourceSummary struct {
 }
 
 type RemoteSourceDraft struct {
+	Type                   string `json:"type,omitempty"`
 	Name                   string `json:"name"`
 	URL                    string `json:"url"`
 	Route                  string `json:"route"`
@@ -169,7 +171,10 @@ type Action struct {
 type ActionParams struct {
 	ContentID    string `json:"content_id,omitempty"`
 	SourceID     string `json:"source_id,omitempty"`
+	SourceName   string `json:"source_name,omitempty"`
 	Route        string `json:"route,omitempty"`
+	UseCached    bool   `json:"use_cached,omitempty"`
+	Confirm      bool   `json:"confirm,omitempty"`
 	ResourceKind string `json:"resource_kind,omitempty"`
 	ResourceName string `json:"resource_name,omitempty"`
 }
@@ -209,6 +214,9 @@ type OperationResult struct {
 	ProxyAddresses         []string   `json:"proxy_addresses,omitempty"`
 	Verified               bool       `json:"verified,omitempty"`
 	SourceID               string     `json:"source_id,omitempty"`
+	PreviousSourceID       string     `json:"previous_source_id,omitempty"`
+	UsedCachedSource       bool       `json:"used_cached_source,omitempty"`
+	Deleted                bool       `json:"deleted,omitempty"`
 	RefreshResult          string     `json:"refresh_result,omitempty"`
 	RefreshRoute           string     `json:"refresh_route,omitempty"`
 	NextRefreshAt          *time.Time `json:"next_refresh_at,omitempty"`
@@ -282,8 +290,11 @@ const (
 	ActionStartProxy          = "proxy.start"
 	ActionStopProxy           = "proxy.stop"
 	ActionAddRemoteSource     = "source.add_remote"
+	ActionAddImportedSource   = "source.add_imported"
 	ActionRefreshSource       = "source.refresh"
 	ActionApplySource         = "source.apply"
+	ActionSwitchSource        = "source.switch"
+	ActionDeleteSource        = "source.delete"
 	ActionAddManagedResource  = "resource.add"
 	ActionSetAdvancedOverride = "override.set"
 
@@ -298,7 +309,9 @@ const (
 const (
 	SourceDraftContentType = "application/vnd.submux.runtime-source+json"
 
-	SourceTypeRemoteHTTP = "remote_http"
+	SourceTypeRemoteHTTP   = "remote_http"
+	SourceTypeSubmuxOutput = "submux_output"
+	SourceTypeLocalImport  = "local_import"
 
 	SourceRouteDirect = "direct"
 	SourceRouteMihomo = "mihomo"

@@ -64,6 +64,15 @@ fn runtime_add_remote_source(
 }
 
 #[tauri::command]
+fn runtime_add_imported_source(
+    bridge: State<'_, RuntimeBridge>,
+    name: String,
+    content: String,
+) -> Result<Value, BridgeError> {
+    bridge.add_imported_source(&name, content.as_bytes())
+}
+
+#[tauri::command]
 fn runtime_get_advanced_override(bridge: State<'_, RuntimeBridge>) -> Result<Value, BridgeError> {
     bridge.get_advanced_override()
 }
@@ -93,6 +102,25 @@ fn runtime_refresh_source(
     route: String,
 ) -> Result<Value, BridgeError> {
     bridge.refresh_source(&source_id, &route)
+}
+
+#[tauri::command]
+fn runtime_switch_source(
+    bridge: State<'_, RuntimeBridge>,
+    source_id: String,
+    route: String,
+    use_cached: bool,
+) -> Result<Value, BridgeError> {
+    bridge.switch_source(&source_id, &route, use_cached)
+}
+
+#[tauri::command]
+fn runtime_delete_source(
+    bridge: State<'_, RuntimeBridge>,
+    source_id: String,
+    confirm_current: bool,
+) -> Result<Value, BridgeError> {
+    bridge.delete_source(&source_id, confirm_current)
 }
 
 #[tauri::command]
@@ -156,10 +184,13 @@ pub fn run() {
             runtime_preview_override,
             runtime_apply_candidate,
             runtime_add_remote_source,
+            runtime_add_imported_source,
             runtime_get_advanced_override,
             runtime_set_advanced_override,
             runtime_add_managed_resource,
             runtime_refresh_source,
+            runtime_switch_source,
+            runtime_delete_source,
             runtime_apply_source,
             runtime_start_proxy,
             runtime_stop_proxy,

@@ -33,6 +33,38 @@ func (commandObserver) Observe(_ context.Context, _ runtimeapi.PeerIdentity) (ru
 	}, nil
 }
 
+type sourceListObserver struct{}
+
+func (sourceListObserver) Observe(_ context.Context, _ runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+	currentID := "src_" + strings.Repeat("a", 32)
+	return runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        15,
+		Runtime:         runtimeapi.RuntimeStatus{Version: buildinfo.Current().Version, ServiceState: "running"},
+		Sources: runtimeapi.SourceStatus{
+			Count:           2,
+			CurrentSourceID: currentID,
+			Items: []runtimeapi.SourceSummary{
+				{
+					ID:             currentID,
+					Type:           runtimeapi.SourceTypeSubmuxOutput,
+					Name:           "generated",
+					Current:        true,
+					RedactedTarget: "https://submux.example:443/…",
+					Route:          runtimeapi.SourceRouteDirect,
+				},
+				{
+					ID:                    "src_" + strings.Repeat("b", 32),
+					Type:                  runtimeapi.SourceTypeLocalImport,
+					Name:                  "local-copy",
+					RedactedTarget:        "Runtime-managed local copy",
+					HasValidatedCandidate: true,
+				},
+			},
+		},
+	}, nil
+}
+
 type commandExecutor struct {
 	state *runtimestate.Store
 }
@@ -45,6 +77,7 @@ func (e commandExecutor) Execute(
 	var imported []byte
 	if operation.Action.Kind == runtimeapi.ActionApplyImportedConfig ||
 		operation.Action.Kind == runtimeapi.ActionAddRemoteSource ||
+		operation.Action.Kind == runtimeapi.ActionAddImportedSource ||
 		operation.Action.Kind == runtimeapi.ActionAddManagedResource ||
 		operation.Action.Kind == runtimeapi.ActionSetAdvancedOverride {
 		var err error
@@ -72,6 +105,10 @@ func (e commandExecutor) Execute(
 		result.RefreshResult = "validated"
 		result.RefreshRoute = runtimeapi.SourceRouteDirect
 	}
+	if operation.Action.Kind == runtimeapi.ActionAddImportedSource {
+		result.SourceID = "src_" + strings.Repeat("b", 32)
+		result.RefreshResult = "imported"
+	}
 	if operation.Action.Kind == runtimeapi.ActionRefreshSource {
 		result.SourceID = operation.Action.Params.SourceID
 		result.RefreshResult = "not_modified"
@@ -80,6 +117,15 @@ func (e commandExecutor) Execute(
 	}
 	if operation.Action.Kind == runtimeapi.ActionApplySource {
 		result.SourceID = operation.Action.Params.SourceID
+	}
+	if operation.Action.Kind == runtimeapi.ActionSwitchSource {
+		result.SourceID = operation.Action.Params.SourceID
+		result.PreviousSourceID = "src_" + strings.Repeat("a", 32)
+		result.UsedCachedSource = operation.Action.Params.UseCached
+	}
+	if operation.Action.Kind == runtimeapi.ActionDeleteSource {
+		result.SourceID = operation.Action.Params.SourceID
+		result.Deleted = true
 	}
 	if operation.Action.Kind == runtimeapi.ActionAddManagedResource {
 		record, err := e.state.CreateManagedResource(
@@ -177,6 +223,57 @@ func TestStatusJSONUsesLocalIPC(t *testing.T) {
 			t.Fatalf("stop Runtime IPC server: %v", err)
 		}
 	case <-time.After(10 * time.Second):
+		t.Fatal("Runtime IPC server did not stop")
+	}
+}
+
+func TestSourceListJSONUsesSnapshotSourceTypesAndCurrentMarker(t *testing.T) {
+	endpoint := commandTestEndpoint(t)
+	listener, err := runtimeipc.Listen(endpoint)
+	if err != nil {
+		t.Fatalf("listen on Runtime IPC: %v", err)
+	}
+	authorizer, err := runtimeipc.CurrentUserAuthorizer()
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("create Runtime authorizer: %v", err)
+	}
+	server, err := runtimeipc.NewServer(sourceListObserver{}, authorizer)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- server.Serve(ctx, listener) }()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runSourceList([]string{"--endpoint", endpoint, "--json"}, &stdout, &stderr)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("source list exit=%d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
+	}
+	var status runtimeapi.SourceStatus
+	if err := json.Unmarshal(stdout.Bytes(), &status); err != nil {
+		cancel()
+		t.Fatalf("decode source list: %v; output=%s", err, stdout.String())
+	}
+	if status.Count != 2 ||
+		status.Items[0].Type != runtimeapi.SourceTypeSubmuxOutput ||
+		!status.Items[0].Current ||
+		status.Items[1].Type != runtimeapi.SourceTypeLocalImport {
+		cancel()
+		t.Fatalf("source list status = %#v", status)
+	}
+
+	cancel()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("serve Runtime IPC: %v", err)
+		}
+	case <-time.After(2 * time.Second):
 		t.Fatal("Runtime IPC server did not stop")
 	}
 }
@@ -360,6 +457,7 @@ func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
 	stderr.Reset()
 	exitCode = runSourceAdd([]string{
 		"--endpoint", endpoint,
+		"--type", runtimeapi.SourceTypeSubmuxOutput,
 		"--name", "local-source",
 		"--url", "http://127.0.0.1:8080/config.yaml?token=secret",
 		"--json",
@@ -374,6 +472,61 @@ func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
 		sourceAddOperation.Operation.Result.SourceID == "" {
 		cancel()
 		t.Fatalf("source add operation = %#v err=%v", sourceAddOperation, err)
+	}
+
+	var sourceImportOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runSourceImport([]string{
+		"--endpoint", endpoint,
+		"--name", "offline-copy",
+		"--json",
+		"-",
+	}, strings.NewReader(source), &sourceImportOut, &stderr)
+	if exitCode != 0 {
+		cancel()
+		t.Fatalf("source import exit=%d stdout=%s stderr=%s", exitCode, sourceImportOut.String(), stderr.String())
+	}
+	var sourceImportOperation runtimeapi.OperationResponse
+	if err := json.Unmarshal(sourceImportOut.Bytes(), &sourceImportOperation); err != nil ||
+		sourceImportOperation.Operation.Result == nil ||
+		sourceImportOperation.Operation.Result.SourceID == "" {
+		cancel()
+		t.Fatalf("source import operation = %#v err=%v", sourceImportOperation, err)
+	}
+
+	var sourceSwitchOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runSourceSwitch([]string{
+		"--endpoint", endpoint,
+		"--use-cache",
+		"--json",
+		sourceImportOperation.Operation.Result.SourceID,
+	}, &sourceSwitchOut, &stderr)
+	var sourceSwitchOperation runtimeapi.OperationResponse
+	if exitCode != 0 ||
+		json.Unmarshal(sourceSwitchOut.Bytes(), &sourceSwitchOperation) != nil ||
+		sourceSwitchOperation.Operation.Result == nil ||
+		!sourceSwitchOperation.Operation.Result.UsedCachedSource {
+		cancel()
+		t.Fatalf("source switch exit=%d operation=%#v stdout=%s stderr=%s",
+			exitCode, sourceSwitchOperation, sourceSwitchOut.String(), stderr.String())
+	}
+
+	var sourceDeleteOut bytes.Buffer
+	stderr.Reset()
+	exitCode = runSourceDelete([]string{
+		"--endpoint", endpoint,
+		"--json",
+		sourceAddOperation.Operation.Result.SourceID,
+	}, &sourceDeleteOut, &stderr)
+	var sourceDeleteOperation runtimeapi.OperationResponse
+	if exitCode != 0 ||
+		json.Unmarshal(sourceDeleteOut.Bytes(), &sourceDeleteOperation) != nil ||
+		sourceDeleteOperation.Operation.Result == nil ||
+		!sourceDeleteOperation.Operation.Result.Deleted {
+		cancel()
+		t.Fatalf("source delete exit=%d operation=%#v stdout=%s stderr=%s",
+			exitCode, sourceDeleteOperation, sourceDeleteOut.String(), stderr.String())
 	}
 
 	var sourceRefreshOut bytes.Buffer

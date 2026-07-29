@@ -210,16 +210,61 @@ impl RuntimeBridge {
         self.execute_action_with_params("source.add_remote", json!({ "content_id": content_id }))
     }
 
+    pub fn add_imported_source(&self, name: &str, content: &[u8]) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        validate_source_name(name)?;
+        let imported = self.upload_content(
+            "application/x-yaml",
+            content,
+            MAX_IMPORT_BYTES,
+            "Imported source",
+        )?;
+        let content_id = imported
+            .get("content_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::service("Runtime source upload response is invalid"))?;
+        self.execute_action_with_params(
+            "source.add_imported",
+            json!({ "content_id": content_id, "source_name": name }),
+        )
+    }
+
     pub fn refresh_source(&self, source_id: &str, route: &str) -> Result<Value, BridgeError> {
         validate_source_id(source_id)?;
-        if !matches!(route, "" | "direct" | "mihomo") {
-            return Err(BridgeError::request(
-                "Remote source route must be direct or mihomo",
-            ));
-        }
+        validate_source_route(route)?;
         self.execute_action_with_params(
             "source.refresh",
             json!({ "source_id": source_id, "route": route }),
+        )
+    }
+
+    pub fn switch_source(
+        &self,
+        source_id: &str,
+        route: &str,
+        use_cached: bool,
+    ) -> Result<Value, BridgeError> {
+        validate_source_id(source_id)?;
+        validate_source_route(route)?;
+        self.execute_action_with_params(
+            "source.switch",
+            json!({
+                "source_id": source_id,
+                "route": route,
+                "use_cached": use_cached,
+            }),
+        )
+    }
+
+    pub fn delete_source(
+        &self,
+        source_id: &str,
+        confirm_current: bool,
+    ) -> Result<Value, BridgeError> {
+        validate_source_id(source_id)?;
+        self.execute_action_with_params(
+            "source.delete",
+            json!({ "source_id": source_id, "confirm": confirm_current }),
         )
     }
 
@@ -719,6 +764,25 @@ fn validate_source_id(source_id: &str) -> Result<(), BridgeError> {
     }
 }
 
+fn validate_source_name(name: &str) -> Result<(), BridgeError> {
+    let valid = !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(char::is_control);
+    if valid {
+        Ok(())
+    } else {
+        Err(BridgeError::request("Runtime source name is invalid"))
+    }
+}
+
+fn validate_source_route(route: &str) -> Result<(), BridgeError> {
+    if matches!(route, "" | "direct" | "mihomo") {
+        Ok(())
+    } else {
+        Err(BridgeError::request(
+            "Remote source route must be direct or mihomo",
+        ))
+    }
+}
+
 fn validate_resource_kind(kind: &str) -> Result<(), BridgeError> {
     if matches!(
         kind,
@@ -796,6 +860,19 @@ mod tests {
         assert!(validate_source_id("src_0123456789ABCDEF0123456789ABCDEF").is_ok());
         assert!(validate_source_id("src_with/slash").is_err());
         assert!(validate_source_id("src_0123456789abcdef").is_err());
+    }
+
+    #[test]
+    fn source_names_and_routes_are_validated_before_bridge_actions() {
+        assert!(validate_source_name("local-copy").is_ok());
+        assert!(validate_source_name("本机来源").is_ok());
+        assert!(validate_source_name("").is_err());
+        assert!(validate_source_name("bad\nname").is_err());
+        assert!(validate_source_name(&"a".repeat(129)).is_err());
+        assert!(validate_source_route("").is_ok());
+        assert!(validate_source_route("direct").is_ok());
+        assert!(validate_source_route("mihomo").is_ok());
+        assert!(validate_source_route("arbitrary").is_err());
     }
 
     #[test]

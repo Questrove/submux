@@ -64,6 +64,7 @@ func TestManagerAddsOnlyDownloadedAndValidatedRemoteSource(t *testing.T) {
 	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
 	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
 	content := uploadSourceDraft(t, state, peer, runtimeapi.RemoteSourceDraft{
+		Type:     runtimeapi.SourceTypeSubmuxOutput,
 		Name:     "primary",
 		URL:      "https://example.com/config.yaml?token=secret",
 		Route:    runtimeapi.SourceRouteDirect,
@@ -110,8 +111,56 @@ func TestManagerAddsOnlyDownloadedAndValidatedRemoteSource(t *testing.T) {
 		t.Fatalf("observe sources: %v", err)
 	}
 	if snapshot.Sources.Count != 1 ||
+		snapshot.Sources.Items[0].Type != runtimeapi.SourceTypeSubmuxOutput ||
 		snapshot.Sources.Items[0].RedactedTarget != "https://example.com:443/…" {
 		t.Fatalf("source snapshot = %#v", snapshot.Sources)
+	}
+}
+
+func TestManagerAddsImportedSourceWithoutFetcher(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
+	body := []byte("proxies: []\n")
+	digest := sha256.Sum256(body)
+	content, err := state.UploadImport(
+		peer,
+		"application/x-yaml",
+		int64(len(body)),
+		hex.EncodeToString(digest[:]),
+		body,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("upload imported source: %v", err)
+	}
+	manager := &Manager{
+		State:     state,
+		Validator: fakeCandidateValidator{},
+		Now:       func() time.Time { return now },
+	}
+	result, err := manager.Execute(context.Background(), runtimeapi.Operation{
+		ID:             "op_import",
+		CallerIdentity: peer.Key(),
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionAddImportedSource,
+			Params: runtimeapi.ActionParams{
+				ContentID:  content.ID,
+				SourceName: "offline copy",
+			},
+		},
+	}, successfulReporter)
+	if err != nil {
+		t.Fatalf("add imported source: %v", err)
+	}
+	record, err := state.GetSource(result.SourceID)
+	if err != nil || record.Type != runtimeapi.SourceTypeLocalImport ||
+		record.URL != "" || record.Route != "" {
+		t.Fatalf("imported source = %#v err=%v", record, err)
 	}
 }
 
@@ -231,6 +280,67 @@ func TestManagerRefreshUsesSelectedRouteAndPersistsBackoffWithoutReplacingRevisi
 		updated.NextRefreshAt == nil ||
 		!updated.NextRefreshAt.Equal(refreshAt.Add(2*time.Minute)) {
 		t.Fatalf("failed refresh state = %#v", updated)
+	}
+}
+
+func TestPrepareSwitchRequiresExplicitCachedSourceAfterRefreshFailure(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	now := time.Date(2026, 7, 30, 8, 0, 0, 0, time.UTC)
+	record, err := state.CreateRemoteSource(runtimestate.RemoteSourceRecord{
+		Type:                   runtimeapi.SourceTypeRemoteHTTP,
+		Name:                   "backup",
+		URL:                    "https://example.com:443/config.yaml",
+		RedactedTarget:         "https://example.com:443/…",
+		Route:                  runtimeapi.SourceRouteDirect,
+		RefreshIntervalSeconds: int64(DefaultRefreshInterval / time.Second),
+		TimeoutSeconds:         int(DefaultFetchTimeout / time.Second),
+		MaxResponseBytes:       DefaultResponseBytes,
+		LastRefreshResult:      "validated",
+	}, []byte("raw-v1"), []byte("candidate-v1"), "op_add", now)
+	if err != nil {
+		t.Fatalf("create source: %v", err)
+	}
+	fetcher := &fakeSourceFetcher{
+		errors: []error{&FetchError{
+			Class:     FailureTemporary,
+			Result:    "network_error",
+			Message:   "Remote source network request failed",
+			Retryable: true,
+		}},
+	}
+	manager := &Manager{
+		State:     state,
+		Fetcher:   fetcher,
+		Validator: fakeCandidateValidator{},
+		Now:       func() time.Time { return now.Add(time.Minute) },
+		Random:    func() float64 { return 0.5 },
+	}
+	operation := runtimeapi.Operation{
+		ID:             "op_switch",
+		CallerIdentity: "linux:uid:1000",
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionSwitchSource,
+			Params: runtimeapi.ActionParams{
+				SourceID: record.ID,
+			},
+		},
+	}
+	if _, err := manager.PrepareSwitch(context.Background(), operation, successfulReporter); err == nil {
+		t.Fatal("switch preparation used cached source without explicit approval")
+	}
+	operation.Action.Params.UseCached = true
+	prepared, err := manager.PrepareSwitch(context.Background(), operation, successfulReporter)
+	if err != nil {
+		t.Fatalf("prepare switch with cached source: %v", err)
+	}
+	if !prepared.UsedCached || prepared.Record.ID != record.ID ||
+		prepared.RefreshResult == nil ||
+		prepared.RefreshResult.CandidateSHA256 != record.CandidateSHA256 {
+		t.Fatalf("cached switch preparation = %#v", prepared)
 	}
 }
 

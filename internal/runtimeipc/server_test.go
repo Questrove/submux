@@ -316,6 +316,19 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 			},
 		},
 		{
+			Kind: runtimeapi.ActionAddRemoteSource,
+			Params: runtimeapi.ActionParams{
+				ContentID: "content_0123456789abcdef0123456789abcdef",
+			},
+		},
+		{
+			Kind: runtimeapi.ActionAddImportedSource,
+			Params: runtimeapi.ActionParams{
+				ContentID:  "content_0123456789abcdef0123456789abcdef",
+				SourceName: "local-copy",
+			},
+		},
+		{
 			Kind:   runtimeapi.ActionRefreshSource,
 			Params: runtimeapi.ActionParams{SourceID: sourceID},
 		},
@@ -329,6 +342,21 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 		{
 			Kind:   runtimeapi.ActionApplySource,
 			Params: runtimeapi.ActionParams{SourceID: sourceID},
+		},
+		{
+			Kind: runtimeapi.ActionSwitchSource,
+			Params: runtimeapi.ActionParams{
+				SourceID:  sourceID,
+				Route:     runtimeapi.SourceRouteDirect,
+				UseCached: true,
+			},
+		},
+		{
+			Kind: runtimeapi.ActionDeleteSource,
+			Params: runtimeapi.ActionParams{
+				SourceID: sourceID,
+				Confirm:  true,
+			},
 		},
 		{
 			Kind: runtimeapi.ActionAddManagedResource,
@@ -357,6 +385,13 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 			},
 		},
 		{
+			Kind: runtimeapi.ActionAddImportedSource,
+			Params: runtimeapi.ActionParams{
+				ContentID:  "content_0123456789abcdef0123456789abcdef",
+				SourceName: "bad\nname",
+			},
+		},
+		{
 			Kind:   runtimeapi.ActionRefreshSource,
 			Params: runtimeapi.ActionParams{SourceID: "src_0123456789abcdef0123456789abcdeg"},
 		},
@@ -372,6 +407,20 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 			Params: runtimeapi.ActionParams{
 				SourceID:  sourceID,
 				ContentID: "content_forbidden",
+			},
+		},
+		{
+			Kind: runtimeapi.ActionSwitchSource,
+			Params: runtimeapi.ActionParams{
+				SourceID: sourceID,
+				Confirm:  true,
+			},
+		},
+		{
+			Kind: runtimeapi.ActionDeleteSource,
+			Params: runtimeapi.ActionParams{
+				SourceID:  sourceID,
+				UseCached: true,
 			},
 		},
 		{

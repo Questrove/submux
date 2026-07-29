@@ -111,6 +111,10 @@ func (e *MihomoExecutor) Execute(
 		return e.applyImport(ctx, operation, report)
 	case runtimeapi.ActionApplySource:
 		return e.applySource(ctx, operation, report)
+	case runtimeapi.ActionSwitchSource:
+		return e.switchSource(ctx, operation, report)
+	case runtimeapi.ActionDeleteSource:
+		return e.deleteSource(ctx, operation, report)
 	case runtimeapi.ActionStartProxy:
 		return e.start(ctx, report)
 	case runtimeapi.ActionStopProxy:
@@ -119,7 +123,9 @@ func (e *MihomoExecutor) Execute(
 		return e.addManagedResource(operation, report)
 	case runtimeapi.ActionSetAdvancedOverride:
 		return e.setAdvancedOverride(ctx, operation, report)
-	case runtimeapi.ActionAddRemoteSource, runtimeapi.ActionRefreshSource:
+	case runtimeapi.ActionAddRemoteSource,
+		runtimeapi.ActionAddImportedSource,
+		runtimeapi.ActionRefreshSource:
 		if e.Sources == nil {
 			return nil, errors.New("Runtime source manager is unavailable")
 		}
@@ -127,16 +133,7 @@ func (e *MihomoExecutor) Execute(
 		if err == nil {
 			return result, nil
 		}
-		var exposed *runtimesource.ManagerError
-		if errors.As(err, &exposed) {
-			return nil, &PublicError{
-				Code:      exposed.Code,
-				Message:   exposed.Message,
-				Retryable: exposed.Retryable,
-				Cause:     err,
-			}
-		}
-		return nil, err
+		return nil, exposeSourceManagerError(err)
 	default:
 		return nil, fmt.Errorf("unsupported Runtime action %q", operation.Action.Kind)
 	}
@@ -214,7 +211,7 @@ func (e *MihomoExecutor) applySource(
 	if err := report("reading_source_revision", 10, true); err != nil {
 		return nil, err
 	}
-	record, err := e.State.CurrentRemoteSource()
+	record, err := e.State.CurrentSource()
 	if err != nil || record.ID != operation.Action.Params.SourceID {
 		return nil, &PublicError{
 			Code:    runtimeapi.ErrorNotFound,
@@ -222,7 +219,7 @@ func (e *MihomoExecutor) applySource(
 			Cause:   err,
 		}
 	}
-	body, _, err := e.State.ReadRemoteSourceRevision(record)
+	body, _, err := e.State.ReadSourceRevision(record)
 	if err != nil {
 		return nil, &PublicError{
 			Code:    runtimeapi.ErrorServiceUnavailable,
@@ -256,6 +253,238 @@ func (e *MihomoExecutor) applySource(
 	)
 }
 
+func (e *MihomoExecutor) switchSource(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if e.Sources == nil {
+		return nil, errors.New("Runtime source manager is unavailable")
+	}
+	if err := report("preparing_source_switch", 5, true); err != nil {
+		return nil, err
+	}
+	current, currentErr := e.State.CurrentSource()
+	if currentErr != nil && !errors.Is(currentErr, runtimestate.ErrSourceNotFound) {
+		return nil, currentErr
+	}
+	expectedCurrentID := current.ID
+	wasRunning, err := e.Process.IsRunning(ctx)
+	if err != nil {
+		return nil, err
+	}
+	previousProcess := captureProcessConfiguration(e.Process)
+	if current.ID != "" {
+		previousProcess.DataDir, err = e.State.SourceRuntimeDataDir(current.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	prepared, err := e.Sources.PrepareSwitch(
+		ctx,
+		operation,
+		func(stage string, progress int, cancellable bool) error {
+			return report(stage, 5+progress*2/5, cancellable)
+		},
+	)
+	if err != nil {
+		return nil, exposeSourceManagerError(err)
+	}
+	raw, _, err := e.State.ReadSourceRevision(prepared.Record)
+	if err != nil {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorServiceUnavailable,
+			Message: "The selected source revision is unavailable",
+			Cause:   err,
+		}
+	}
+	override, _, err := e.State.AdvancedOverride()
+	if err != nil {
+		return nil, err
+	}
+	if err := report("building_source_candidate", 50, true); err != nil {
+		return nil, err
+	}
+	detailed, err := e.buildDetailedCandidate(raw, override)
+	if err != nil {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "The selected source is outside the Runtime safety policy",
+			Cause:   err,
+		}
+	}
+	binaryPath, exactVersion, err := e.currentCore()
+	if err != nil {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorServiceUnavailable,
+			Message: "A verified Mihomo core must be installed before switching sources",
+			Cause:   err,
+		}
+	}
+	targetDataDir, err := e.State.SourceRuntimeDataDir(prepared.Record.ID)
+	if err != nil {
+		return nil, err
+	}
+	validator, err := e.configValidator(binaryPath, exactVersion)
+	if err != nil {
+		return nil, err
+	}
+	validator.DataDir = targetDataDir
+	targetProcess := processConfiguration{
+		BinaryPath: binaryPath,
+		ConfigPath: filepath.Join(e.ConfigRoot, "current", "config.yaml"),
+		DataDir:    targetDataDir,
+		SafePaths:  append([]string(nil), validator.SafePaths...),
+	}
+	service := &sourceSwitchRuntimeService{
+		process:  e.Process,
+		report:   report,
+		target:   targetProcess,
+		previous: previousProcess,
+	}
+	deployer := &mihomo.Deployer{
+		Root: e.ConfigRoot,
+		Builder: mihomo.CandidateBuilderFunc(func([]byte) ([]byte, error) {
+			return append([]byte(nil), detailed.YAML...), nil
+		}),
+		Validator: validator,
+		Service:   service,
+		Verifier:  e.Verifier,
+	}
+	deployment, err := deployer.Apply(ctx, operation.ID, prepared.Record.RawSHA256, raw)
+	if err != nil {
+		previousProcess.apply(e.Process)
+		if !wasRunning {
+			_ = e.Process.Stop(context.Background())
+		}
+		return nil, &PublicError{
+			Code:      runtimeapi.ErrorServiceUnavailable,
+			Message:   "The selected source could not be activated; the previous source was retained",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	if !wasRunning {
+		if err := report("restoring_stopped_state", 85, false); err != nil {
+			rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, false)
+			return nil, errors.Join(err, rollbackErr)
+		}
+		if stopErr := e.Process.Stop(ctx); stopErr != nil {
+			rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, false)
+			return nil, errors.Join(stopErr, rollbackErr)
+		}
+	}
+	if err := report("committing_source_switch", 92, false); err != nil {
+		rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, wasRunning)
+		return nil, errors.Join(err, rollbackErr)
+	}
+	switched, err := e.State.SwitchCurrentSource(
+		expectedCurrentID,
+		prepared.Record.ID,
+		operation.ID,
+		e.now(),
+	)
+	if err != nil {
+		rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, wasRunning)
+		return nil, errors.Join(err, rollbackErr)
+	}
+	targetProcess.apply(e.Process)
+	result := &runtimeapi.OperationResult{
+		ConfigRevision:   deployment.Revision,
+		CandidateSHA256:  deployment.CandidateHash,
+		ProxyKind:        deployment.ProxyKind,
+		ProxyAddresses:   append([]string(nil), deployment.ProxyAddresses...),
+		Verified:         true,
+		SourceID:         switched.ID,
+		PreviousSourceID: expectedCurrentID,
+		UsedCachedSource: prepared.UsedCached,
+	}
+	if prepared.RefreshResult != nil {
+		result.RefreshResult = prepared.RefreshResult.RefreshResult
+		result.RefreshRoute = prepared.RefreshResult.RefreshRoute
+		result.NextRefreshAt = prepared.RefreshResult.NextRefreshAt
+		result.NotModified = prepared.RefreshResult.NotModified
+	} else {
+		result.RefreshResult = switched.LastRefreshResult
+	}
+	return result, nil
+}
+
+func (e *MihomoExecutor) rollbackSourceDeployment(
+	deployer *mihomo.Deployer,
+	previous processConfiguration,
+	wasRunning bool,
+) error {
+	previous.apply(e.Process)
+	_, rollbackErr := deployer.Rollback(context.Background())
+	if rollbackErr != nil {
+		stopErr := e.Process.Stop(context.Background())
+		previous.apply(e.Process)
+		return errors.Join(rollbackErr, stopErr)
+	}
+	previous.apply(e.Process)
+	if !wasRunning {
+		rollbackErr = errors.Join(rollbackErr, e.Process.Stop(context.Background()))
+	}
+	return rollbackErr
+}
+
+func (e *MihomoExecutor) deleteSource(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	record, err := e.State.GetSource(operation.Action.Params.SourceID)
+	if err != nil {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorNotFound,
+			Message: "The Runtime configuration source is unavailable",
+			Cause:   err,
+		}
+	}
+	current, currentErr := e.State.CurrentSource()
+	if currentErr != nil && !errors.Is(currentErr, runtimestate.ErrSourceNotFound) {
+		return nil, currentErr
+	}
+	isCurrent := current.ID == record.ID
+	running, err := e.Process.IsRunning(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if isCurrent && running {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorBusy,
+			Message: "The current source cannot be deleted while Mihomo is running",
+		}
+	}
+	if isCurrent && !operation.Action.Params.Confirm {
+		return nil, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Deleting the stopped current source requires explicit confirmation",
+		}
+	}
+	var fallbackDataDir string
+	if isCurrent {
+		fallbackDataDir, err = e.State.RuntimeDataDir()
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := report("deleting_source", 70, false); err != nil {
+		return nil, err
+	}
+	if _, err := e.State.DeleteSource(record.ID, isCurrent, operation.ID, e.now()); err != nil {
+		return nil, err
+	}
+	if isCurrent {
+		e.Process.DataDir = fallbackDataDir
+	}
+	return &runtimeapi.OperationResult{
+		SourceID: record.ID,
+		Deleted:  true,
+	}, nil
+}
+
 func (e *MihomoExecutor) deployCandidate(
 	ctx context.Context,
 	operationID string,
@@ -275,6 +504,13 @@ func (e *MihomoExecutor) deployCandidate(
 	}
 	e.Process.BinaryPath = binaryPath
 	e.Process.ConfigPath = filepath.Join(e.ConfigRoot, "current", "config.yaml")
+	if sourceID != "" {
+		sourceDataDir, err := e.State.SourceRuntimeDataDir(sourceID)
+		if err != nil {
+			return nil, err
+		}
+		e.Process.DataDir = sourceDataDir
+	}
 	validator, err := e.configValidator(binaryPath, exactVersion)
 	if err != nil {
 		return nil, err
@@ -381,19 +617,19 @@ func (e *MihomoExecutor) previewSource(
 		}
 		return body, content.ID, content.SHA256, nil
 	}
-	record, err := e.State.GetRemoteSource(request.SourceID)
+	record, err := e.State.GetSource(request.SourceID)
 	if err != nil {
 		return nil, "", "", &PublicError{
 			Code:    runtimeapi.ErrorNotFound,
-			Message: "The requested remote source is unavailable",
+			Message: "The requested Runtime configuration source is unavailable",
 			Cause:   err,
 		}
 	}
-	body, _, err := e.State.ReadRemoteSourceRevision(record)
+	body, _, err := e.State.ReadSourceRevision(record)
 	if err != nil {
 		return nil, "", "", &PublicError{
 			Code:    runtimeapi.ErrorServiceUnavailable,
-			Message: "The requested remote source revision is unavailable",
+			Message: "The requested Runtime configuration source revision is unavailable",
 			Cause:   err,
 		}
 	}
@@ -528,8 +764,8 @@ func (e *MihomoExecutor) setAdvancedOverride(
 		}
 	}
 	source := []byte("{}\n")
-	if current, currentErr := e.State.CurrentRemoteSource(); currentErr == nil {
-		source, _, err = e.State.ReadRemoteSourceRevision(current)
+	if current, currentErr := e.State.CurrentSource(); currentErr == nil {
+		source, _, err = e.State.ReadSourceRevision(current)
 		if err != nil {
 			return nil, err
 		}
@@ -617,6 +853,15 @@ func (e *MihomoExecutor) start(ctx context.Context, report StageReporter) (*runt
 	}
 	e.Process.BinaryPath = binaryPath
 	e.Process.ConfigPath = filepath.Join(e.ConfigRoot, "current", "config.yaml")
+	if current, currentErr := e.State.CurrentSource(); currentErr == nil {
+		sourceDataDir, dataErr := e.State.SourceRuntimeDataDir(current.ID)
+		if dataErr != nil {
+			return nil, dataErr
+		}
+		e.Process.DataDir = sourceDataDir
+	} else if !errors.Is(currentErr, runtimestate.ErrSourceNotFound) {
+		return nil, currentErr
+	}
 	safePaths, err := e.mihomoSafePaths()
 	if err != nil {
 		return nil, err
@@ -722,6 +967,78 @@ func (e *MihomoExecutor) now() time.Time {
 type stagedRuntimeService struct {
 	service mihomo.RuntimeService
 	report  StageReporter
+}
+
+type processConfiguration struct {
+	BinaryPath string
+	ConfigPath string
+	DataDir    string
+	SafePaths  []string
+}
+
+func captureProcessConfiguration(process *runtimeprocess.Process) processConfiguration {
+	if process == nil {
+		return processConfiguration{}
+	}
+	return processConfiguration{
+		BinaryPath: process.BinaryPath,
+		ConfigPath: process.ConfigPath,
+		DataDir:    process.DataDir,
+		SafePaths:  append([]string(nil), process.SafePaths...),
+	}
+}
+
+func (configuration processConfiguration) apply(process *runtimeprocess.Process) {
+	if process == nil {
+		return
+	}
+	process.BinaryPath = configuration.BinaryPath
+	process.ConfigPath = configuration.ConfigPath
+	process.DataDir = configuration.DataDir
+	process.SafePaths = append([]string(nil), configuration.SafePaths...)
+}
+
+type sourceSwitchRuntimeService struct {
+	process  *runtimeprocess.Process
+	report   StageReporter
+	target   processConfiguration
+	previous processConfiguration
+
+	activationCalls int
+}
+
+func (s *sourceSwitchRuntimeService) ReloadOrRestart(ctx context.Context) error {
+	s.activationCalls++
+	stage := "activating_source"
+	progress := 70
+	configuration := s.target
+	if s.activationCalls%2 == 0 {
+		stage = "restoring_previous_source"
+		progress = 82
+		configuration = s.previous
+	}
+	if err := s.report(stage, progress, false); err != nil {
+		return err
+	}
+	configuration.apply(s.process)
+	return s.process.ReloadOrRestart(ctx)
+}
+
+func (s *sourceSwitchRuntimeService) Stop(ctx context.Context) error {
+	return s.process.Stop(ctx)
+}
+
+func exposeSourceManagerError(err error) error {
+	var exposed *runtimesource.ManagerError
+	if !errors.As(err, &exposed) {
+		return err
+	}
+	return &PublicError{
+		Code:      exposed.Code,
+		Message:   exposed.Message,
+		Retryable: exposed.Retryable,
+		Cause:     err,
+	}
 }
 
 func (s stagedRuntimeService) ReloadOrRestart(ctx context.Context) error {

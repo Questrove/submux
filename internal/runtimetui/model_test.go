@@ -233,6 +233,7 @@ func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testin
 				ID:                sourceID,
 				Type:              runtimeapi.SourceTypeRemoteHTTP,
 				Name:              "primary",
+				Current:           true,
 				RedactedTarget:    "https://example.com:443/…",
 				Route:             runtimeapi.SourceRouteDirect,
 				LastRefreshResult: "validated",
@@ -304,6 +305,138 @@ func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testin
 	if !strings.Contains(view, "https://example.com:443/…") ||
 		!strings.Contains(view, "skip_tls_verify") {
 		t.Fatalf("source view = %q", view)
+	}
+}
+
+func TestModelManagesMultipleSourceTypesAndSwitchesSelectedSource(t *testing.T) {
+	currentSourceID := "src_" + strings.Repeat("c", 32)
+	localSourceID := "src_" + strings.Repeat("d", 32)
+	client := &fakeClient{snapshot: runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        14,
+		Runtime:         runtimeapi.RuntimeStatus{Version: "dev", ServiceState: "running"},
+		Sources: runtimeapi.SourceStatus{
+			Count:           2,
+			CurrentSourceID: currentSourceID,
+			Items: []runtimeapi.SourceSummary{
+				{
+					ID:             currentSourceID,
+					Type:           runtimeapi.SourceTypeSubmuxOutput,
+					Name:           "generated",
+					Current:        true,
+					RedactedTarget: "https://submux.example:443/…",
+					Route:          runtimeapi.SourceRouteDirect,
+				},
+				{
+					ID:                    localSourceID,
+					Type:                  runtimeapi.SourceTypeLocalImport,
+					Name:                  "local-copy",
+					RedactedTarget:        "本机配置副本",
+					HasValidatedCandidate: true,
+				},
+			},
+		},
+	}}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+	if model.selectedSource() != currentSourceID {
+		t.Fatalf("initial selected source = %q", model.selectedSource())
+	}
+
+	updated, _ = model.Update(keyPress(']'))
+	model = updated.(Model)
+	if model.selectedSource() != localSourceID {
+		t.Fatalf("selected source after ] = %q", model.selectedSource())
+	}
+
+	for _, test := range []struct {
+		key       rune
+		kind      string
+		useCached bool
+		confirm   bool
+	}{
+		{key: 'f', kind: runtimeapi.ActionRefreshSource},
+		{key: 't', kind: runtimeapi.ActionSwitchSource},
+		{key: 'k', kind: runtimeapi.ActionSwitchSource, useCached: true},
+		{key: 'z', kind: runtimeapi.ActionDeleteSource},
+	} {
+		updated, command := model.Update(keyPress(test.key))
+		model = updated.(Model)
+		if command == nil {
+			t.Fatalf("source action key %q did not return a command", test.key)
+		}
+		updated, _ = model.Update(command())
+		model = updated.(Model)
+		action := client.actions[len(client.actions)-1]
+		if action.Kind != test.kind ||
+			action.Params.SourceID != localSourceID ||
+			action.Params.UseCached != test.useCached ||
+			action.Params.Confirm != test.confirm {
+			t.Fatalf("source action for %q = %#v", test.key, action)
+		}
+	}
+
+	updated, command := model.Update(ctrlKey('d'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("confirmed source delete did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	confirmedDelete := client.actions[len(client.actions)-1]
+	if confirmedDelete.Kind != runtimeapi.ActionDeleteSource ||
+		confirmedDelete.Params.SourceID != localSourceID ||
+		!confirmedDelete.Params.Confirm {
+		t.Fatalf("confirmed source delete = %#v", confirmedDelete)
+	}
+
+	updated, _ = model.Update(keyPress('n'))
+	model = updated.(Model)
+	if !model.editing || model.editorMode != editorModeImportedSource {
+		t.Fatalf("imported source editor = editing %v mode %q", model.editing, model.editorMode)
+	}
+	model.editor.SetValue(`{"name":"local-two","content":"proxies: []\nrules: []\n"}`)
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("imported source add did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	imported := client.actions[len(client.actions)-1]
+	if client.uploadedType != "application/x-yaml" ||
+		imported.Kind != runtimeapi.ActionAddImportedSource ||
+		imported.Params.SourceName != "local-two" ||
+		imported.Params.ContentID == "" {
+		t.Fatalf("imported source operation = type %q action %#v", client.uploadedType, imported)
+	}
+
+	view := model.View().Content
+	if !strings.Contains(view, "generated [当前]") ||
+		!strings.Contains(view, runtimeapi.SourceTypeSubmuxOutput) ||
+		!strings.Contains(view, runtimeapi.SourceTypeLocalImport) {
+		t.Fatalf("multiple source view = %q", view)
+	}
+}
+
+func TestOperationStatusReportsSourceSwitchAndCacheUse(t *testing.T) {
+	status := operationStatus(runtimeapi.Operation{
+		ID:    "op_switch",
+		State: runtimeapi.OperationSucceeded,
+		Stage: "completed",
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionSwitchSource,
+		},
+		Result: &runtimeapi.OperationResult{
+			PreviousSourceID: "source-a",
+			SourceID:         "source-b",
+			UsedCachedSource: true,
+		},
+	})
+	if !strings.Contains(status, "source-a → source-b") ||
+		!strings.Contains(status, "使用已验证缓存") {
+		t.Fatalf("switch operation status = %q", status)
 	}
 }
 
