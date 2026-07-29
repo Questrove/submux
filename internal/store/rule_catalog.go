@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"fmt"
 
 	bolt "go.etcd.io/bbolt"
@@ -11,7 +12,25 @@ func (s *Store) PutRuleCatalogSnapshot(commit string, raw []byte) error {
 		return fmt.Errorf("rule catalog commit and snapshot are required")
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte("rule_catalog_snapshots")).Put([]byte(commit), append([]byte(nil), raw...))
+		if err := tx.Bucket([]byte("rule_catalog_snapshots")).Put([]byte(commit), append([]byte(nil), raw...)); err != nil {
+			return err
+		}
+		profileIDs := map[int64]bool{}
+		if err := tx.Bucket([]byte("rule_profiles")).ForEach(func(_, profileRaw []byte) error {
+			var profile RuleProfile
+			if err := json.Unmarshal(profileRaw, &profile); err != nil {
+				return err
+			}
+			if profile.CatalogCommit == commit {
+				profileIDs[profile.ID] = true
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		return invalidateOutputSubscriptionsTx(tx, func(subscription OutputSubscription) bool {
+			return profileIDs[subscription.RuleProfileID]
+		})
 	})
 }
 

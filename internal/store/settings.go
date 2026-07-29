@@ -6,9 +6,19 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+const SharedFakeIPSettingKey = "shared_fake_ip_filter"
+
 func (s *Store) SetSetting(key, value string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket([]byte("settings")).Put([]byte(key), []byte(value))
+		if err := tx.Bucket([]byte("settings")).Put([]byte(key), []byte(value)); err != nil {
+			return err
+		}
+		if key != SharedFakeIPSettingKey {
+			return nil
+		}
+		return invalidateOutputSubscriptionsTx(tx, func(subscription OutputSubscription) bool {
+			return subscription.Engine == "mihomo"
+		})
 	})
 }
 

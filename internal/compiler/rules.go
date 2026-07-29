@@ -50,7 +50,6 @@ func (s *Service) EnsureBuiltinRuleProfiles() error {
 		return fmt.Errorf("default rule profile: %w", err)
 	}
 
-	subscriptionsChanged := false
 	subscriptions, err := s.store.ListOutputSubscriptions()
 	if err != nil {
 		return err
@@ -63,10 +62,6 @@ func (s *Service) EnsureBuiltinRuleProfiles() error {
 		if _, err := s.store.SaveOutputSubscription(subscription); err != nil {
 			return err
 		}
-		subscriptionsChanged = true
-	}
-	if subscriptionsChanged {
-		_ = s.RebuildAll()
 	}
 	return s.store.SetSetting(builtinRuleProfilesCatalogVersion, "1")
 }

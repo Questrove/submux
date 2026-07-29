@@ -26,17 +26,23 @@ func newTestStore(t *testing.T) *store.Store {
 
 func savePublishedSubscription(t *testing.T, st *store.Store, subscription store.OutputSubscription, artifact *store.SubscriptionArtifact) store.OutputSubscription {
 	t.Helper()
-	id, err := st.SaveOutputSubscription(subscription)
+	var id int64
+	var err error
+	if artifact == nil {
+		id, err = st.SaveOutputSubscription(subscription)
+	} else {
+		inputsGeneration, generationErr := st.OutputInputsGeneration()
+		if generationErr != nil {
+			t.Fatal(generationErr)
+		}
+		id, err = st.SaveOutputSubscriptionWithArtifact(subscription, *artifact, nil, store.OutputPublicationGuard{
+			InputsGeneration: inputsGeneration, SubscriptionVersion: subscription.RecordVersion,
+		})
+	}
 	if err != nil {
 		t.Fatalf("save output subscription: %v", err)
 	}
 	subscription.ID = id
-	if artifact != nil {
-		artifact.SubscriptionID = id
-		if err := st.PutSubscriptionArtifact(*artifact); err != nil {
-			t.Fatalf("save artifact: %v", err)
-		}
-	}
 	return subscription
 }
 
@@ -152,30 +158,53 @@ func TestHandleSubMarksLastGoodAsDegraded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	savePublishedSubscription(t, st, store.OutputSubscription{
+	subscription := savePublishedSubscription(t, st, store.OutputSubscription{
 		Name: "degraded", Engine: compiler.EngineMihomo, RuleProfileID: profileID, Token: "degraded-token", Enabled: true,
 	}, &store.SubscriptionArtifact{
 		Body: []byte("# last good\n"), ContentType: "text/yaml; charset=utf-8",
-		Revision: "old", LastError: "required slot empty\nretry failed",
+		Revision: "old",
 	})
+	generation, err := st.MarkOutputSubscriptionPending(subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := st.RecordSubscriptionUpdateFailureIfCurrent(
+		subscription.ID, generation, store.SubscriptionFailureConfig,
+		"required slot empty\nretry failed", "", nil, time.Time{},
+	); err != nil || !recorded {
+		t.Fatalf("record degraded state: recorded=%v err=%v", recorded, err)
+	}
 	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
 
 	resp := mustGet(t, http.DefaultClient, srv.URL+"/sub/degraded-token")
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !strings.Contains(resp.Header.Get("X-Submux-Degraded"), "retry failed") {
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Submux-Degraded") != "true" {
 		t.Fatalf("last-good degradation not exposed: %d %v", resp.StatusCode, resp.Header)
+	}
+	if strings.Contains(resp.Header.Get("X-Submux-Degraded"), "retry failed") {
+		t.Fatal("public degradation header leaked administrative failure detail")
 	}
 }
 
 func TestHandleSubBlocksStrictLifecycleArtifact(t *testing.T) {
 	st := newTestStore(t)
-	savePublishedSubscription(t, st, store.OutputSubscription{
+	subscription := savePublishedSubscription(t, st, store.OutputSubscription{
 		Name: "blocked", Engine: compiler.EngineMihomo, Token: "blocked-token", Enabled: true,
 	}, &store.SubscriptionArtifact{
 		Body: []byte("# stale\n"), ContentType: "text/yaml; charset=utf-8",
-		Revision: "old", BlockedReason: "strict upstream expired",
+		Revision: "old",
 	})
+	generation, err := st.MarkOutputSubscriptionPending(subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := st.RecordSubscriptionUpdateFailureIfCurrent(
+		subscription.ID, generation, store.SubscriptionFailureLifecycle,
+		"strict upstream expired", "strict upstream expired", nil, time.Time{},
+	); err != nil || !recorded {
+		t.Fatalf("record blocked state: recorded=%v err=%v", recorded, err)
+	}
 	srv := httptest.NewServer(New(st, nil).Handler())
 	defer srv.Close()
 

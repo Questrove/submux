@@ -60,8 +60,8 @@ func TestOpenV9RemovesRemoteRuntimeState(t *testing.T) {
 	}
 	defer st.Close()
 	if err := st.db.View(func(tx *bolt.Tx) error {
-		if got := string(tx.Bucket([]byte("meta")).Get([]byte("schema_version"))); got != "9" {
-			t.Fatalf("schema version = %q, want 9", got)
+		if got := string(tx.Bucket([]byte("meta")).Get([]byte("schema_version"))); got != "10" {
+			t.Fatalf("schema version = %q, want 10", got)
 		}
 		for _, name := range legacyBuckets {
 			if tx.Bucket([]byte(name)) != nil {

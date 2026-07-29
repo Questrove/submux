@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -34,69 +35,181 @@ type OutputSubscription struct {
 	ExpiresAt         string                `json:"expires_at,omitempty"`
 	CreatedAt         string                `json:"created_at"`
 	UpdatedAt         string                `json:"updated_at"`
+	RecordVersion     uint64                `json:"record_version"`
+}
+
+var (
+	ErrOutputInputsChanged       = errors.New("output inputs changed during compilation")
+	ErrOutputSubscriptionChanged = errors.New("output subscription changed during compilation")
+)
+
+type OutputPublicationGuard struct {
+	InputsGeneration    uint64
+	SubscriptionVersion uint64
 }
 
 type SubscriptionArtifact struct {
-	SubscriptionID int64    `json:"subscription_id"`
-	Body           []byte   `json:"body,omitempty"`
-	ContentType    string   `json:"content_type,omitempty"`
-	Revision       string   `json:"revision,omitempty"`
-	LastSuccess    string   `json:"last_success,omitempty"`
-	LastError      string   `json:"last_error,omitempty"`
-	Warnings       []string `json:"warnings,omitempty"`
-	BlockedReason  string   `json:"blocked_reason,omitempty"`
-	UpdatedAt      string   `json:"updated_at"`
+	SubscriptionID int64  `json:"subscription_id"`
+	Body           []byte `json:"body,omitempty"`
+	ContentType    string `json:"content_type,omitempty"`
+	Revision       string `json:"revision,omitempty"`
+	LastSuccess    string `json:"last_success,omitempty"`
+	UpdatedAt      string `json:"updated_at"`
 }
 
 func (s *Store) SaveOutputSubscription(value OutputSubscription) (int64, error) {
 	var id int64
 	err := s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("subscriptions"))
-		now, created, oldToken := nowRFC3339(), "", ""
-		if value.ID == 0 {
-			seq, err := b.NextSequence()
-			if err != nil {
-				return err
-			}
-			id = int64(seq)
-		} else {
-			id = value.ID
-			raw := b.Get(itob(id))
-			if raw == nil {
-				return fmt.Errorf("no output subscription with id %d", id)
-			}
-			var old OutputSubscription
-			if err := json.Unmarshal(raw, &old); err != nil {
-				return err
-			}
-			created, oldToken = old.CreatedAt, old.Token
+		var err error
+		id, err = saveOutputSubscriptionTx(tx, value)
+		if err != nil {
+			return err
 		}
-		value.Name = strings.TrimSpace(value.Name)
-		value.Bindings = normalizeSubscriptionBindings(value.Bindings)
-		if value.Token == "" {
+		if value.Enabled {
+			_, err = markOutputSubscriptionPendingTx(tx, id)
+			return err
+		}
+		return tx.Bucket([]byte("subscription_updates")).Delete(itob(id))
+	})
+	return id, err
+}
+
+// SaveOutputSubscriptionWithArtifact saves a subscription and its
+// already-compiled artifact atomically. Disabled subscriptions keep no
+// automatic update state.
+func (s *Store) SaveOutputSubscriptionWithArtifact(value OutputSubscription, artifact SubscriptionArtifact, warnings []string, guard OutputPublicationGuard) (int64, error) {
+	var id int64
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if outputInputsGenerationTx(tx) != guard.InputsGeneration {
+			return ErrOutputInputsChanged
+		}
+		if value.ID != 0 {
+			raw := tx.Bucket([]byte("subscriptions")).Get(itob(value.ID))
+			if raw == nil {
+				return fmt.Errorf("no output subscription with id %d", value.ID)
+			}
+			var current OutputSubscription
+			if err := json.Unmarshal(raw, &current); err != nil {
+				return err
+			}
+			if current.RecordVersion != guard.SubscriptionVersion {
+				return ErrOutputSubscriptionChanged
+			}
+		}
+		var err error
+		id, err = saveOutputSubscriptionTx(tx, value)
+		if err != nil {
+			return err
+		}
+		generation, err := nextOutputSubscriptionGenerationTx(tx, id)
+		if err != nil {
+			return err
+		}
+		now := nowRFC3339()
+		artifact.SubscriptionID = id
+		artifact.UpdatedAt = now
+		if artifact.LastSuccess == "" {
+			artifact.LastSuccess = now
+		}
+		if err := putJSON(tx.Bucket([]byte("subscription_artifacts")), itob(id), artifact); err != nil {
+			return err
+		}
+		if !value.Enabled {
+			return tx.Bucket([]byte("subscription_updates")).Delete(itob(id))
+		}
+		return putJSON(tx.Bucket([]byte("subscription_updates")), itob(id), SubscriptionUpdateState{
+			SubscriptionID:  id,
+			InputGeneration: generation,
+			Status:          SubscriptionUpdateReady,
+			Warnings:        append([]string(nil), warnings...),
+			UpdatedAt:       now,
+		})
+	})
+	return id, err
+}
+
+func (s *Store) UpdateOutputSubscriptionToken(id int64, token string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		subscriptions := tx.Bucket([]byte("subscriptions"))
+		raw := subscriptions.Get(itob(id))
+		if raw == nil {
+			return fmt.Errorf("no output subscription with id %d", id)
+		}
+		var value OutputSubscription
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return err
+		}
+		if token == "" {
 			return fmt.Errorf("output subscription token is required")
 		}
 		index := tx.Bucket([]byte("token_index"))
-		if owner := index.Get([]byte(value.Token)); owner != nil && !bytes.Equal(owner, itob(id)) {
+		if owner := index.Get([]byte(token)); owner != nil && !bytes.Equal(owner, itob(id)) {
 			return fmt.Errorf("output subscription token already exists")
 		}
-		if oldToken != "" && oldToken != value.Token {
-			if err := index.Delete([]byte(oldToken)); err != nil {
-				return err
-			}
-		}
-		value.ID, value.UpdatedAt = id, now
-		if created == "" {
-			value.CreatedAt = now
-		} else {
-			value.CreatedAt = created
-		}
-		if err := putJSON(b, itob(id), value); err != nil {
+		if err := index.Delete([]byte(value.Token)); err != nil {
 			return err
 		}
-		return index.Put([]byte(value.Token), itob(id))
+		value.Token = token
+		value.UpdatedAt = nowRFC3339()
+		value.RecordVersion++
+		if err := putJSON(subscriptions, itob(id), value); err != nil {
+			return err
+		}
+		return index.Put([]byte(token), itob(id))
 	})
-	return id, err
+}
+
+func saveOutputSubscriptionTx(tx *bolt.Tx, value OutputSubscription) (int64, error) {
+	b := tx.Bucket([]byte("subscriptions"))
+	id := value.ID
+	now, created, oldToken := nowRFC3339(), "", ""
+	if id == 0 {
+		value.RecordVersion = 0
+		seq, err := b.NextSequence()
+		if err != nil {
+			return 0, err
+		}
+		id = int64(seq)
+	} else {
+		raw := b.Get(itob(id))
+		if raw == nil {
+			return 0, fmt.Errorf("no output subscription with id %d", id)
+		}
+		var old OutputSubscription
+		if err := json.Unmarshal(raw, &old); err != nil {
+			return 0, err
+		}
+		created, oldToken = old.CreatedAt, old.Token
+		value.RecordVersion = old.RecordVersion
+	}
+	value.Name = strings.TrimSpace(value.Name)
+	value.Bindings = normalizeSubscriptionBindings(value.Bindings)
+	if value.Token == "" {
+		return 0, fmt.Errorf("output subscription token is required")
+	}
+	index := tx.Bucket([]byte("token_index"))
+	if owner := index.Get([]byte(value.Token)); owner != nil && !bytes.Equal(owner, itob(id)) {
+		return 0, fmt.Errorf("output subscription token already exists")
+	}
+	if oldToken != "" && oldToken != value.Token {
+		if err := index.Delete([]byte(oldToken)); err != nil {
+			return 0, err
+		}
+	}
+	value.ID, value.UpdatedAt = id, now
+	value.RecordVersion++
+	if created == "" {
+		value.CreatedAt = now
+	} else {
+		value.CreatedAt = created
+	}
+	if err := putJSON(b, itob(id), value); err != nil {
+		return 0, err
+	}
+	if err := index.Put([]byte(value.Token), itob(id)); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *Store) GetOutputSubscription(id int64) (OutputSubscription, error) {
@@ -152,14 +265,10 @@ func (s *Store) DeleteOutputSubscription(id int64) error {
 		if err := tx.Bucket([]byte("subscription_artifacts")).Delete(itob(id)); err != nil {
 			return err
 		}
+		if err := tx.Bucket([]byte("subscription_updates")).Delete(itob(id)); err != nil {
+			return err
+		}
 		return b.Delete(itob(id))
-	})
-}
-
-func (s *Store) PutSubscriptionArtifact(value SubscriptionArtifact) error {
-	value.UpdatedAt = nowRFC3339()
-	return s.db.Update(func(tx *bolt.Tx) error {
-		return putJSON(tx.Bucket([]byte("subscription_artifacts")), itob(value.SubscriptionID), value)
 	})
 }
 

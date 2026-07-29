@@ -78,12 +78,18 @@ func (s *Store) EnsureDefaultManualSource() (int64, error) {
 				return nil
 			}
 			builtin.Name, builtin.Enabled, builtin.UpdatedAt = DefaultManualSourceName, true, nowRFC3339()
-			return putJSON(b, itob(id), *builtin)
+			if err := putJSON(b, itob(id), *builtin); err != nil {
+				return err
+			}
+			return invalidateOutputSubscriptionsForSourceTx(tx, id)
 		}
 		if named != nil {
 			id = named.ID
 			named.Builtin, named.Enabled, named.UpdatedAt = true, true, nowRFC3339()
-			return putJSON(b, itob(id), *named)
+			if err := putJSON(b, itob(id), *named); err != nil {
+				return err
+			}
+			return invalidateOutputSubscriptionsForSourceTx(tx, id)
 		}
 		seq, err := b.NextSequence()
 		if err != nil {
@@ -178,7 +184,10 @@ func (s *Store) UpdateSource(src Source) error {
 		if e != nil {
 			return e
 		}
-		return b.Put(itob(src.ID), buf)
+		if err := b.Put(itob(src.ID), buf); err != nil {
+			return err
+		}
+		return invalidateOutputSubscriptionsForSourceTx(tx, src.ID)
 	})
 }
 
@@ -226,7 +235,10 @@ func (s *Store) SetSourceEnabled(id int64, enabled bool) error {
 		if e != nil {
 			return e
 		}
-		return b.Put(itob(id), buf)
+		if err := b.Put(itob(id), buf); err != nil {
+			return err
+		}
+		return invalidateOutputSubscriptionsForSourceTx(tx, id)
 	})
 }
 
@@ -235,6 +247,9 @@ func (s *Store) DeleteSource(id int64) error {
 		b := tx.Bucket([]byte("sources"))
 		if b.Get(itob(id)) == nil {
 			return fmt.Errorf("no source with id %d", id)
+		}
+		if err := invalidateOutputSubscriptionsForSourceTx(tx, id); err != nil {
+			return err
 		}
 		if e := b.Delete(itob(id)); e != nil {
 			return e

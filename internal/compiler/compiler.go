@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -139,55 +138,6 @@ func (s *Service) Preview(subscription store.OutputSubscription) (Result, error)
 		return Result{}, err
 	}
 	return compileResolved(resolved)
-}
-
-func (s *Service) CompileAndStore(subscriptionID int64) (Result, error) {
-	subscription, err := s.store.GetOutputSubscription(subscriptionID)
-	if err != nil {
-		return Result{}, err
-	}
-	result, compileErr := s.Preview(subscription)
-	if compileErr != nil {
-		artifact, _ := s.store.GetSubscriptionArtifact(subscriptionID)
-		artifact.SubscriptionID = subscriptionID
-		artifact.LastError = compileErr.Error()
-		var blocked *BlockedError
-		if errors.As(compileErr, &blocked) {
-			artifact.BlockedReason = blocked.Reason
-			artifact.Warnings = append([]string(nil), blocked.Warnings...)
-		}
-		_ = s.store.PutSubscriptionArtifact(artifact)
-		return Result{}, compileErr
-	}
-	artifact := store.SubscriptionArtifact{
-		SubscriptionID: subscriptionID, Body: result.Body, ContentType: result.ContentType,
-		Revision: result.Revision, LastSuccess: time.Now().UTC().Format(time.RFC3339),
-		Warnings: append([]string(nil), result.Warnings...),
-	}
-	if err := s.store.PutSubscriptionArtifact(artifact); err != nil {
-		return Result{}, err
-	}
-	return result, nil
-}
-
-func (s *Service) RebuildAll() error {
-	subscriptions, err := s.store.ListOutputSubscriptions()
-	if err != nil {
-		return err
-	}
-	var failures []string
-	for _, subscription := range subscriptions {
-		if !subscription.Enabled {
-			continue
-		}
-		if _, err := s.CompileAndStore(subscription.ID); err != nil {
-			failures = append(failures, fmt.Sprintf("%d:%v", subscription.ID, err))
-		}
-	}
-	if len(failures) > 0 {
-		return fmt.Errorf("output subscription rebuild failed: %s", strings.Join(failures, "; "))
-	}
-	return nil
 }
 
 func (s *Service) resolve(subscription store.OutputSubscription) (resolvedSubscription, error) {

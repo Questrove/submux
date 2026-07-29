@@ -56,6 +56,7 @@ func main() {
 		log.Fatalf("initialize server: %v", err)
 	}
 	go f.Loop(ctx, time.Duration(interval)*time.Second)
+	go app.RunOutputUpdates(ctx)
 
 	// HTTP 服务(/sub/{token} 输出已发布的固定引擎订阅产物)
 	httpSrv := &http.Server{Addr: listenAddr, Handler: app.Handler()}

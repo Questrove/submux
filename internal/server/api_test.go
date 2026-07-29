@@ -716,14 +716,63 @@ func TestSharedFakeIPSettingsValidatePreviewAndPreserveLastGoodOnRebuildFailure(
 	var rebuildResult map[string]any
 	_ = json.NewDecoder(rebuildResponse.Body).Decode(&rebuildResult)
 	rebuildResponse.Body.Close()
-	if rebuildResponse.StatusCode != http.StatusOK || rebuildResult["ok"] != false || rebuildResult["rebuild_error"] == nil {
-		t.Fatalf("failed rebuild was not reported: status=%d result=%#v", rebuildResponse.StatusCode, rebuildResult)
+	if rebuildResponse.StatusCode != http.StatusOK || rebuildResult["ok"] != true || rebuildResult["outcome"] != "degraded" || rebuildResult["output_update"] == nil {
+		t.Fatalf("degraded output update was not reported: status=%d result=%#v", rebuildResponse.StatusCode, rebuildResult)
 	}
 	artifact, err := st.GetSubscriptionArtifact(subscription.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(artifact.Body) != "# known good\n" || artifact.Revision != "known-good" || artifact.LastError == "" {
+	if string(artifact.Body) != "# known good\n" || artifact.Revision != "known-good" {
 		t.Fatalf("failed shared fake-IP rebuild replaced last-good: %#v", artifact)
+	}
+	updateState, err := st.GetSubscriptionUpdate(subscription.ID)
+	if err != nil || updateState.FailureClass != store.SubscriptionFailureConfig || updateState.LastError == "" {
+		t.Fatalf("failed output update was not stored separately: state=%+v err=%v", updateState, err)
+	}
+}
+
+func TestSubscriptionManagementSeparatesArtifactAndUpdateState(t *testing.T) {
+	st := newTestStore(t)
+	srv := httptest.NewServer(New(st, nil).Handler())
+	defer srv.Close()
+	client := initAndClient(t, srv)
+
+	subscription := savePublishedSubscription(t, st, store.OutputSubscription{
+		Name: "degraded", Engine: compiler.EngineMihomo, Token: "separate-state", Enabled: true,
+	}, &store.SubscriptionArtifact{
+		Body: []byte("# last good\n"), ContentType: "text/yaml", Revision: "known-good",
+	})
+	generation, err := st.MarkOutputSubscriptionPending(subscription.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded, err := st.RecordSubscriptionUpdateFailureIfCurrent(
+		subscription.ID, generation, store.SubscriptionFailureConfig,
+		"invalid binding", "", []string{"admin warning"}, time.Time{},
+	); err != nil || !recorded {
+		t.Fatalf("record update failure: recorded=%v err=%v", recorded, err)
+	}
+
+	response := mustGet(t, client, srv.URL+"/api/subscriptions")
+	defer response.Body.Close()
+	var values []struct {
+		Artifact map[string]json.RawMessage    `json:"artifact"`
+		Update   store.SubscriptionUpdateState `json:"update"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&values); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK || len(values) != 1 {
+		t.Fatalf("subscription response: status=%d values=%+v", response.StatusCode, values)
+	}
+	for _, key := range []string{"last_error", "warnings", "blocked_reason"} {
+		if _, exists := values[0].Artifact[key]; exists {
+			t.Fatalf("artifact leaked update field %q: %+v", key, values[0].Artifact)
+		}
+	}
+	if values[0].Update.FailureClass != store.SubscriptionFailureConfig ||
+		values[0].Update.LastError != "invalid binding" || len(values[0].Update.Warnings) != 1 {
+		t.Fatalf("administrative update state missing: %+v", values[0].Update)
 	}
 }

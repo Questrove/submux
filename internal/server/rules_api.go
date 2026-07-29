@@ -104,11 +104,8 @@ func (s *Server) handleSaveRuleProfile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	rebuildErr := s.compiler.RebuildAll()
 	result := map[string]any{"id": id}
-	if rebuildErr != nil {
-		result["rebuild_error"] = rebuildErr.Error()
-	}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
 	writeJSON(w, result)
 }
 
@@ -144,11 +141,8 @@ func (s *Server) handleUpdateRuleProfileCatalog(w http.ResponseWriter, r *http.R
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	rebuildErr := s.compiler.RebuildAll()
 	result := map[string]any{"ok": true, "previous_commit": previous, "catalog_commit": catalog.Commit}
-	if rebuildErr != nil {
-		result["rebuild_error"] = rebuildErr.Error()
-	}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
 	writeJSON(w, result)
 }
 
@@ -178,5 +172,5 @@ func (s *Server) handleDeleteRuleProfile(w http.ResponseWriter, r *http.Request)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})
 }

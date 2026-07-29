@@ -119,7 +119,6 @@ func (s *Service) EnsureBuiltinTemplates() error {
 		}
 	}
 
-	changed := false
 	for _, item := range items {
 		key := templateKey(item.engine, item.name)
 		target := targets[key]
@@ -162,12 +161,6 @@ func (s *Service) EnsureBuiltinTemplates() error {
 		if _, err := s.store.OverwriteTemplateVersionForDevelopment(current.ID, item.engineVersion, item.content, item.slots); err != nil {
 			return err
 		}
-		changed = true
-	}
-	if changed {
-		// Successful subscriptions receive refreshed artifacts. Failures retain
-		// their last-good artifact under the normal rebuild policy.
-		_ = s.RebuildAll()
 	}
 	return s.store.SetSetting(builtinTemplatesCatalogVersion, "1")
 }
@@ -256,7 +249,6 @@ func (s *Service) ensureBuiltinTemplatesV9() error {
 		}
 	}
 
-	changed := false
 	if target.CurrentVersionID == 0 {
 		if _, err := s.store.PublishTemplateVersion(target.ID, item.engineVersion, item.content, item.slots); err != nil {
 			return err
@@ -270,13 +262,7 @@ func (s *Service) ensureBuiltinTemplatesV9() error {
 			if _, err := s.store.OverwriteTemplateVersionForDevelopment(current.ID, item.engineVersion, item.content, item.slots); err != nil {
 				return err
 			}
-			changed = true
 		}
-	}
-	if changed {
-		// Successful subscriptions receive refreshed artifacts. Failures retain
-		// their last-good artifact under the normal rebuild policy.
-		_ = s.RebuildAll()
 	}
 	return s.store.SetSetting(builtinTemplatesCatalogVersion, "1")
 }

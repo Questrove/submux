@@ -64,6 +64,9 @@ type TemplateVersion struct {
 
 func (s *Store) ReplaceSourceNodes(sourceID int64, incoming []NodeRecord) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateOutputSubscriptionsForSourceTx(tx, sourceID); err != nil {
+			return err
+		}
 		return replaceSourceNodesTx(tx, sourceID, incoming)
 	})
 }
@@ -72,6 +75,9 @@ func (s *Store) ReplaceSourceNodes(sourceID int64, incoming []NodeRecord) error 
 // visible together. A failed transaction leaves both previous snapshots intact.
 func (s *Store) CommitSourceRefresh(sourceID int64, incoming []NodeRecord, userinfoJSON string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateOutputSubscriptionsForSourceTx(tx, sourceID); err != nil {
+			return err
+		}
 		if err := replaceSourceNodesTx(tx, sourceID, incoming); err != nil {
 			return err
 		}
@@ -270,6 +276,9 @@ func (s *Store) CreateManualNodes(nodes []NodeRecord) ([]int64, error) {
 
 func (s *Store) UpdateNodeMetadata(id int64, tags []string, enabled bool) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateOutputSubscriptionsForNodeIDsTx(tx, map[int64]bool{id: true}); err != nil {
+			return err
+		}
 		b := tx.Bucket([]byte("nodes"))
 		v := b.Get(itob(id))
 		if v == nil {
@@ -290,6 +299,9 @@ func (s *Store) UpdateNodeMetadata(id int64, tags []string, enabled bool) error 
 // provider returns informational pseudo-nodes only.
 func (s *Store) CommitSourceRefreshV3(sourceID int64, incoming []NodeRecord, userinfoJSON string, metadata SubscriptionMetadata, preserveProxySnapshot bool) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateOutputSubscriptionsForSourceTx(tx, sourceID); err != nil {
+			return err
+		}
 		if err := replaceSourceNodesV3Tx(tx, sourceID, incoming, preserveProxySnapshot); err != nil {
 			return err
 		}
@@ -333,6 +345,9 @@ func (s *Store) SetNodeRoleOverride(id int64, role string) error {
 		return fmt.Errorf("node role override must be proxy, notice or empty")
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateOutputSubscriptionsForNodeIDsTx(tx, map[int64]bool{id: true}); err != nil {
+			return err
+		}
 		b := tx.Bucket([]byte("nodes"))
 		v := b.Get(itob(id))
 		if v == nil {
@@ -372,12 +387,18 @@ func (s *Store) DeleteNode(id int64) error {
 		if node.Origin != SourceKindManual {
 			return fmt.Errorf("subscription nodes are deleted by refreshing their source")
 		}
+		if err := invalidateOutputSubscriptionsForNodeIDsTx(tx, map[int64]bool{id: true}); err != nil {
+			return err
+		}
 		return b.Delete(itob(id))
 	})
 }
 
 func (s *Store) ReplaceManualNode(id int64, replacement NodeRecord) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateOutputSubscriptionsForNodeIDsTx(tx, map[int64]bool{id: true}); err != nil {
+			return err
+		}
 		b := tx.Bucket([]byte("nodes"))
 		v := b.Get(itob(id))
 		if v == nil {
@@ -441,7 +462,28 @@ func (s *Store) ListNodes() ([]NodeRecord, error) {
 }
 
 func (s *Store) SaveTemplate(value Template) (int64, error) {
-	return saveWithID(s.db, "templates", value.ID, func(id int64, createdAt string) any {
+	var id int64
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("templates"))
+		createdAt := ""
+		id = value.ID
+		if id == 0 {
+			seq, err := b.NextSequence()
+			if err != nil {
+				return err
+			}
+			id = int64(seq)
+		} else {
+			raw := b.Get(itob(id))
+			if raw == nil {
+				return fmt.Errorf("no templates record with id %d", id)
+			}
+			var current Template
+			if err := json.Unmarshal(raw, &current); err != nil {
+				return err
+			}
+			createdAt = current.CreatedAt
+		}
 		now := nowRFC3339()
 		value.ID, value.UpdatedAt = id, now
 		if createdAt == "" {
@@ -449,8 +491,15 @@ func (s *Store) SaveTemplate(value Template) (int64, error) {
 		} else {
 			value.CreatedAt = createdAt
 		}
-		return value
+		if err := putJSON(b, itob(id), value); err != nil {
+			return err
+		}
+		if value.ID == 0 {
+			return nil
+		}
+		return invalidateOutputSubscriptionsForTemplateTx(tx, id)
 	})
+	return id, err
 }
 
 func (s *Store) GetTemplate(id int64) (Template, error) {
@@ -478,6 +527,9 @@ func (s *Store) DeleteTemplate(id int64) error {
 		b := tx.Bucket([]byte("templates"))
 		if b.Get(itob(id)) == nil {
 			return fmt.Errorf("no template with id %d", id)
+		}
+		if err := invalidateOutputSubscriptionsForTemplateTx(tx, id); err != nil {
+			return err
 		}
 		versions := tx.Bucket([]byte("template_versions"))
 		var keys [][]byte
@@ -565,6 +617,11 @@ func (s *Store) OverwriteTemplateVersionForDevelopment(id int64, engineVersion, 
 		if err := putJSON(versions, itob(id), result); err != nil {
 			return err
 		}
+		if err := invalidateOutputSubscriptionsTx(tx, func(subscription OutputSubscription) bool {
+			return subscription.TemplateVersionID == id
+		}); err != nil {
+			return err
+		}
 		templates := tx.Bucket([]byte("templates"))
 		templateRaw := templates.Get(itob(result.TemplateID))
 		if templateRaw == nil {
@@ -600,34 +657,6 @@ func (s *Store) ListTemplateVersions(templateID int64) ([]TemplateVersion, error
 	})
 	sort.Slice(out, func(i, j int) bool { return out[i].Version < out[j].Version })
 	return out, err
-}
-
-func saveWithID(db *bolt.DB, bucket string, id int64, build func(int64, string) any) (int64, error) {
-	err := db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(bucket))
-		created := ""
-		if id == 0 {
-			seq, err := b.NextSequence()
-			if err != nil {
-				return err
-			}
-			id = int64(seq)
-		} else {
-			v := b.Get(itob(id))
-			if v == nil {
-				return fmt.Errorf("no %s record with id %d", bucket, id)
-			}
-			var stamp struct {
-				CreatedAt string `json:"created_at"`
-			}
-			if err := json.Unmarshal(v, &stamp); err != nil {
-				return err
-			}
-			created = stamp.CreatedAt
-		}
-		return putJSON(b, itob(id), build(id, created))
-	})
-	return id, err
 }
 
 func getJSONByID(db *bolt.DB, bucket string, id int64, target any) error {

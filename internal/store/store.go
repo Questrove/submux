@@ -84,6 +84,7 @@ type Store struct {
 var bucketNames = []string{
 	"settings", "sources", "source_cache", "meta",
 	"nodes", "templates", "template_versions", "subscriptions", "subscription_artifacts", "token_index", "lifecycle_events",
+	"subscription_updates",
 	"rule_profiles",
 	"rule_catalog_snapshots",
 }
@@ -137,7 +138,13 @@ func Open(path string) (*Store, error) {
 			}
 			version = "9"
 		}
-		if version != "9" {
+		if version == "9" {
+			if e := migrateV10(tx); e != nil {
+				return e
+			}
+			version = "10"
+		}
+		if version != "10" {
 			return fmt.Errorf("unsupported database schema version %q", version)
 		}
 		if string(meta.Get([]byte("schema_version"))) != version {
@@ -152,6 +159,66 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+// migrateV10 separates the last-good artifact from durable update state. Every
+// enabled subscription is scheduled for a non-blocking rebuild at startup;
+// disabled subscriptions retain their artifact but have no automatic work.
+func migrateV10(tx *bolt.Tx) error {
+	subscriptions := tx.Bucket([]byte("subscriptions"))
+	artifacts := tx.Bucket([]byte("subscription_artifacts"))
+	updates := tx.Bucket([]byte("subscription_updates"))
+	if subscriptions == nil || artifacts == nil || updates == nil {
+		return fmt.Errorf("v10 output buckets are missing")
+	}
+	type legacyArtifact struct {
+		SubscriptionID int64    `json:"subscription_id"`
+		Body           []byte   `json:"body,omitempty"`
+		ContentType    string   `json:"content_type,omitempty"`
+		Revision       string   `json:"revision,omitempty"`
+		LastSuccess    string   `json:"last_success,omitempty"`
+		LastError      string   `json:"last_error,omitempty"`
+		Warnings       []string `json:"warnings,omitempty"`
+		BlockedReason  string   `json:"blocked_reason,omitempty"`
+		UpdatedAt      string   `json:"updated_at"`
+	}
+	return subscriptions.ForEach(func(key, raw []byte) error {
+		var subscription OutputSubscription
+		if err := json.Unmarshal(raw, &subscription); err != nil {
+			return err
+		}
+		now := nowRFC3339()
+		state := SubscriptionUpdateState{
+			SubscriptionID: subscription.ID, InputGeneration: 1,
+			Status: SubscriptionUpdatePending, UpdatedAt: now,
+		}
+		if artifactRaw := artifacts.Get(key); artifactRaw != nil {
+			var legacy legacyArtifact
+			if err := json.Unmarshal(artifactRaw, &legacy); err != nil {
+				return err
+			}
+			state.LastError = legacy.LastError
+			state.Warnings = append([]string(nil), legacy.Warnings...)
+			state.BlockedReason = legacy.BlockedReason
+			if legacy.BlockedReason != "" {
+				state.FailureClass = SubscriptionFailureLifecycle
+			} else if legacy.LastError != "" {
+				state.FailureClass = SubscriptionFailureConfig
+			}
+			clean := SubscriptionArtifact{
+				SubscriptionID: subscription.ID, Body: legacy.Body,
+				ContentType: legacy.ContentType, Revision: legacy.Revision,
+				LastSuccess: legacy.LastSuccess, UpdatedAt: legacy.UpdatedAt,
+			}
+			if err := putJSON(artifacts, key, clean); err != nil {
+				return err
+			}
+		}
+		if !subscription.Enabled {
+			return updates.Delete(key)
+		}
+		return putJSON(updates, key, state)
+	})
 }
 
 func migrateV9(tx *bolt.Tx) error {

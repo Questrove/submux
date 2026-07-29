@@ -15,6 +15,7 @@ import (
 
 	"submux/internal/lifecycle"
 	"submux/internal/node"
+	"submux/internal/outputupdate"
 	"submux/internal/parse"
 	"submux/internal/resourceproxy"
 	"submux/internal/store"
@@ -25,10 +26,10 @@ const maxUpstreamBytes = 10 << 20
 type Fetcher struct {
 	store           *store.Store
 	intervalChanged chan struct{}
-	rebuilder       interface{ RebuildAll() error }
+	outputUpdates   *outputupdate.Service
 }
 
-func (f *Fetcher) SetRebuilder(rebuilder interface{ RebuildAll() error }) { f.rebuilder = rebuilder }
+func (f *Fetcher) SetOutputUpdater(updater *outputupdate.Service) { f.outputUpdates = updater }
 
 func NewFetcher(s *store.Store) *Fetcher {
 	return &Fetcher{
@@ -106,13 +107,7 @@ func (f *Fetcher) commitDownloaded(_ context.Context, src store.Source, raw, use
 	if proxyCount == 0 {
 		err := fmt.Errorf("subscription contains no proxy nodes; previous proxy snapshot preserved")
 		_ = f.store.UpsertCacheError(src.ID, err.Error())
-		if f.rebuilder != nil {
-			_ = f.rebuilder.RebuildAll()
-		}
 		return err
-	}
-	if f.rebuilder != nil {
-		_ = f.rebuilder.RebuildAll()
 	}
 	return nil
 }
@@ -273,6 +268,9 @@ func (f *Fetcher) RunOnce(ctx context.Context) error {
 			continue
 		}
 		_ = f.FetchOne(ctx, src) // 错误已写入缓存的 last_error
+		if f.outputUpdates != nil {
+			f.outputUpdates.AttemptPending()
+		}
 	}
 	return nil
 }
@@ -328,8 +326,11 @@ func (f *Fetcher) SweepLifecycle() error {
 		}
 		changed = changed || transitioned
 	}
-	if changed && f.rebuilder != nil {
-		return f.rebuilder.RebuildAll()
+	if changed && f.outputUpdates != nil {
+		report := f.outputUpdates.AttemptPending()
+		if report.Error != "" {
+			return errors.New(report.Error)
+		}
 	}
 	return nil
 }

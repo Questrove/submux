@@ -14,6 +14,9 @@ func (s *Store) UpsertCacheSuccess(sourceID int64, userinfoJSON string) error {
 		LastSuccessAt: now, LastError: "", UpdatedAt: now,
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
+		if err := invalidateOutputSubscriptionsForSourceTx(tx, sourceID); err != nil {
+			return err
+		}
 		buf, e := json.Marshal(c)
 		if e != nil {
 			return e

@@ -35,7 +35,28 @@ type RuleProfile struct {
 }
 
 func (s *Store) SaveRuleProfile(value RuleProfile) (int64, error) {
-	return saveWithID(s.db, "rule_profiles", value.ID, func(id int64, createdAt string) any {
+	var id int64
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("rule_profiles"))
+		id = value.ID
+		createdAt := ""
+		if id == 0 {
+			seq, err := b.NextSequence()
+			if err != nil {
+				return err
+			}
+			id = int64(seq)
+		} else {
+			raw := b.Get(itob(id))
+			if raw == nil {
+				return fmt.Errorf("no rule_profiles record with id %d", id)
+			}
+			var current RuleProfile
+			if err := json.Unmarshal(raw, &current); err != nil {
+				return err
+			}
+			createdAt = current.CreatedAt
+		}
 		now := nowRFC3339()
 		value.ID, value.UpdatedAt = id, now
 		value.Key = strings.TrimSpace(value.Key)
@@ -49,8 +70,14 @@ func (s *Store) SaveRuleProfile(value RuleProfile) (int64, error) {
 		} else {
 			value.CreatedAt = createdAt
 		}
-		return value
+		if err := putJSON(b, itob(id), value); err != nil {
+			return err
+		}
+		return invalidateOutputSubscriptionsTx(tx, func(subscription OutputSubscription) bool {
+			return subscription.RuleProfileID == id
+		})
 	})
+	return id, err
 }
 
 func (s *Store) GetRuleProfile(id int64) (RuleProfile, error) {
@@ -99,6 +126,11 @@ func (s *Store) DeleteRuleProfile(id int64) error {
 		bucket := tx.Bucket([]byte("rule_profiles"))
 		if bucket.Get(itob(id)) == nil {
 			return fmt.Errorf("no rule profile with id %d", id)
+		}
+		if err := invalidateOutputSubscriptionsTx(tx, func(subscription OutputSubscription) bool {
+			return subscription.RuleProfileID == id
+		}); err != nil {
+			return err
 		}
 		return bucket.Delete(itob(id))
 	})

@@ -1,15 +1,16 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"submux/internal/buildinfo"
 	"submux/internal/compiler"
+	"submux/internal/outputupdate"
 	"submux/internal/source"
 	"submux/internal/store"
 	"submux/web"
@@ -19,13 +20,18 @@ type Server struct {
 	store    *store.Store
 	fetcher  *source.Fetcher
 	compiler *compiler.Service
+	updater  *outputupdate.Service
 	initErr  error
 }
 
 func New(st *store.Store, f *source.Fetcher) *Server {
 	srv, err := NewChecked(st, f)
 	if err != nil {
-		return &Server{store: st, fetcher: f, compiler: compiler.New(st), initErr: err}
+		compilerService := compiler.New(st)
+		return &Server{
+			store: st, fetcher: f, compiler: compilerService,
+			updater: outputupdate.New(st, compilerService), initErr: err,
+		}
 	}
 	return srv
 }
@@ -40,10 +46,30 @@ func NewChecked(st *store.Store, f *source.Fetcher) (*Server, error) {
 	if err := service.EnsureBuiltinRuleProfiles(); err != nil {
 		return nil, fmt.Errorf("initialize built-in rule profiles: %w", err)
 	}
+	updater := outputupdate.New(st, service)
 	if f != nil {
-		f.SetRebuilder(service)
+		f.SetOutputUpdater(updater)
 	}
-	return &Server{store: st, fetcher: f, compiler: service}, nil
+	return &Server{store: st, fetcher: f, compiler: service, updater: updater}, nil
+}
+
+func (s *Server) RunOutputUpdates(ctx context.Context) { s.updater.Run(ctx) }
+
+func addOutputUpdateResult(result map[string]any, report outputupdate.Report) {
+	outcome := "completed"
+	if report.Error != "" {
+		outcome = "degraded"
+	}
+	for _, item := range report.Results {
+		if item.Outcome != "completed" {
+			outcome = "degraded"
+			break
+		}
+	}
+	result["outcome"] = outcome
+	if report.Error != "" || len(report.Results) > 0 {
+		result["output_update"] = report
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -126,11 +152,12 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	artifact, err := s.store.GetSubscriptionArtifact(subscription.ID)
-	if err == nil && artifact.BlockedReason != "" {
+	update, updateErr := s.store.GetSubscriptionUpdate(subscription.ID)
+	if updateErr == nil && update.BlockedReason != "" {
 		http.Error(w, "subscription unavailable due to upstream lifecycle policy", http.StatusServiceUnavailable)
 		return
 	}
+	artifact, err := s.store.GetSubscriptionArtifact(subscription.ID)
 	if err != nil || len(artifact.Body) == 0 {
 		http.Error(w, "subscription has no published artifact", http.StatusServiceUnavailable)
 		return
@@ -142,14 +169,8 @@ func (s *Server) handleSub(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Disposition", "attachment; filename=submux"+ext)
 	w.Header().Set("X-Submux-Revision", artifact.Revision)
-	if artifact.LastError != "" {
-		w.Header().Set("X-Submux-Degraded", sanitizeHeader(artifact.LastError))
-	} else if len(artifact.Warnings) > 0 {
-		w.Header().Set("X-Submux-Degraded", "upstream lifecycle warning")
+	if updateErr == nil && (update.Status != store.SubscriptionUpdateReady || update.LastError != "" || len(update.Warnings) > 0) {
+		w.Header().Set("X-Submux-Degraded", "true")
 	}
 	_, _ = w.Write(artifact.Body)
-}
-
-func sanitizeHeader(value string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(value, "\n", " "), "\r", " ")
 }

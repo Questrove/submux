@@ -140,7 +140,7 @@ func TestSingBoxCompilerRejectsCertificateFingerprintSemanticMismatch(t *testing
 	}
 }
 
-func TestCompileFailurePreservesLastGoodArtifact(t *testing.T) {
+func TestPreviewFailureDoesNotMutateLastGoodArtifact(t *testing.T) {
 	st := compilerTestStore(t)
 	_, nodeIDs := addManualNodes(t, st, "Home", "trojan://password@example.com:443#TR")
 	version := addTemplate(t, st, EngineMihomo, `proxy-groups:
@@ -155,24 +155,32 @@ rules: ["MATCH,AUTO"]
 		t.Fatal(err)
 	}
 	service := New(st)
-	if _, err := service.CompileAndStore(subscriptionID); err != nil {
+	subscription, _ := st.GetOutputSubscription(subscriptionID)
+	result, err := service.Preview(subscription)
+	if err != nil {
 		t.Fatal(err)
+	}
+	update, _ := st.GetSubscriptionUpdate(subscriptionID)
+	if committed, err := st.CommitSubscriptionArtifactIfCurrent(subscriptionID, update.InputGeneration, store.SubscriptionArtifact{
+		Body: result.Body, ContentType: result.ContentType, Revision: result.Revision,
+	}, result.Warnings); err != nil || !committed {
+		t.Fatalf("seed artifact: committed=%v err=%v", committed, err)
 	}
 	before, _ := st.GetSubscriptionArtifact(subscriptionID)
 	nodeValue, _ := st.GetNode(nodeIDs[0])
 	if err := st.UpdateNodeMetadata(nodeValue.ID, nodeValue.Tags, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompileAndStore(subscriptionID); err == nil {
+	if _, err := service.Preview(subscription); err == nil {
 		t.Fatal("expected unavailable selected node compile failure")
 	}
 	after, _ := st.GetSubscriptionArtifact(subscriptionID)
-	if !bytes.Equal(before.Body, after.Body) || after.LastError == "" || after.Revision != before.Revision {
-		t.Fatalf("last-good artifact was not preserved: before=%+v after=%+v", before, after)
+	if !bytes.Equal(before.Body, after.Body) || after.Revision != before.Revision {
+		t.Fatalf("pure preview mutated artifact: before=%+v after=%+v", before, after)
 	}
 }
 
-func TestStrictExpiredSourceBlocksWithoutReplacingLastGood(t *testing.T) {
+func TestStrictExpiredSourceBlocksAndAllowsFailover(t *testing.T) {
 	st := compilerTestStore(t)
 	sourceID, err := st.CreateSource(store.Source{Name: "airport", URL: "https://example.com/sub"})
 	if err != nil {
@@ -196,10 +204,17 @@ rules: ["MATCH,AUTO"]
 		Bindings: []store.SubscriptionBinding{{Slot: "primary", NodeIDs: []int64{primaryNodeID}}}, Token: "token", Enabled: true,
 	})
 	service := New(st)
-	if _, err := service.CompileAndStore(subscriptionID); err != nil {
+	subscription, _ := st.GetOutputSubscription(subscriptionID)
+	initial, err := service.Preview(subscription)
+	if err != nil {
 		t.Fatal(err)
 	}
-	before, _ := st.GetSubscriptionArtifact(subscriptionID)
+	update, _ := st.GetSubscriptionUpdate(subscriptionID)
+	if committed, err := st.CommitSubscriptionArtifactIfCurrent(subscriptionID, update.InputGeneration, store.SubscriptionArtifact{
+		Body: initial.Body, ContentType: initial.ContentType, Revision: initial.Revision,
+	}, initial.Warnings); err != nil || !committed {
+		t.Fatalf("seed artifact: committed=%v err=%v", committed, err)
+	}
 	source, _ := st.GetSource(sourceID)
 	source.LifecyclePolicy = store.LifecycleStrict
 	if err := st.UpdateSource(source); err != nil {
@@ -212,20 +227,18 @@ rules: ["MATCH,AUTO"]
 	if err := st.CommitSourceRefreshV3(sourceID, records, "", metadata, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompileAndStore(subscriptionID); err == nil {
+	if _, err := service.Preview(subscription); err == nil {
 		t.Fatal("strict expired source did not block")
-	}
-	after, _ := st.GetSubscriptionArtifact(subscriptionID)
-	if after.BlockedReason == "" || !bytes.Equal(before.Body, after.Body) || after.Revision != before.Revision {
-		t.Fatalf("strict block did not preserve auditable last-good: before=%+v after=%+v", before, after)
+	} else if _, ok := err.(*BlockedError); !ok {
+		t.Fatalf("strict expired source returned %T, want *BlockedError", err)
 	}
 	_, backupNodeIDs := addManualNodes(t, st, "backup", "trojan://password@backup.example.com:443#Backup")
-	subscription, _ := st.GetOutputSubscription(subscriptionID)
 	subscription.Bindings[0].NodeIDs = append(subscription.Bindings[0].NodeIDs, backupNodeIDs...)
 	if _, err := st.SaveOutputSubscription(subscription); err != nil {
 		t.Fatal(err)
 	}
-	failover, err := service.CompileAndStore(subscriptionID)
+	subscription, _ = st.GetOutputSubscription(subscriptionID)
+	failover, err := service.Preview(subscription)
 	if err != nil || !bytes.Contains(failover.Body, []byte("backup.example.com")) {
 		t.Fatalf("strict failover did not publish backup-only artifact: err=%v body=%s", err, failover.Body)
 	}
@@ -236,11 +249,7 @@ rules: ["MATCH,AUTO"]
 	if err := st.CommitSourceRefreshV3(sourceID, records, "", metadata, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.CompileAndStore(subscriptionID); err != nil {
+	if _, err := service.Preview(subscription); err != nil {
 		t.Fatalf("renewed source did not recover: %v", err)
-	}
-	recovered, _ := st.GetSubscriptionArtifact(subscriptionID)
-	if recovered.BlockedReason != "" || recovered.LastError != "" {
-		t.Fatalf("recovered artifact still blocked: %+v", recovered)
 	}
 }

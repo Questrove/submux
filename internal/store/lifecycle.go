@@ -34,6 +34,9 @@ func (s *Store) RecordLifecycleState(sourceID int64, state string) (bool, error)
 		if previous == "" {
 			return nil
 		}
+		if err := invalidateOutputSubscriptionsForSourceTx(tx, sourceID); err != nil {
+			return err
+		}
 		b := tx.Bucket([]byte("lifecycle_events"))
 		sequence, err := b.NextSequence()
 		if err != nil {

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,29 @@ import (
 	"submux/internal/node"
 	"submux/internal/store"
 )
+
+func (s *Server) saveCompiledOutputSubscription(value store.OutputSubscription) (int64, compiler.Result, error) {
+	for range 3 {
+		inputsGeneration, err := s.store.OutputInputsGeneration()
+		if err != nil {
+			return 0, compiler.Result{}, err
+		}
+		compiled, err := s.compiler.Preview(value)
+		if err != nil {
+			return 0, compiler.Result{}, err
+		}
+		id, err := s.store.SaveOutputSubscriptionWithArtifact(value, store.SubscriptionArtifact{
+			Body: compiled.Body, ContentType: compiled.ContentType, Revision: compiled.Revision,
+		}, compiled.Warnings, store.OutputPublicationGuard{
+			InputsGeneration: inputsGeneration, SubscriptionVersion: value.RecordVersion,
+		})
+		if errors.Is(err, store.ErrOutputInputsChanged) {
+			continue
+		}
+		return id, compiled, err
+	}
+	return 0, compiler.Result{}, store.ErrOutputInputsChanged
+}
 
 func (s *Server) handleListNodes(w http.ResponseWriter, _ *http.Request) {
 	values, err := s.store.ListNodes()
@@ -53,8 +77,9 @@ func (s *Server) handleImportNodes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_ = s.compiler.RebuildAll()
-	writeJSON(w, map[string]any{"ids": ids, "count": len(ids), "source_id": body.SourceID})
+	result := map[string]any{"ids": ids, "count": len(ids), "source_id": body.SourceID}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
+	writeJSON(w, result)
 }
 
 func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
@@ -133,8 +158,9 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_ = s.compiler.RebuildAll()
-	writeJSON(w, map[string]any{"ok": true})
+	result := map[string]any{"ok": true}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
+	writeJSON(w, result)
 }
 
 func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
@@ -156,8 +182,7 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_ = s.compiler.RebuildAll()
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})
 }
 
 func containsInt64(values []int64, target int64) bool {
@@ -216,7 +241,9 @@ func (s *Server) handleSaveTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"id": id})
+	result := map[string]any{"id": id}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
+	writeJSON(w, result)
 }
 
 func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +268,9 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	result := map[string]any{"ok": true}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
+	writeJSON(w, result)
 }
 
 func (s *Server) handleListTemplateVersions(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +316,10 @@ func (s *Server) handlePublishTemplateVersion(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, version)
+	writeJSON(w, struct {
+		store.TemplateVersion
+		Outcome string `json:"outcome"`
+	}{TemplateVersion: version, Outcome: "completed"})
 }
 
 func (s *Server) handleListOutputSubscriptions(w http.ResponseWriter, _ *http.Request) {
@@ -297,19 +329,17 @@ func (s *Server) handleListOutputSubscriptions(w http.ResponseWriter, _ *http.Re
 		return
 	}
 	type artifactStatus struct {
-		ContentType   string   `json:"content_type,omitempty"`
-		Revision      string   `json:"revision,omitempty"`
-		LastSuccess   string   `json:"last_success,omitempty"`
-		LastError     string   `json:"last_error,omitempty"`
-		UpdatedAt     string   `json:"updated_at,omitempty"`
-		Warnings      []string `json:"warnings,omitempty"`
-		BlockedReason string   `json:"blocked_reason,omitempty"`
+		ContentType string `json:"content_type,omitempty"`
+		Revision    string `json:"revision,omitempty"`
+		LastSuccess string `json:"last_success,omitempty"`
+		UpdatedAt   string `json:"updated_at,omitempty"`
 	}
 	type item struct {
 		store.OutputSubscription
-		Artifact *artifactStatus `json:"artifact,omitempty"`
-		URL      string          `json:"url"`
-		Scenario string          `json:"scenario,omitempty"`
+		Artifact *artifactStatus                `json:"artifact,omitempty"`
+		Update   *store.SubscriptionUpdateState `json:"update,omitempty"`
+		URL      string                         `json:"url"`
+		Scenario string                         `json:"scenario,omitempty"`
 	}
 	base, _ := s.store.GetSetting("base_url")
 	out := make([]item, 0, len(values))
@@ -323,9 +353,11 @@ func (s *Server) handleListOutputSubscriptions(w http.ResponseWriter, _ *http.Re
 		if artifact, err := s.store.GetSubscriptionArtifact(value.ID); err == nil {
 			entry.Artifact = &artifactStatus{
 				ContentType: artifact.ContentType, Revision: artifact.Revision,
-				LastSuccess: artifact.LastSuccess, LastError: artifact.LastError, UpdatedAt: artifact.UpdatedAt,
-				Warnings: artifact.Warnings, BlockedReason: artifact.BlockedReason,
+				LastSuccess: artifact.LastSuccess, UpdatedAt: artifact.UpdatedAt,
 			}
+		}
+		if update, err := s.store.GetSubscriptionUpdate(value.ID); err == nil {
+			entry.Update = &update
 		}
 		if base != "" {
 			entry.URL = strings.TrimRight(base, "/") + "/sub/" + value.Token
@@ -432,21 +464,18 @@ func (s *Server) handleSaveOutputSubscription(w http.ResponseWriter, r *http.Req
 			return
 		}
 		value.Token = old.Token
+		value.RecordVersion = old.RecordVersion
 	}
-	if _, err := s.compiler.Preview(value); err != nil {
+	id, compiled, err := s.saveCompiledOutputSubscription(value)
+	if err != nil {
+		if errors.Is(err, store.ErrOutputSubscriptionChanged) || errors.Is(err, store.ErrOutputInputsChanged) {
+			http.Error(w, "output subscription changed concurrently; reload and retry", http.StatusConflict)
+			return
+		}
 		http.Error(w, "output subscription does not compile: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	id, err := s.store.SaveOutputSubscription(value)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if _, err := s.compiler.CompileAndStore(id); err != nil {
-		http.Error(w, "output subscription saved but compile failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, map[string]any{"id": id, "token": value.Token})
+	writeJSON(w, map[string]any{"id": id, "token": value.Token, "outcome": "completed", "revision": compiled.Revision})
 }
 
 func (s *Server) handlePreviewOutputSubscription(w http.ResponseWriter, r *http.Request) {
@@ -474,12 +503,14 @@ func (s *Server) handlePublishOutputSubscription(w http.ResponseWriter, r *http.
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	result, err := s.compiler.CompileAndStore(id)
+	report, err := s.updater.Retry(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, map[string]any{"ok": true, "revision": result.Revision, "node_count": result.NodeCount, "warnings": result.Warnings})
+	result := map[string]any{"ok": true}
+	addOutputUpdateResult(result, report)
+	writeJSON(w, result)
 }
 
 func (s *Server) handleResetOutputSubscriptionToken(w http.ResponseWriter, r *http.Request) {
@@ -494,11 +525,11 @@ func (s *Server) handleResetOutputSubscriptionToken(w http.ResponseWriter, r *ht
 		return
 	}
 	value.Token = randomHex(24)
-	if _, err := s.store.SaveOutputSubscription(value); err != nil {
+	if err := s.store.UpdateOutputSubscriptionToken(id, value.Token); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, map[string]any{"token": value.Token})
+	writeJSON(w, map[string]any{"token": value.Token, "outcome": "completed"})
 }
 
 func (s *Server) handleSetOutputSubscriptionEnabled(w http.ResponseWriter, r *http.Request) {
@@ -521,24 +552,22 @@ func (s *Server) handleSetOutputSubscriptionEnabled(w http.ResponseWriter, r *ht
 	}
 	if body.Enabled {
 		value.Enabled = true
-		if _, err := s.compiler.Preview(value); err != nil {
+		if _, _, err := s.saveCompiledOutputSubscription(value); err != nil {
+			if errors.Is(err, store.ErrOutputSubscriptionChanged) || errors.Is(err, store.ErrOutputInputsChanged) {
+				http.Error(w, "output subscription changed concurrently; reload and retry", http.StatusConflict)
+				return
+			}
 			http.Error(w, "output subscription cannot be enabled: "+err.Error(), http.StatusBadRequest)
 			return
 		}
 	} else {
 		value.Enabled = false
-	}
-	if _, err := s.store.SaveOutputSubscription(value); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if body.Enabled {
-		if _, err := s.compiler.CompileAndStore(id); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+		if _, err := s.store.SaveOutputSubscription(value); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})
 }
 
 func (s *Server) handleDeleteOutputSubscription(w http.ResponseWriter, r *http.Request) {

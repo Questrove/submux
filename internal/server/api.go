@@ -202,6 +202,10 @@ func (s *Server) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 			response["refresh_ok"] = true
 		}
 	}
+	addOutputUpdateResult(response, s.updater.AttemptPending())
+	if _, failed := response["refresh_error"]; failed {
+		response["outcome"] = "degraded"
+	}
 	writeJSON(w, response)
 }
 
@@ -288,8 +292,9 @@ func (s *Server) handleUpdateSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_ = s.compiler.RebuildAll()
-	writeJSON(w, map[string]any{"ok": true})
+	result := map[string]any{"ok": true}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
+	writeJSON(w, result)
 }
 
 func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
@@ -327,8 +332,7 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	_ = s.compiler.RebuildAll()
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})
 }
 
 func (s *Server) handleRefreshSource(w http.ResponseWriter, r *http.Request) {
@@ -355,6 +359,10 @@ func (s *Server) handleRefreshSource(w http.ResponseWriter, r *http.Request) {
 	if ferr != nil {
 		resp["error"] = ferr.Error()
 	}
+	addOutputUpdateResult(resp, s.updater.AttemptPending())
+	if ferr != nil {
+		resp["outcome"] = "failed"
+	}
 	writeJSON(w, resp)
 }
 
@@ -377,6 +385,10 @@ func (s *Server) handleRefreshSourceViaPlatformProxy(w http.ResponseWriter, r *h
 	result := map[string]any{"ok": fetchErr == nil}
 	if fetchErr != nil {
 		result["error"] = fetchErr.Error()
+	}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
+	if fetchErr != nil {
+		result["outcome"] = "failed"
 	}
 	writeJSON(w, result)
 }
@@ -455,18 +467,14 @@ func (s *Server) handlePutSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "save platform resource proxy failed", http.StatusInternalServerError)
 		return
 	}
-	var rebuildErr error
 	if body.SharedFakeIPFilter != nil {
 		if err := s.store.SetSetting(fakeip.SettingKey, sharedFakeIPRaw); err != nil {
 			http.Error(w, "save shared fake-ip-filter failed", http.StatusInternalServerError)
 			return
 		}
-		rebuildErr = s.compiler.RebuildAll()
 	}
-	result := map[string]any{"ok": rebuildErr == nil}
-	if rebuildErr != nil {
-		result["rebuild_error"] = rebuildErr.Error()
-	}
+	result := map[string]any{"ok": true}
+	addOutputUpdateResult(result, s.updater.AttemptPending())
 	writeJSON(w, result)
 }
 
