@@ -245,10 +245,18 @@ func (s *Store) SetSourceEnabled(id int64, enabled bool) error {
 func (s *Store) DeleteSource(id int64) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("sources"))
-		if b.Get(itob(id)) == nil {
-			return fmt.Errorf("no source with id %d", id)
+		raw := b.Get(itob(id))
+		if raw == nil {
+			return &resourceDeletionNotFoundError{resourceKind: resourceKindSource, resourceID: id}
 		}
-		if err := invalidateOutputSubscriptionsForSourceTx(tx, id); err != nil {
+		var source Source
+		if err := json.Unmarshal(raw, &source); err != nil {
+			return err
+		}
+		if err := requireResourceDeletionAllowedTx(tx, resourceKindSource, id, source.Builtin); err != nil {
+			return err
+		}
+		if err := bumpOutputInputsGenerationTx(tx); err != nil {
 			return err
 		}
 		if e := b.Delete(itob(id)); e != nil {

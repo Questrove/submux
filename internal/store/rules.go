@@ -124,12 +124,18 @@ func (s *Store) ListRuleProfiles() ([]RuleProfile, error) {
 func (s *Store) DeleteRuleProfile(id int64) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte("rule_profiles"))
-		if bucket.Get(itob(id)) == nil {
-			return fmt.Errorf("no rule profile with id %d", id)
+		raw := bucket.Get(itob(id))
+		if raw == nil {
+			return &resourceDeletionNotFoundError{resourceKind: resourceKindRuleProfile, resourceID: id}
 		}
-		if err := invalidateOutputSubscriptionsTx(tx, func(subscription OutputSubscription) bool {
-			return subscription.RuleProfileID == id
-		}); err != nil {
+		var profile RuleProfile
+		if err := json.Unmarshal(raw, &profile); err != nil {
+			return err
+		}
+		if err := requireResourceDeletionAllowedTx(tx, resourceKindRuleProfile, id, profile.Builtin); err != nil {
+			return err
+		}
+		if err := bumpOutputInputsGenerationTx(tx); err != nil {
 			return err
 		}
 		return bucket.Delete(itob(id))

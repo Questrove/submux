@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -33,6 +34,32 @@ func writeJSONStatus(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeResourceDeletionError(w http.ResponseWriter, err error) {
+	var conflict *store.ResourceDeletionConflict
+	if errors.As(err, &conflict) {
+		writeJSONStatus(w, http.StatusConflict, map[string]any{
+			"ok":            false,
+			"error":         conflict.Error(),
+			"resource_kind": conflict.ResourceKind,
+			"resource_id":   conflict.ResourceID,
+			"reason":        conflict.Reason,
+			"references":    conflict.References,
+		})
+		return
+	}
+	if store.IsResourceDeletionNotFound(err) {
+		writeJSONStatus(w, http.StatusNotFound, map[string]any{
+			"ok":    false,
+			"error": err.Error(),
+		})
+		return
+	}
+	writeJSONStatus(w, http.StatusInternalServerError, map[string]any{
+		"ok":    false,
+		"error": "resource deletion failed",
+	})
 }
 
 func randomHex(nBytes int) string {
@@ -303,33 +330,8 @@ func (s *Server) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	sourceValue, err := s.store.GetSource(id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	if sourceValue.Builtin {
-		http.Error(w, "built-in node group cannot be deleted", http.StatusConflict)
-		return
-	}
-	subscriptions, _ := s.store.ListOutputSubscriptions()
-	nodes, _ := s.store.ListNodes()
-	nodeSource := make(map[int64]int64, len(nodes))
-	for _, node := range nodes {
-		nodeSource[node.ID] = node.SourceID
-	}
-	for _, subscription := range subscriptions {
-		for _, binding := range subscription.Bindings {
-			for _, nodeID := range binding.NodeIDs {
-				if nodeSource[nodeID] == id {
-					http.Error(w, "source node is used by output subscription "+strconv.FormatInt(subscription.ID, 10), http.StatusConflict)
-					return
-				}
-			}
-		}
-	}
 	if err := s.store.DeleteSource(id); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeResourceDeletionError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})

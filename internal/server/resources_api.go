@@ -146,29 +146,11 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	subscriptions, _ := s.store.ListOutputSubscriptions()
-	for _, subscription := range subscriptions {
-		for _, binding := range subscription.Bindings {
-			if containsInt64(binding.NodeIDs, id) {
-				http.Error(w, fmt.Sprintf("node is used by output subscription %d", subscription.ID), http.StatusConflict)
-				return
-			}
-		}
-	}
 	if err := s.store.DeleteNode(id); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeResourceDeletionError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})
-}
-
-func containsInt64(values []int64, target int64) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) handleListTemplates(w http.ResponseWriter, _ *http.Request) {
@@ -229,20 +211,8 @@ func (s *Server) handleDeleteTemplate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	subscriptions, _ := s.store.ListOutputSubscriptions()
-	versions, _ := s.store.ListTemplateVersions(id)
-	versionIDs := map[int64]bool{}
-	for _, version := range versions {
-		versionIDs[version.ID] = true
-	}
-	for _, subscription := range subscriptions {
-		if versionIDs[subscription.TemplateVersionID] {
-			http.Error(w, fmt.Sprintf("template is used by output subscription %d", subscription.ID), http.StatusConflict)
-			return
-		}
-	}
 	if err := s.store.DeleteTemplate(id); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeResourceDeletionError(w, err)
 		return
 	}
 	result := map[string]any{"ok": true}

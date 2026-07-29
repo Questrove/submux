@@ -378,16 +378,16 @@ func (s *Store) DeleteNode(id int64) error {
 		b := tx.Bucket([]byte("nodes"))
 		v := b.Get(itob(id))
 		if v == nil {
-			return fmt.Errorf("no node with id %d", id)
+			return &resourceDeletionNotFoundError{resourceKind: resourceKindNode, resourceID: id}
 		}
 		var node NodeRecord
 		if err := json.Unmarshal(v, &node); err != nil {
 			return err
 		}
-		if node.Origin != SourceKindManual {
-			return fmt.Errorf("subscription nodes are deleted by refreshing their source")
+		if err := requireResourceDeletionAllowedTx(tx, resourceKindNode, id, node.Origin != SourceKindManual); err != nil {
+			return err
 		}
-		if err := invalidateOutputSubscriptionsForNodeIDsTx(tx, map[int64]bool{id: true}); err != nil {
+		if err := bumpOutputInputsGenerationTx(tx); err != nil {
 			return err
 		}
 		return b.Delete(itob(id))
@@ -526,9 +526,12 @@ func (s *Store) DeleteTemplate(id int64) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("templates"))
 		if b.Get(itob(id)) == nil {
-			return fmt.Errorf("no template with id %d", id)
+			return &resourceDeletionNotFoundError{resourceKind: resourceKindTemplate, resourceID: id}
 		}
-		if err := invalidateOutputSubscriptionsForTemplateTx(tx, id); err != nil {
+		if err := requireResourceDeletionAllowedTx(tx, resourceKindTemplate, id, false); err != nil {
+			return err
+		}
+		if err := bumpOutputInputsGenerationTx(tx); err != nil {
 			return err
 		}
 		versions := tx.Bucket([]byte("template_versions"))

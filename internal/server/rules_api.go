@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -152,24 +151,8 @@ func (s *Server) handleDeleteRuleProfile(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "bad id", http.StatusBadRequest)
 		return
 	}
-	profile, err := s.store.GetRuleProfile(id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
-		return
-	}
-	if profile.Builtin {
-		http.Error(w, "the built-in rule profile cannot be deleted", http.StatusConflict)
-		return
-	}
-	subscriptions, _ := s.store.ListOutputSubscriptions()
-	for _, subscription := range subscriptions {
-		if subscription.RuleProfileID == id {
-			http.Error(w, fmt.Sprintf("rule profile is used by output subscription %d", subscription.ID), http.StatusConflict)
-			return
-		}
-	}
 	if err := s.store.DeleteRuleProfile(id); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeResourceDeletionError(w, err)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "outcome": "completed"})

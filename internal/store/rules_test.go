@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -43,10 +44,18 @@ func TestRuleProfileCRUDPreservesOrderAndBuiltinMetadata(t *testing.T) {
 	if err != nil || len(profiles) != 1 {
 		t.Fatalf("list rule profiles: %v %+v", err, profiles)
 	}
-	if err := st.DeleteRuleProfile(id); err != nil {
+	var conflict *ResourceDeletionConflict
+	if err := st.DeleteRuleProfile(id); !errors.As(err, &conflict) || conflict.Reason != resourceDeletionProtected {
+		t.Fatalf("delete built-in profile conflict = %#v, err = %v", conflict, err)
+	}
+	customID, err := st.SaveRuleProfile(RuleProfile{Name: "自定义", FallbackAction: "proxy"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if profiles, err = st.ListRuleProfiles(); err != nil || len(profiles) != 0 {
-		t.Fatalf("delete rule profile: %v %+v", err, profiles)
+	if err := st.DeleteRuleProfile(customID); err != nil {
+		t.Fatal(err)
+	}
+	if profiles, err = st.ListRuleProfiles(); err != nil || len(profiles) != 1 || profiles[0].ID != id {
+		t.Fatalf("delete custom rule profile: %v %+v", err, profiles)
 	}
 }
