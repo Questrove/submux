@@ -1,0 +1,249 @@
+{
+	"signatures": [
+		{
+			"keyid": "36fc9ffbc9b2393262b3e62ac5fd13b4b2e21af66a25876fc1b753ce9e88d0bb",
+			"sig": "86150a2f8e1415fc9371e405e184e1473817efa30f7e3114d9ab33fb1529ec769514e0624648b20201623eaaccc7c6c5bc15a73f5a6254267de89e7c7df7400a"
+		},
+		{
+			"keyid": "6cbae3b5426715b45f998fd9a1d59bc2317ec8b11f27470a10f142dafe67f28f",
+			"sig": "0be6a0d73f1ebb376de63f8fc41a4b07176d89d1fc4cbae1d70b81446da8dc13a5011bd6e7b53d44e39576d587b26cc4887fc40989b40343a59cc077c8ea7902"
+		},
+		{
+			"keyid": "13e0652714079f0563f4cd731acc86af8db0b144c0e45599483b7f67bf98923e",
+			"sig": "e0a695a35088e386a93e73dac33508d93475bf8a05fd27ea866f18c838d65d671b246a99297b0f4b8fa7ddae48b8bfab773bf55e405f5cc27bdc80a7645f3508"
+		}
+	],
+	"signed": {
+		"_type": "targets",
+		"expires": "2026-10-28T14:55:46Z",
+		"spec_version": "1.0.31",
+		"targets": {
+			"mihomo/v1.19.29/darwin/amd64/mihomo-darwin-amd64-compatible-v1.19.29.gz": {
+				"custom": {
+					"kind": "mihomo",
+					"version": "v1.19.29",
+					"platform": "darwin",
+					"arch": "amd64",
+					"repository": "MetaCubeX/mihomo",
+					"asset_name": "mihomo-darwin-amd64-compatible-v1.19.29.gz",
+					"upstream_sha256": "b43980c9bbcf10911f264662a8be4fdf4c95f4567244d6824c3f5365bab0e7d9"
+				},
+				"hashes": {
+					"sha256": "b43980c9bbcf10911f264662a8be4fdf4c95f4567244d6824c3f5365bab0e7d9"
+				},
+				"length": 17283526
+			},
+			"mihomo/v1.19.29/darwin/arm64/mihomo-darwin-arm64-v1.19.29.gz": {
+				"custom": {
+					"kind": "mihomo",
+					"version": "v1.19.29",
+					"platform": "darwin",
+					"arch": "arm64",
+					"repository": "MetaCubeX/mihomo",
+					"asset_name": "mihomo-darwin-arm64-v1.19.29.gz",
+					"upstream_sha256": "4dc25df9e899f14161911302a8ee5fc9e202ed9c976fc405bf82c50ff27466ca"
+				},
+				"hashes": {
+					"sha256": "4dc25df9e899f14161911302a8ee5fc9e202ed9c976fc405bf82c50ff27466ca"
+				},
+				"length": 15858351
+			},
+			"mihomo/v1.19.29/linux/amd64/mihomo-linux-amd64-compatible-v1.19.29.gz": {
+				"custom": {
+					"kind": "mihomo",
+					"version": "v1.19.29",
+					"platform": "linux",
+					"arch": "amd64",
+					"repository": "MetaCubeX/mihomo",
+					"asset_name": "mihomo-linux-amd64-compatible-v1.19.29.gz",
+					"upstream_sha256": "5612e698e96c8b8ad15abc4c0a4f098eba9234354b4f248cb97f2528e215b094"
+				},
+				"hashes": {
+					"sha256": "5612e698e96c8b8ad15abc4c0a4f098eba9234354b4f248cb97f2528e215b094"
+				},
+				"length": 17881563
+			},
+			"mihomo/v1.19.29/linux/arm64/mihomo-linux-arm64-v1.19.29.gz": {
+				"custom": {
+					"kind": "mihomo",
+					"version": "v1.19.29",
+					"platform": "linux",
+					"arch": "arm64",
+					"repository": "MetaCubeX/mihomo",
+					"asset_name": "mihomo-linux-arm64-v1.19.29.gz",
+					"upstream_sha256": "9a868b5e4e0ad91d9d71e1b41b0cfce78aaba44360c30df74a723f8e3926a86c"
+				},
+				"hashes": {
+					"sha256": "9a868b5e4e0ad91d9d71e1b41b0cfce78aaba44360c30df74a723f8e3926a86c"
+				},
+				"length": 16051759
+			},
+			"mihomo/v1.19.29/windows/amd64/mihomo-windows-amd64-compatible-v1.19.29.zip": {
+				"custom": {
+					"kind": "mihomo",
+					"version": "v1.19.29",
+					"platform": "windows",
+					"arch": "amd64",
+					"repository": "MetaCubeX/mihomo",
+					"asset_name": "mihomo-windows-amd64-compatible-v1.19.29.zip",
+					"upstream_sha256": "322aaa5957ba9e72afdda9b71cc4329f691d2d45ec39e70bbca3f7bf5aa93d52"
+				},
+				"hashes": {
+					"sha256": "322aaa5957ba9e72afdda9b71cc4329f691d2d45ec39e70bbca3f7bf5aa93d52"
+				},
+				"length": 17509605
+			},
+			"mihomo/v1.19.29/windows/arm64/mihomo-windows-arm64-v1.19.29.zip": {
+				"custom": {
+					"kind": "mihomo",
+					"version": "v1.19.29",
+					"platform": "windows",
+					"arch": "arm64",
+					"repository": "MetaCubeX/mihomo",
+					"asset_name": "mihomo-windows-arm64-v1.19.29.zip",
+					"upstream_sha256": "f71736f9c2a17abb8909a726c69ac55279d0cb43d1d9f2c85afdbb70a0f326a3"
+				},
+				"hashes": {
+					"sha256": "f71736f9c2a17abb8909a726c69ac55279d0cb43d1d9f2c85afdbb70a0f326a3"
+				},
+				"length": 15430938
+			},
+			"product/v2.0.0/darwin/amd64/submux-runtime-v2.0.0-darwin-amd64.zip": {
+				"custom": {
+					"kind": "submux-runtime-product",
+					"version": "v2.0.0",
+					"platform": "darwin",
+					"arch": "amd64",
+					"channel": "stable",
+					"asset_name": "submux-runtime-v2.0.0-darwin-amd64.zip",
+					"release_notes": "Submux Runtime v2.0.0 preview.",
+					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
+					"runtime_schema_min": 1,
+					"runtime_schema_max": 1,
+					"runtime_schema_target": 1,
+					"protocol_min": 1,
+					"protocol_max": 1,
+					"required_free_bytes": 48479620,
+					"components": [
+						"submux-runtime",
+						"submux-runtime-net",
+						"submux-runtime-gui"
+					]
+				},
+				"hashes": {
+					"sha256": "50b1df3561d94bc8f7e1ace90011bcf4c1ee8fca6fc98b09f3dd8e54d3451535"
+				},
+				"length": 12119905
+			},
+			"product/v2.0.0/darwin/arm64/submux-runtime-v2.0.0-darwin-arm64.zip": {
+				"custom": {
+					"kind": "submux-runtime-product",
+					"version": "v2.0.0",
+					"platform": "darwin",
+					"arch": "arm64",
+					"channel": "stable",
+					"asset_name": "submux-runtime-v2.0.0-darwin-arm64.zip",
+					"release_notes": "Submux Runtime v2.0.0 preview.",
+					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
+					"runtime_schema_min": 1,
+					"runtime_schema_max": 1,
+					"runtime_schema_target": 1,
+					"protocol_min": 1,
+					"protocol_max": 1,
+					"required_free_bytes": 45811972,
+					"components": [
+						"submux-runtime",
+						"submux-runtime-net",
+						"submux-runtime-gui"
+					]
+				},
+				"hashes": {
+					"sha256": "2814851faf083d723aabd3662961d44595e777e93a94d899d5576f8018bec0f0"
+				},
+				"length": 11452993
+			},
+			"product/v2.0.0/linux/amd64/submux-runtime-v2.0.0-linux-amd64.zip": {
+				"custom": {
+					"kind": "submux-runtime-product",
+					"version": "v2.0.0",
+					"platform": "linux",
+					"arch": "amd64",
+					"channel": "stable",
+					"asset_name": "submux-runtime-v2.0.0-linux-amd64.zip",
+					"release_notes": "Submux Runtime v2.0.0 preview.",
+					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
+					"runtime_schema_min": 1,
+					"runtime_schema_max": 1,
+					"runtime_schema_target": 1,
+					"protocol_min": 1,
+					"protocol_max": 1,
+					"required_free_bytes": 48021760,
+					"components": [
+						"submux-runtime",
+						"submux-runtime-net",
+						"submux-runtime-gui"
+					]
+				},
+				"hashes": {
+					"sha256": "5edd827259cb4aaa6afd79beb83278f7a06384a52e567b1412e3ab24b061700d"
+				},
+				"length": 12005440
+			},
+			"product/v2.0.0/windows/amd64/submux-runtime-v2.0.0-windows-amd64.zip": {
+				"custom": {
+					"kind": "submux-runtime-product",
+					"version": "v2.0.0",
+					"platform": "windows",
+					"arch": "amd64",
+					"channel": "stable",
+					"asset_name": "submux-runtime-v2.0.0-windows-amd64.zip",
+					"release_notes": "Submux Runtime v2.0.0 preview.",
+					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
+					"runtime_schema_min": 1,
+					"runtime_schema_max": 1,
+					"runtime_schema_target": 1,
+					"protocol_min": 1,
+					"protocol_max": 1,
+					"required_free_bytes": 47928200,
+					"components": [
+						"submux-runtime",
+						"submux-runtime-net",
+						"submux-runtime-gui"
+					]
+				},
+				"hashes": {
+					"sha256": "972a84810048e857fa2d4f19fb796f78f18f510fa8ffb2be61146335278fcb5b"
+				},
+				"length": 11982050
+			},
+			"product/v2.0.0/windows/arm64/submux-runtime-v2.0.0-windows-arm64.zip": {
+				"custom": {
+					"kind": "submux-runtime-product",
+					"version": "v2.0.0",
+					"platform": "windows",
+					"arch": "arm64",
+					"channel": "stable",
+					"asset_name": "submux-runtime-v2.0.0-windows-arm64.zip",
+					"release_notes": "Submux Runtime v2.0.0 preview.",
+					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
+					"runtime_schema_min": 1,
+					"runtime_schema_max": 1,
+					"runtime_schema_target": 1,
+					"protocol_min": 1,
+					"protocol_max": 1,
+					"required_free_bytes": 43464276,
+					"components": [
+						"submux-runtime",
+						"submux-runtime-net",
+						"submux-runtime-gui"
+					]
+				},
+				"hashes": {
+					"sha256": "f318cb2f84207c7b0ce3d433af9ce01f9dc191b62ec68ef004841fdf1729696c"
+				},
+				"length": 10866069
+			}
+		},
+		"version": 801
+	}
+}
