@@ -47,9 +47,7 @@
                       IncludeMaximum="yes"
                       Property="SAMEVERSIONFOUND"
                       OnlyDetect="yes" />
-      <UpgradeVersion Minimum="0.0.0"
-                      IncludeMinimum="yes"
-                      Maximum="$(var.ProductVersion)"
+      <UpgradeVersion Maximum="$(var.ProductVersion)"
                       IncludeMaximum="no"
                       Property="OLDERVERSIONFOUND" />
     </Upgrade>

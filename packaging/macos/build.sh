@@ -91,7 +91,7 @@ for tool in lipo pkgbuild productbuild plutil shasum; do
 done
 verify_arch() {
   local architecture=$1 binary=$2
-  lipo -verify_arch "$architecture" "$binary" ||
+  lipo "$binary" -verify_arch "$architecture" ||
     fail "$binary does not contain $architecture"
 }
 for pair in \
