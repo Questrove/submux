@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -53,6 +54,14 @@ type ExplicitCandidateBuilder struct {
 	Port            int
 	ControlEndpoint string
 	Platform        string
+	TUN             *TUNCandidateSettings
+}
+
+type TUNCandidateSettings struct {
+	Device      string
+	RoutingMark int
+	IPv6Policy  string
+	HijackDNS   bool
 }
 
 func (b ExplicitCandidateBuilder) BuildCandidate(source []byte) ([]byte, error) {
@@ -81,11 +90,44 @@ func (b ExplicitCandidateBuilder) runtimeSettings() (int, string, error) {
 	if platform != "windows" && platform != "linux" && platform != "darwin" {
 		return 0, "", fmt.Errorf("unsupported Mihomo Runtime platform %q", platform)
 	}
+	if b.TUN != nil {
+		if platform != "linux" {
+			return 0, "", errors.New("pre-created ordinary TUN is only supported on Linux")
+		}
+		if !validTUNDevice(b.TUN.Device) {
+			return 0, "", errors.New("Mihomo TUN device is invalid")
+		}
+		if b.TUN.RoutingMark < 1 {
+			return 0, "", errors.New("Mihomo TUN routing mark is invalid")
+		}
+		switch b.TUN.IPv6Policy {
+		case "proxy", "direct", "block":
+		default:
+			return 0, "", errors.New("Mihomo TUN IPv6 policy is invalid")
+		}
+	}
 	return port, platform, nil
 }
 
 func ExplicitRuntimeOwnedFields() []string {
 	return append([]string(nil), explicitRuntimeOwnedFields...)
+}
+
+func validTUNDevice(value string) bool {
+	if value == "" || len(value) > 15 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') ||
+			character == '_' ||
+			character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func prependRuntimeHealthRules(root *yaml.Node) error {
@@ -219,12 +261,24 @@ func scalarNode(value, tag string) *yaml.Node {
 func mappingNode(values map[string]*yaml.Node) *yaml.Node {
 	node := &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
 	order := []string{"name", "type", "port", "listen", "udp", "users", "enable"}
+	seen := make(map[string]struct{}, len(values))
 	for _, key := range order {
 		value, ok := values[key]
 		if !ok {
 			continue
 		}
 		node.Content = append(node.Content, scalarNode(key, "!!str"), value)
+		seen[key] = struct{}{}
+	}
+	remaining := make([]string, 0, len(values)-len(seen))
+	for key := range values {
+		if _, ok := seen[key]; !ok {
+			remaining = append(remaining, key)
+		}
+	}
+	sort.Strings(remaining)
+	for _, key := range remaining {
+		node.Content = append(node.Content, scalarNode(key, "!!str"), values[key])
 	}
 	return node
 }

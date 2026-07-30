@@ -41,6 +41,11 @@ type DiagnosticsService interface {
 	Create(context.Context, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error)
 }
 
+type NetworkService interface {
+	Preview(context.Context, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
+	Observe(context.Context) (runtimeapi.NetworkStatus, error)
+}
+
 type PublicError struct {
 	Code      string
 	Message   string
@@ -79,6 +84,7 @@ type Coordinator struct {
 	Executor      ActionExecutor
 	Recovery      RecoveryService
 	Diagnostics   DiagnosticsService
+	Network       NetworkService
 	Version       string
 	Now           func() time.Time
 	QueueCapacity int
@@ -91,7 +97,37 @@ type Coordinator struct {
 
 func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
 	service := &Service{State: c.State, Version: c.Version, Now: c.Now}
-	return service.Observe(ctx, peer)
+	snapshot, err := service.Observe(ctx, peer)
+	if err != nil {
+		return runtimeapi.Snapshot{}, err
+	}
+	if c.Network == nil {
+		snapshot.Network = runtimeapi.NetworkStatus{
+			Available: false,
+			Mode:      runtimeapi.RunModeExplicit,
+			State:     runtimeapi.NetworkStateUnavailable,
+		}
+		return snapshot, nil
+	}
+	network, networkErr := c.Network.Observe(ctx)
+	snapshot.Network = network
+	if networkErr != nil {
+		snapshot.Network.Available = false
+		snapshot.Network.State = runtimeapi.NetworkStateUnavailable
+		if snapshot.Network.Fault == nil {
+			snapshot.Network.Fault = &runtimeapi.Fault{
+				Code:    runtimeapi.ErrorServiceUnavailable,
+				Message: "Privileged Runtime network state is unavailable",
+			}
+		}
+		return snapshot, nil
+	}
+	if network.State == runtimeapi.NetworkStateActive {
+		snapshot.RunMode = network.Mode
+	} else if snapshot.RunMode == runtimeapi.RunModeTUN {
+		snapshot.RunMode = runtimeapi.RunModeExplicit
+	}
+	return snapshot, nil
 }
 
 func (c *Coordinator) RuntimeVersion() string {
@@ -198,6 +234,23 @@ func (c *Coordinator) PreviewCandidate(
 		return runtimeapi.CandidatePreview{}, errors.New("Runtime candidate preview is unavailable")
 	}
 	return previewer.PreviewCandidate(ctx, peer, request)
+}
+
+func (c *Coordinator) PreviewNetwork(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.NetworkPreviewRequest,
+) (runtimeapi.NetworkPreview, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.NetworkPreview{}, err
+	}
+	if peer.Key() == "" {
+		return runtimeapi.NetworkPreview{}, errors.New("Runtime network preview identity is required")
+	}
+	if c == nil || c.Network == nil {
+		return runtimeapi.NetworkPreview{}, errors.New("Runtime network preview is unavailable")
+	}
+	return c.Network.Preview(ctx, request)
 }
 
 func (c *Coordinator) GetAdvancedOverride(
@@ -589,6 +642,9 @@ func (c *Coordinator) now() time.Time {
 }
 
 func validateAction(action runtimeapi.Action) error {
+	if action.Kind != runtimeapi.ActionEnableTUN && action.Params.PlanID != "" {
+		return errors.New("plan_id is only accepted by network.enable_tun")
+	}
 	switch action.Kind {
 	case runtimeapi.ActionApplyImportedConfig:
 		if !validContentID(action.Params.ContentID) {
@@ -600,7 +656,8 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.UseCached ||
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
-			action.Params.ResourceName != "" {
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" {
 			return errors.New("proxy.apply_import accepts only content_id")
 		}
 	case runtimeapi.ActionStartProxy, runtimeapi.ActionStopProxy:
@@ -611,8 +668,33 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.UseCached ||
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
-			action.Params.ResourceName != "" {
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" {
 			return errors.New("proxy start and stop do not accept parameters")
+		}
+	case runtimeapi.ActionEnableTUN:
+		if !validPlanID(action.Params.PlanID) ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("network.enable_tun requires only a valid plan_id")
+		}
+	case runtimeapi.ActionDisableTUN:
+		if action.Params.PlanID != "" ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("network.disable_tun does not accept parameters")
 		}
 	case runtimeapi.ActionAddRemoteSource:
 		if !validContentID(action.Params.ContentID) ||
@@ -622,7 +704,8 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.UseCached ||
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
-			action.Params.ResourceName != "" {
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" {
 			return errors.New("source.add_remote requires only a valid content_id")
 		}
 	case runtimeapi.ActionAddImportedSource:
@@ -633,7 +716,8 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.UseCached ||
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
-			action.Params.ResourceName != "" {
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" {
 			return errors.New("source.add_imported requires content_id and source_name")
 		}
 	case runtimeapi.ActionRefreshSource:
@@ -644,6 +728,7 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" ||
 			(action.Params.Route != "" &&
 				action.Params.Route != runtimeapi.SourceRouteDirect &&
 				action.Params.Route != runtimeapi.SourceRouteMihomo) {
@@ -657,7 +742,8 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.UseCached ||
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
-			action.Params.ResourceName != "" {
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" {
 			return errors.New("source.apply requires only a valid source_id")
 		}
 	case runtimeapi.ActionSwitchSource:
@@ -667,6 +753,7 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" ||
 			(action.Params.Route != "" &&
 				action.Params.Route != runtimeapi.SourceRouteDirect &&
 				action.Params.Route != runtimeapi.SourceRouteMihomo) {
@@ -679,7 +766,8 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.Route != "" ||
 			action.Params.UseCached ||
 			action.Params.ResourceKind != "" ||
-			action.Params.ResourceName != "" {
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" {
 			return errors.New("source.delete requires source_id and optional confirmation")
 		}
 	case runtimeapi.ActionAddManagedResource:
@@ -689,6 +777,7 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.Route != "" ||
 			action.Params.UseCached ||
 			action.Params.Confirm ||
+			action.Params.PlanID != "" ||
 			!validResourceKind(action.Params.ResourceKind) ||
 			!validResourceName(action.Params.ResourceName) {
 			return errors.New("resource.add requires content_id, resource_kind, and resource_name")
@@ -701,7 +790,8 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.UseCached ||
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
-			action.Params.ResourceName != "" {
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" {
 			return errors.New("override.set requires only a valid content_id")
 		}
 	default:
@@ -721,6 +811,15 @@ func validSourceID(id string) bool {
 
 func validContentID(id string) bool {
 	suffix, ok := strings.CutPrefix(id, "content_")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
+func validPlanID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "plan_")
 	if !ok || len(suffix) != 32 {
 		return false
 	}
@@ -760,6 +859,10 @@ func publicExecutionMessage(kind string) string {
 		return "Mihomo could not start the explicit proxy"
 	case runtimeapi.ActionStopProxy:
 		return "Mihomo could not stop the explicit proxy"
+	case runtimeapi.ActionEnableTUN:
+		return "Runtime could not enable ordinary TUN networking"
+	case runtimeapi.ActionDisableTUN:
+		return "Runtime could not disable ordinary TUN networking"
 	case runtimeapi.ActionAddRemoteSource:
 		return "Runtime could not add the remote configuration source"
 	case runtimeapi.ActionAddImportedSource:

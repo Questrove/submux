@@ -38,6 +38,19 @@ type eventObserver struct {
 	events func(context.Context, runtimeapi.PeerIdentity, uint64, int) ([]runtimeapi.Event, uint64, error)
 }
 
+type networkObserver struct {
+	observerFunc
+	preview func(context.Context, runtimeapi.PeerIdentity, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
+}
+
+func (observer networkObserver) PreviewNetwork(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.NetworkPreviewRequest,
+) (runtimeapi.NetworkPreview, error) {
+	return observer.preview(ctx, peer, request)
+}
+
 func (observer eventObserver) Events(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -450,6 +463,66 @@ func TestCandidatePreviewUsesReadOnlyIPCEndpoint(t *testing.T) {
 	server.Handler().ServeHTTP(bothRecorder, bothRequest)
 	if bothRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("ambiguous preview status=%d body=%s", bothRecorder.Code, bothRecorder.Body.String())
+	}
+}
+
+func TestNetworkPreviewUsesTypedReadOnlyIPCEndpoint(t *testing.T) {
+	called := 0
+	service := networkObserver{
+		observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		},
+		preview: func(
+			_ context.Context,
+			peer runtimeapi.PeerIdentity,
+			request runtimeapi.NetworkPreviewRequest,
+		) (runtimeapi.NetworkPreview, error) {
+			called++
+			if peer.UID != 1000 ||
+				request.Mode != runtimeapi.RunModeTUN ||
+				request.IPv6Policy != runtimeapi.TUNIPv6Direct ||
+				request.DNSPolicy != runtimeapi.TUNDNSOff ||
+				len(request.CaptureRouteIDs) != 1 ||
+				request.CaptureRouteIDs[0] != "route_lan" {
+				t.Fatalf("network preview peer=%#v request=%#v", peer, request)
+			}
+			return runtimeapi.NetworkPreview{PlanID: "plan_0123456789abcdef0123456789abcdef"}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatalf("create Runtime IPC server: %v", err)
+	}
+	serve := func(body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/network/preview",
+			bytes.NewBufferString(body),
+		)
+		request.Header.Set(HeaderRequestID, "request-network")
+		request.Header.Set(HeaderProtocolVersion, "1")
+		request.Header.Set(HeaderClientVersion, "old")
+		request.Header.Set(HeaderClientType, "test")
+		request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	recorder := serve(`{"mode":"tun","ipv6_policy":"direct","dns_policy":"off","capture_route_ids":["route_lan"]}`)
+	if recorder.Code != http.StatusOK || called != 1 ||
+		!strings.Contains(recorder.Body.String(), "plan_0123456789abcdef0123456789abcdef") {
+		t.Fatalf("network preview status=%d calls=%d body=%s", recorder.Code, called, recorder.Body.String())
+	}
+	for _, body := range []string{
+		`{"mode":"tun","url":"https://example.invalid"}`,
+		`{"mode":"tun","command":"ip"}`,
+		`{"mode":"tun","argv":["route"]}`,
+		`{"mode":"tun","firewall_fragment":"drop"}`,
+	} {
+		recorder = serve(body)
+		if recorder.Code != http.StatusBadRequest || called != 1 {
+			t.Fatalf("untyped network body=%s status=%d calls=%d response=%s", body, recorder.Code, called, recorder.Body.String())
+		}
 	}
 }
 

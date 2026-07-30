@@ -98,12 +98,44 @@ func (b ExplicitCandidateBuilder) BuildDetailed(
 	tracker.setRuntimeScalar(sourceRoot, "tproxy-port", "0", "!!int")
 	tracker.setRuntimeScalar(sourceRoot, "allow-lan", "false", "!!bool")
 	tracker.setRuntimeScalar(sourceRoot, "bind-address", "127.0.0.1", "!!str")
-	tracker.setRuntimeScalar(sourceRoot, "ipv6", "true", "!!bool")
+	ipv6Enabled := true
+	if b.TUN != nil && b.TUN.IPv6Policy == "block" {
+		ipv6Enabled = false
+	}
+	tracker.setRuntimeScalar(sourceRoot, "ipv6", fmt.Sprintf("%t", ipv6Enabled), "!!bool")
 	tracker.setRuntimeScalar(sourceRoot, "secret", "", "!!str")
 	tracker.setRuntimeField(sourceRoot, "authentication", &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"})
-	tracker.setRuntimeField(sourceRoot, "tun", mappingNode(map[string]*yaml.Node{
+	tun := map[string]*yaml.Node{
 		"enable": scalarNode("false", "!!bool"),
-	}))
+	}
+	if b.TUN != nil {
+		tun = map[string]*yaml.Node{
+			"enable":                scalarNode("true", "!!bool"),
+			"device":                scalarNode(b.TUN.Device, "!!str"),
+			"stack":                 scalarNode("system", "!!str"),
+			"auto-route":            scalarNode("false", "!!bool"),
+			"auto-redirect":         scalarNode("false", "!!bool"),
+			"auto-detect-interface": scalarNode("true", "!!bool"),
+			"strict-route":          scalarNode("true", "!!bool"),
+		}
+		if b.TUN.HijackDNS {
+			tun["dns-hijack"] = &yaml.Node{
+				Kind: yaml.SequenceNode,
+				Tag:  "!!seq",
+				Content: []*yaml.Node{
+					scalarNode("any:53", "!!str"),
+					scalarNode("tcp://any:53", "!!str"),
+				},
+			}
+		}
+		tracker.setRuntimeScalar(
+			sourceRoot,
+			"routing-mark",
+			fmt.Sprintf("%d", b.TUN.RoutingMark),
+			"!!int",
+		)
+	}
+	tracker.setRuntimeField(sourceRoot, "tun", mappingNode(tun))
 	if platform == "windows" {
 		tracker.setRuntimeScalar(sourceRoot, "external-controller-pipe", b.ControlEndpoint, "!!str")
 	} else {

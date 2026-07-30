@@ -170,6 +170,56 @@ proxies: []
 	}
 }
 
+func TestDetailedCandidateUsesPrecreatedLinuxTUNWithoutAutomaticRouting(t *testing.T) {
+	builder := ExplicitCandidateBuilder{
+		Port:            7890,
+		ControlEndpoint: filepath.Join(t.TempDir(), "mihomo.sock"),
+		Platform:        "linux",
+		TUN: &TUNCandidateSettings{
+			Device:      "smxtun0",
+			RoutingMark: 41234,
+			IPv6Policy:  "proxy",
+			HijackDNS:   true,
+		},
+	}
+	result, err := builder.BuildDetailed([]byte(`
+routing-mark: 1
+tun:
+  enable: true
+  auto-route: true
+  auto-redirect: true
+  device: unsafe0
+proxies: []
+rules: [MATCH,DIRECT]
+`), nil, nil)
+	if err != nil {
+		t.Fatalf("build Linux TUN candidate: %v", err)
+	}
+	var candidate map[string]any
+	if err := yaml.Unmarshal(result.YAML, &candidate); err != nil {
+		t.Fatalf("parse Linux TUN candidate: %v", err)
+	}
+	if candidate["routing-mark"] != 41234 {
+		t.Fatalf("Linux TUN routing-mark=%#v", candidate["routing-mark"])
+	}
+	tun, ok := candidate["tun"].(map[string]any)
+	if !ok {
+		t.Fatalf("Linux TUN candidate tun=%#v", candidate["tun"])
+	}
+	if tun["enable"] != true ||
+		tun["device"] != "smxtun0" ||
+		tun["auto-route"] != false ||
+		tun["auto-redirect"] != false {
+		t.Fatalf("Linux TUN candidate tun=%#v", tun)
+	}
+	dnsHijack, ok := tun["dns-hijack"].([]any)
+	if !ok || len(dnsHijack) != 2 ||
+		dnsHijack[0] != "any:53" ||
+		dnsHijack[1] != "tcp://any:53" {
+		t.Fatalf("Linux TUN dns-hijack=%#v", tun["dns-hijack"])
+	}
+}
+
 func TestValidateManagedResourceRejectsTypeMismatchAndParsesPrivateKeys(t *testing.T) {
 	if err := ValidateManagedResource(
 		ManagedResourceKindProxyProvider,

@@ -11,6 +11,9 @@ const state = {
   selectedSourceId: "",
   sources: [],
   mihomoState: "",
+  networkPlanId: "",
+  networkPlanExpiresAt: 0,
+  networkPlanExpiryTimer: null,
 };
 
 const elements = {
@@ -22,6 +25,14 @@ const elements = {
   runMode: document.querySelector("#run-mode"),
   revision: document.querySelector("#revision"),
   queue: document.querySelector("#queue"),
+  networkState: document.querySelector("#network-state"),
+  networkIpv6: document.querySelector("#network-ipv6"),
+  networkDns: document.querySelector("#network-dns"),
+  networkRouteList: document.querySelector("#network-route-list"),
+  networkPreview: document.querySelector("#network-preview"),
+  previewNetwork: document.querySelector("#preview-network"),
+  enableTun: document.querySelector("#enable-tun"),
+  disableTun: document.querySelector("#disable-tun"),
   candidateState: document.querySelector("#candidate-state"),
   candidateYaml: document.querySelector("#candidate-yaml"),
   ownedFields: document.querySelector("#owned-fields"),
@@ -95,6 +106,9 @@ const writeButtons = [
   elements.apply,
   elements.start,
   elements.stop,
+  elements.previewNetwork,
+  elements.enableTun,
+  elements.disableTun,
   elements.addRemoteSource,
   elements.addImportedSource,
   elements.applySource,
@@ -116,6 +130,7 @@ function setBusy(busy, message = "") {
     button.disabled = busy || !state.compatible;
   }
   elements.apply.disabled = busy || !state.compatible || !state.contentId;
+  elements.enableTun.disabled = busy || !state.compatible || !state.networkPlanId;
   for (const button of [
     elements.refreshSource,
     elements.refreshSourceDirect,
@@ -163,6 +178,15 @@ function errorText(error) {
   return String(error);
 }
 
+function clearNetworkPlan() {
+  state.networkPlanId = "";
+  state.networkPlanExpiresAt = 0;
+  if (state.networkPlanExpiryTimer !== null) {
+    window.clearTimeout(state.networkPlanExpiryTimer);
+    state.networkPlanExpiryTimer = null;
+  }
+}
+
 function renderSnapshot(snapshot) {
   elements.runtimeState.textContent = snapshot.runtime?.service_state || "未知";
   elements.runtimeVersion.textContent = snapshot.runtime?.version || "未知版本";
@@ -177,6 +201,34 @@ function renderSnapshot(snapshot) {
     ? `${recoverySummary} · ${snapshot.mihomo.fault.code}`
     : recoverySummary;
   elements.runMode.textContent = `运行方式：${snapshot.run_mode || "未配置"}`;
+  const network = snapshot.network || {};
+  elements.networkState.textContent =
+    `${network.state || "未知"} · ${network.mode || "未配置"}` +
+    `${network.device ? ` · ${network.device}` : ""}`;
+  const networkDetails = [];
+  if (network.fault) {
+    networkDetails.push(`${network.fault.code}: ${network.fault.message}`);
+  }
+  for (const conflict of network.conflicts || []) {
+    networkDetails.push(
+      `冲突：${conflict.kind} · ${conflict.detail}${conflict.owner ? ` · ${conflict.owner}` : ""}`,
+    );
+  }
+  for (const residual of network.residuals || []) {
+    networkDetails.push(`残留：${residual.kind} · ${residual.name} · ${residual.state}`);
+  }
+  if (!state.networkPlanId) {
+    if (["proxy", "direct", "block"].includes(network.settings?.ipv6_policy)) {
+      elements.networkIpv6.value = network.settings.ipv6_policy;
+    }
+    if (["hijack", "off"].includes(network.settings?.dns_policy)) {
+      elements.networkDns.value = network.settings.dns_policy;
+    }
+    renderNetworkRoutes(network.routes || []);
+    elements.networkPreview.textContent = networkDetails.length
+      ? networkDetails.join("\n")
+      : "当前状态未报告网络冲突、残留或故障。";
+  }
   elements.revision.textContent = String(snapshot.revision ?? "—");
   elements.queue.textContent = `排队：${snapshot.operations?.queued ?? 0}`;
   const currentOperationId = snapshot.operations?.current_operation_id || "";
@@ -190,6 +242,123 @@ function renderSnapshot(snapshot) {
   elements.overrideState.textContent = advancedOverride.present
     ? `${String(advancedOverride.sha256 || "").slice(0, 12)} · ${advancedOverride.size || 0} 字节`
     : "尚未配置";
+}
+
+function selectedCapturedRoutes() {
+  return Array.from(
+    elements.networkRouteList.querySelectorAll('input[type="checkbox"]:checked'),
+    (input) => input.value,
+  );
+}
+
+function renderNetworkRoutes(routes) {
+  elements.networkRouteList.replaceChildren();
+  if (!routes.length) {
+    elements.networkRouteList.textContent = "没有发现需要逐项决定的更具体路由。";
+  }
+  for (const route of routes) {
+    const item = document.createElement("label");
+    item.className = "source-item";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = route.id;
+    checkbox.checked = !route.bypass;
+    const title = document.createElement("strong");
+    title.textContent = `${route.cidr} · ${route.interface} · ${route.family}`;
+    const detail = document.createElement("small");
+    detail.textContent = `${route.id} · ${route.source || "未知来源"} · 勾选后纳入 TUN`;
+    item.append(checkbox, title, detail);
+    elements.networkRouteList.append(item);
+  }
+}
+
+function renderNetworkPreview(preview) {
+  const routes = Array.isArray(preview.routes) ? preview.routes : [];
+  const conflicts = Array.isArray(preview.conflicts) ? preview.conflicts : [];
+  const warnings = Array.isArray(preview.warnings) ? preview.warnings : [];
+  clearNetworkPlan();
+  const expiresAt = Date.parse(preview.expires_at || "");
+  if (!conflicts.length && preview.plan_id && Number.isFinite(expiresAt) && expiresAt > Date.now()) {
+    state.networkPlanId = preview.plan_id;
+    state.networkPlanExpiresAt = expiresAt;
+    state.networkPlanExpiryTimer = window.setTimeout(() => {
+      clearNetworkPlan();
+      setBusy(state.busy);
+      setMessage("普通 TUN 预览已经过期，请重新生成网络预览。");
+    }, Math.min(expiresAt - Date.now(), 2_147_483_647));
+  }
+  renderNetworkRoutes(routes);
+  elements.networkPreview.textContent = [
+    `计划：${preview.plan_id || "无"}`,
+    `设备：${preview.device || "无"}`,
+    `有效期：${preview.expires_at || "未知"}`,
+    ...warnings.map((warning) => `警告：${warning}`),
+    ...conflicts.map(
+      (conflict) =>
+        `冲突：${conflict.kind} · ${conflict.detail}${conflict.owner ? ` · ${conflict.owner}` : ""}`,
+    ),
+  ].join("\n");
+  setBusy(state.busy);
+}
+
+async function previewNetwork() {
+  setBusy(true, "正在读取路由并生成普通 TUN 预览…");
+  try {
+    const preview = await invoke("runtime_preview_network", {
+      ipv6Policy: elements.networkIpv6.value,
+      dnsPolicy: elements.networkDns.value,
+      captureRouteIds: selectedCapturedRoutes(),
+    });
+    renderNetworkPreview(preview);
+    setMessage(
+      preview.conflicts?.length
+        ? "发现其他全隧道或同名设备冲突；解决前不能启用。"
+        : "网络预览已生成。修改路由勾选后需再次预览。",
+      Boolean(preview.conflicts?.length),
+    );
+  } catch (error) {
+    clearNetworkPlan();
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function enableTUN() {
+  if (!state.networkPlanId) return;
+  if (state.networkPlanExpiresAt <= Date.now()) {
+    clearNetworkPlan();
+    setBusy(state.busy);
+    setMessage("普通 TUN 预览已经过期，请重新生成网络预览。", true);
+    return;
+  }
+  setBusy(true, "正在提交普通 TUN 启用操作…");
+  try {
+    const operation = await invoke("runtime_enable_tun", {
+      planId: state.networkPlanId,
+    });
+    clearNetworkPlan();
+    renderOperation(operation);
+    setMessage("普通 TUN 启用操作已经持久化；等待完成后会显示真实网络状态。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function disableTUN() {
+  setBusy(true, "正在停用普通 TUN 并恢复直连…");
+  try {
+    const operation = await invoke("runtime_disable_tun");
+    clearNetworkPlan();
+    renderOperation(operation);
+    setMessage("普通 TUN 停用操作已经持久化。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function renderSources(sources) {
@@ -749,6 +918,25 @@ elements.apply.addEventListener("click", applyCandidate);
 elements.start.addEventListener("click", () => executeSimple("runtime_start_proxy", "正在提交启动操作…"));
 elements.stop.addEventListener("click", () => executeSimple("runtime_stop_proxy", "正在提交停止操作…"));
 elements.verify.addEventListener("click", verifyProxy);
+elements.previewNetwork.addEventListener("click", previewNetwork);
+elements.enableTun.addEventListener("click", enableTUN);
+elements.disableTun.addEventListener("click", disableTUN);
+elements.networkIpv6.addEventListener("change", () => {
+  clearNetworkPlan();
+  setBusy(state.busy);
+  setMessage("IPv6 设置已改变，请重新生成网络预览。");
+});
+elements.networkDns.addEventListener("change", () => {
+  clearNetworkPlan();
+  setBusy(state.busy);
+  setMessage("DNS 设置已改变，请重新生成网络预览。");
+});
+elements.networkRouteList.addEventListener("change", (event) => {
+  if (!(event.target instanceof HTMLInputElement) || event.target.type !== "checkbox") return;
+  clearNetworkPlan();
+  setBusy(state.busy);
+  setMessage("更具体路由的选择已改变，请重新生成网络预览。");
+});
 elements.getOperation.addEventListener("click", getOperation);
 elements.wait.addEventListener("click", waitOperation);
 elements.cancelOperation.addEventListener("click", cancelOperation);

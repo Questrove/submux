@@ -41,6 +41,41 @@
       <section class="panel">
         <div class="panel-heading">
           <div>
+            <p class="eyebrow">ORDINARY TUN</p>
+            <h2>普通 TUN 网络接管</h2>
+          </div>
+          <span id="network-state" class="badge">正在读取</span>
+        </div>
+        <div class="form-grid">
+          <label>
+            IPv6
+            <select id="network-ipv6">
+              <option value="proxy">IPv4 与 IPv6 均接管</option>
+              <option value="direct">IPv4 接管，IPv6 直连并警告</option>
+              <option value="block">IPv4 接管，运行期间阻断 IPv6</option>
+            </select>
+          </label>
+          <label>
+            DNS
+            <select id="network-dns">
+              <option value="hijack">接管 TCP/UDP 53</option>
+              <option value="off">不劫持 53 端口</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted">默认保留发现的局域网、VPN、容器和更具体路由。勾选“纳入 TUN”后重新预览，才会改变最终计划。</p>
+        <div id="network-route-list" class="source-list muted">尚未生成网络预览。</div>
+        <pre id="network-preview">尚未生成网络预览。</pre>
+        <div class="actions">
+          <button id="preview-network" class="secondary">预览实际网络影响</button>
+          <button id="enable-tun" disabled>按当前预览启用</button>
+          <button id="disable-tun" class="danger">停用并恢复直连</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
             <p class="eyebrow">LOCAL LAYERS</p>
             <h2>托管资源与高级覆盖</h2>
           </div>

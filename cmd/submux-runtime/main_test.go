@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +74,81 @@ func (sourceListObserver) Observe(_ context.Context, _ runtimeapi.PeerIdentity) 
 
 type commandExecutor struct {
 	state *runtimestate.Store
+}
+
+type commandNetwork struct {
+	mu     sync.Mutex
+	active bool
+}
+
+func (network *commandNetwork) Preview(
+	_ context.Context,
+	request runtimeapi.NetworkPreviewRequest,
+) (runtimeapi.NetworkPreview, error) {
+	return runtimeapi.NetworkPreview{
+		PlanID: "plan_0123456789abcdef0123456789abcdef",
+		Mode:   runtimeapi.RunModeTUN,
+		Device: "smxtun0",
+		Settings: runtimeapi.TUNSettings{
+			IPv6Policy:      request.IPv6Policy,
+			DNSPolicy:       request.DNSPolicy,
+			CaptureRouteIDs: append([]string(nil), request.CaptureRouteIDs...),
+		},
+		Routes: []runtimeapi.NetworkRoute{{
+			ID:        "route_lan",
+			Family:    "ipv4",
+			CIDR:      "192.168.1.0/24",
+			Interface: "eth0",
+			Bypass:    len(request.CaptureRouteIDs) == 0,
+		}},
+		ExpiresAt:  time.Now().UTC().Add(5 * time.Minute),
+		ObservedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (network *commandNetwork) Observe(context.Context) (runtimeapi.NetworkStatus, error) {
+	network.mu.Lock()
+	defer network.mu.Unlock()
+	status := runtimeapi.NetworkStatus{
+		Available:  true,
+		Mode:       runtimeapi.RunModeExplicit,
+		State:      runtimeapi.NetworkStateInactive,
+		ObservedAt: time.Now().UTC(),
+	}
+	if network.active {
+		status.Mode = runtimeapi.RunModeTUN
+		status.State = runtimeapi.NetworkStateActive
+		status.Device = "smxtun0"
+		status.OwnershipID = "net_0123456789abcdef"
+	}
+	return status, nil
+}
+
+type commandNetworkExecutor struct {
+	commandExecutor
+	network *commandNetwork
+}
+
+func (executor commandNetworkExecutor) Execute(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report runtimeapp.StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	result, err := executor.commandExecutor.Execute(ctx, operation, report)
+	if err != nil {
+		return nil, err
+	}
+	executor.network.mu.Lock()
+	switch operation.Action.Kind {
+	case runtimeapi.ActionEnableTUN:
+		executor.network.active = true
+		result.RunMode = runtimeapi.RunModeTUN
+	case runtimeapi.ActionDisableTUN:
+		executor.network.active = false
+		result.RunMode = runtimeapi.RunModeExplicit
+	}
+	executor.network.mu.Unlock()
+	return result, nil
 }
 
 func (e commandExecutor) Execute(
@@ -667,6 +743,115 @@ func TestImportProxyStartWaitQueryAndVerifyCLI(t *testing.T) {
 	}
 	if err := <-workerResult; err != nil {
 		t.Fatalf("stop Runtime coordinator: %v", err)
+	}
+}
+
+func TestNetworkPreviewEnableStatusAndDisableCLI(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	network := &commandNetwork{}
+	coordinator := &runtimeapp.Coordinator{
+		State: state,
+		Executor: commandNetworkExecutor{
+			commandExecutor: commandExecutor{state: state},
+			network:         network,
+		},
+		Network: network,
+		Version: buildinfo.Current().Version,
+	}
+	endpoint := commandTestEndpoint(t)
+	listener, err := runtimeipc.Listen(endpoint)
+	if err != nil {
+		t.Fatalf("listen on Runtime IPC: %v", err)
+	}
+	authorizer, err := runtimeipc.CurrentUserAuthorizer()
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("create Runtime authorizer: %v", err)
+	}
+	server, err := runtimeipc.NewServer(coordinator, authorizer)
+	if err != nil {
+		_ = listener.Close()
+		t.Fatalf("create Runtime server: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	workerResult := make(chan error, 1)
+	serverResult := make(chan error, 1)
+	go func() { workerResult <- coordinator.Run(ctx) }()
+	go func() { serverResult <- server.Serve(ctx, listener) }()
+	defer func() {
+		cancel()
+		if err := <-workerResult; err != nil {
+			t.Errorf("stop Runtime coordinator: %v", err)
+		}
+		if err := <-serverResult; err != nil {
+			t.Errorf("stop Runtime IPC server: %v", err)
+		}
+	}()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runNetwork([]string{
+		"preview",
+		"--endpoint", endpoint,
+		"--ipv6", runtimeapi.TUNIPv6Direct,
+		"--dns", runtimeapi.TUNDNSOff,
+		"--capture-route", "route_lan",
+		"--json",
+	}, &stdout, &stderr)
+	var preview runtimeapi.NetworkPreview
+	if exitCode != 0 || json.Unmarshal(stdout.Bytes(), &preview) != nil ||
+		preview.PlanID == "" ||
+		preview.Settings.IPv6Policy != runtimeapi.TUNIPv6Direct ||
+		preview.Settings.DNSPolicy != runtimeapi.TUNDNSOff ||
+		len(preview.Settings.CaptureRouteIDs) != 1 {
+		t.Fatalf("network preview exit=%d preview=%#v stdout=%s stderr=%s", exitCode, preview, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runNetwork([]string{
+		"enable",
+		"--endpoint", endpoint,
+		"--plan-id", preview.PlanID,
+		"--wait",
+		"--json",
+	}, &stdout, &stderr)
+	var enabled runtimeapi.OperationResponse
+	if exitCode != 0 || json.Unmarshal(stdout.Bytes(), &enabled) != nil ||
+		enabled.Operation.State != runtimeapi.OperationSucceeded ||
+		enabled.Operation.Action.Kind != runtimeapi.ActionEnableTUN {
+		t.Fatalf("network enable exit=%d operation=%#v stdout=%s stderr=%s", exitCode, enabled, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runNetwork([]string{"status", "--endpoint", endpoint, "--json"}, &stdout, &stderr)
+	var status runtimeapi.NetworkStatus
+	if exitCode != 0 || json.Unmarshal(stdout.Bytes(), &status) != nil ||
+		status.State != runtimeapi.NetworkStateActive ||
+		status.Device != "smxtun0" {
+		t.Fatalf("network status exit=%d status=%#v stdout=%s stderr=%s", exitCode, status, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runNetwork([]string{"disable", "--endpoint", endpoint, "--wait", "--json"}, &stdout, &stderr)
+	var disabled runtimeapi.OperationResponse
+	if exitCode != 0 || json.Unmarshal(stdout.Bytes(), &disabled) != nil ||
+		disabled.Operation.State != runtimeapi.OperationSucceeded ||
+		disabled.Operation.Action.Kind != runtimeapi.ActionDisableTUN {
+		t.Fatalf("network disable exit=%d operation=%#v stdout=%s stderr=%s", exitCode, disabled, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if exitCode = runNetwork([]string{"enable", "--endpoint", endpoint}, &stdout, &stderr); exitCode != 2 ||
+		!strings.Contains(stderr.String(), "plan-id") {
+		t.Fatalf("network enable without plan exit=%d stdout=%s stderr=%s", exitCode, stdout.String(), stderr.String())
 	}
 }
 

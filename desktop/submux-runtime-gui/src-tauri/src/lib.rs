@@ -142,6 +142,29 @@ fn runtime_stop_proxy(bridge: State<'_, RuntimeBridge>) -> Result<Value, BridgeE
 }
 
 #[tauri::command]
+fn runtime_preview_network(
+    bridge: State<'_, RuntimeBridge>,
+    ipv6_policy: String,
+    dns_policy: String,
+    capture_route_ids: Vec<String>,
+) -> Result<Value, BridgeError> {
+    bridge.preview_network(&ipv6_policy, &dns_policy, &capture_route_ids)
+}
+
+#[tauri::command]
+fn runtime_enable_tun(
+    bridge: State<'_, RuntimeBridge>,
+    plan_id: String,
+) -> Result<Value, BridgeError> {
+    bridge.enable_tun(&plan_id)
+}
+
+#[tauri::command]
+fn runtime_disable_tun(bridge: State<'_, RuntimeBridge>) -> Result<Value, BridgeError> {
+    bridge.disable_tun()
+}
+
+#[tauri::command]
 fn runtime_get_operation(
     bridge: State<'_, RuntimeBridge>,
     operation_id: String,
@@ -233,6 +256,9 @@ pub fn run() {
             runtime_apply_source,
             runtime_start_proxy,
             runtime_stop_proxy,
+            runtime_preview_network,
+            runtime_enable_tun,
+            runtime_disable_tun,
             runtime_get_operation,
             runtime_wait_operation,
             runtime_cancel_operation,

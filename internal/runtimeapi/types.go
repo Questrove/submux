@@ -28,6 +28,7 @@ type Snapshot struct {
 	Runtime           RuntimeStatus   `json:"runtime"`
 	Mihomo            MihomoStatus    `json:"mihomo"`
 	RunMode           string          `json:"run_mode"`
+	Network           NetworkStatus   `json:"network"`
 	Sources           SourceStatus    `json:"sources"`
 	Resources         ResourceStatus  `json:"resources"`
 	AdvancedOverride  OverrideStatus  `json:"advanced_override"`
@@ -181,6 +182,7 @@ type ActionParams struct {
 	Confirm      bool   `json:"confirm,omitempty"`
 	ResourceKind string `json:"resource_kind,omitempty"`
 	ResourceName string `json:"resource_name,omitempty"`
+	PlanID       string `json:"plan_id,omitempty"`
 }
 
 type CreateOperationRequest struct {
@@ -228,22 +230,24 @@ type AuditRecord struct {
 }
 
 type OperationResult struct {
-	ConfigRevision         string     `json:"config_revision,omitempty"`
-	CandidateSHA256        string     `json:"candidate_sha256,omitempty"`
-	ProxyKind              string     `json:"proxy_kind,omitempty"`
-	ProxyAddresses         []string   `json:"proxy_addresses,omitempty"`
-	Verified               bool       `json:"verified,omitempty"`
-	SourceID               string     `json:"source_id,omitempty"`
-	PreviousSourceID       string     `json:"previous_source_id,omitempty"`
-	UsedCachedSource       bool       `json:"used_cached_source,omitempty"`
-	Deleted                bool       `json:"deleted,omitempty"`
-	RefreshResult          string     `json:"refresh_result,omitempty"`
-	RefreshRoute           string     `json:"refresh_route,omitempty"`
-	NextRefreshAt          *time.Time `json:"next_refresh_at,omitempty"`
-	NotModified            bool       `json:"not_modified,omitempty"`
-	ResourceID             string     `json:"resource_id,omitempty"`
-	ResourceKind           string     `json:"resource_kind,omitempty"`
-	AdvancedOverrideSHA256 string     `json:"advanced_override_sha256,omitempty"`
+	ConfigRevision         string         `json:"config_revision,omitempty"`
+	CandidateSHA256        string         `json:"candidate_sha256,omitempty"`
+	ProxyKind              string         `json:"proxy_kind,omitempty"`
+	ProxyAddresses         []string       `json:"proxy_addresses,omitempty"`
+	Verified               bool           `json:"verified,omitempty"`
+	SourceID               string         `json:"source_id,omitempty"`
+	PreviousSourceID       string         `json:"previous_source_id,omitempty"`
+	UsedCachedSource       bool           `json:"used_cached_source,omitempty"`
+	Deleted                bool           `json:"deleted,omitempty"`
+	RefreshResult          string         `json:"refresh_result,omitempty"`
+	RefreshRoute           string         `json:"refresh_route,omitempty"`
+	NextRefreshAt          *time.Time     `json:"next_refresh_at,omitempty"`
+	NotModified            bool           `json:"not_modified,omitempty"`
+	ResourceID             string         `json:"resource_id,omitempty"`
+	ResourceKind           string         `json:"resource_kind,omitempty"`
+	AdvancedOverrideSHA256 string         `json:"advanced_override_sha256,omitempty"`
+	RunMode                string         `json:"run_mode,omitempty"`
+	Network                *NetworkStatus `json:"network,omitempty"`
 }
 
 type OperationResponse struct {
@@ -356,6 +360,8 @@ const (
 	ActionDeleteSource        = "source.delete"
 	ActionAddManagedResource  = "resource.add"
 	ActionSetAdvancedOverride = "override.set"
+	ActionEnableTUN           = "network.enable_tun"
+	ActionDisableTUN          = "network.disable_tun"
 
 	OperationQueued         = "queued"
 	OperationRunning        = "running"

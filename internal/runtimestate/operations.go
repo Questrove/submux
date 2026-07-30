@@ -399,6 +399,26 @@ func (s *Store) CompleteOperation(
 				if err := metadata.Put(runModeKey, []byte("explicit")); err != nil {
 					return err
 				}
+			case runtimeapi.ActionEnableTUN, runtimeapi.ActionDisableTUN:
+				if result != nil && result.Verified {
+					if err := recordExplicitMihomoStart(metadata); err != nil {
+						return err
+					}
+				} else {
+					if err := recordExplicitMihomoStop(metadata); err != nil {
+						return err
+					}
+				}
+				runMode := runtimeapi.RunModeExplicit
+				if operation.Action.Kind == runtimeapi.ActionEnableTUN {
+					runMode = runtimeapi.RunModeTUN
+				}
+				if result != nil && result.RunMode != "" {
+					runMode = result.RunMode
+				}
+				if err := metadata.Put(runModeKey, []byte(runMode)); err != nil {
+					return err
+				}
 			}
 			if result != nil && result.ConfigRevision != "" {
 				if err := metadata.Put(currentConfigRevisionKey, []byte(result.ConfigRevision)); err != nil {

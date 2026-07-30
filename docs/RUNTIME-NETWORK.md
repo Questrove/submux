@@ -1,6 +1,6 @@
 # Submux Runtime 网络与权限设计
 
-本文定义显式代理、TUN 和 Linux 网关三种运行方式，以及 `submux-runtime-net` 的权限边界。它是尚未实现的目标设计。
+本文定义显式代理、TUN 和 Linux 网关三种运行方式，以及 `submux-runtime-net` 的权限边界。Linux 普通 TUN 已按本文实现；Windows、macOS 和 Linux 网关部分仍是后续实现必须遵守的目标设计。
 
 ## 共同规则
 

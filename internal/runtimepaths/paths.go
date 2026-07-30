@@ -5,6 +5,7 @@ type Defaults struct {
 	Endpoint        string
 	LockFile        string
 	ControlEndpoint string
+	NetworkEndpoint string
 }
 
 func Current() Defaults {

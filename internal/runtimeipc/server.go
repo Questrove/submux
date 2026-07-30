@@ -38,10 +38,15 @@ type Operator interface {
 	CreateDiagnostics(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error)
 }
 
+type NetworkPreviewer interface {
+	PreviewNetwork(context.Context, runtimeapi.PeerIdentity, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
+}
+
 type Server struct {
 	observer       Observer
 	eventObserver  EventObserver
 	operator       Operator
+	network        NetworkPreviewer
 	authorizer     Authorizer
 	runtimeVersion string
 }
@@ -61,6 +66,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		return nil, errors.New("Runtime authorizer is required")
 	}
 	operator, _ := observer.(Operator)
+	network, _ := observer.(NetworkPreviewer)
 	eventObserver, _ := observer.(EventObserver)
 	runtimeVersion := ""
 	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
@@ -70,6 +76,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		observer:       observer,
 		eventObserver:  eventObserver,
 		operator:       operator,
+		network:        network,
 		authorizer:     authorizer,
 		runtimeVersion: runtimeVersion,
 	}, nil
@@ -126,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/imports", s.handleImport)
 	mux.HandleFunc("/v1/advanced-override", s.handleAdvancedOverride)
 	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
+	mux.HandleFunc("/v1/network/preview", s.handleNetworkPreview)
 	mux.HandleFunc("/v1/operations", s.handleCreateOperation)
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
 	mux.HandleFunc("/v1/proxy/verify", s.handleProxyVerification)
@@ -136,6 +144,42 @@ func (s *Server) Handler() http.Handler {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
 	return mux
+}
+
+func (s *Server) handleNetworkPreview(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime network preview only accepts POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime network preview does not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.network == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime network preview is unavailable", true)
+		return
+	}
+	var previewRequest runtimeapi.NetworkPreviewRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &previewRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	preview, err := s.network.PreviewNetwork(request.Context(), peer, previewRequest)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, preview)
 }
 
 func (s *Server) handleEvents(writer http.ResponseWriter, request *http.Request) {
@@ -851,6 +895,9 @@ func requestHasBody(request *http.Request) bool {
 }
 
 func validAction(action runtimeapi.Action) bool {
+	if action.Kind != runtimeapi.ActionEnableTUN && action.Params.PlanID != "" {
+		return false
+	}
 	switch action.Kind {
 	case runtimeapi.ActionApplyImportedConfig:
 		return validContentID(action.Params.ContentID) &&
@@ -869,7 +916,28 @@ func validAction(action runtimeapi.Action) bool {
 			!action.Params.UseCached &&
 			!action.Params.Confirm &&
 			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == "" &&
+			action.Params.PlanID == ""
+	case runtimeapi.ActionEnableTUN:
+		return validPlanID(action.Params.PlanID) &&
+			action.Params.ContentID == "" &&
+			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
+			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == ""
+	case runtimeapi.ActionDisableTUN:
+		return action.Params.ContentID == "" &&
+			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == "" &&
+			action.Params.PlanID == ""
 	case runtimeapi.ActionAddRemoteSource:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
@@ -990,6 +1058,15 @@ func validSourceID(id string) bool {
 
 func validContentID(id string) bool {
 	suffix, ok := strings.CutPrefix(id, "content_")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
+func validPlanID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "plan_")
 	if !ok || len(suffix) != 32 {
 		return false
 	}

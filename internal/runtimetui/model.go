@@ -33,6 +33,10 @@ type Client interface {
 	CreateDiagnostics(context.Context, runtimeapi.DiagnosticsRequest) (runtimeapi.DiagnosticsResult, error)
 }
 
+type NetworkClient interface {
+	PreviewNetwork(context.Context, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
+}
+
 type Model struct {
 	ctx              context.Context
 	client           Client
@@ -45,6 +49,7 @@ type Model struct {
 	snapshot         runtimeapi.Snapshot
 	selectedSourceID string
 	preview          runtimeapi.CandidatePreview
+	networkPreview   runtimeapi.NetworkPreview
 	lastOperation    runtimeapi.Operation
 	verification     runtimeapi.ProxyVerification
 	status           string
@@ -61,6 +66,7 @@ const (
 	editorModeImportedSource = "imported_source"
 	editorModeResource       = "resource"
 	editorModeOverride       = "override"
+	editorModeNetwork        = "network"
 )
 
 type resourceDraft struct {
@@ -109,6 +115,10 @@ type diagnosticsPreviewMsg struct {
 
 type diagnosticsResultMsg struct {
 	result runtimeapi.DiagnosticsResult
+}
+
+type networkPreviewMsg struct {
+	preview runtimeapi.NetworkPreview
 }
 
 type errMsg struct {
@@ -247,6 +257,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.sensitiveConfirm = ""
 		m.diagnosticsFile = message.result
 		m.status = fmt.Sprintf("诊断包已保存：%s", message.result.FileName)
+	case networkPreviewMsg:
+		m.networkPreview = message.preview
+		m.busy = false
+		m.editing = false
+		m.err = nil
+		m.editor.Blur()
+		m.status = fmt.Sprintf("普通 TUN 预览已生成：%s", message.preview.PlanID)
 	case errMsg:
 		m.busy = false
 		m.err = message.err
@@ -272,6 +289,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.busy = true
+				if m.editorMode == editorModeNetwork {
+					var request runtimeapi.NetworkPreviewRequest
+					if err := json.Unmarshal(body, &request); err != nil {
+						m.busy = false
+						m.err = errors.New("普通 TUN 设置必须是有效 JSON")
+						m.status = m.err.Error()
+						return m, nil
+					}
+					request.Mode = runtimeapi.RunModeTUN
+					m.status = "正在生成普通 TUN 网络预览…"
+					return m, m.previewNetworkCmd(request)
+				}
 				if m.editorMode == editorModeSource {
 					var draft runtimeapi.RemoteSourceDraft
 					if err := json.Unmarshal(body, &draft); err != nil {
@@ -480,6 +509,42 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在生成默认脱敏诊断包…"
 			return m, m.createDiagnosticsCmd()
+		case "ctrl+t":
+			m.editing = true
+			m.editorMode = editorModeNetwork
+			m.err = nil
+			m.editor.SetValue(defaultNetworkDraft())
+			m.status = "编辑普通 TUN 设置后按 Ctrl+S 预览，Esc 取消"
+			return m, m.editor.Focus()
+		case "ctrl+e":
+			if m.networkPreview.PlanID == "" {
+				m.err = errors.New("请先用 Ctrl+T 生成普通 TUN 预览")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			if !m.networkPreview.ExpiresAt.IsZero() && !time.Now().Before(m.networkPreview.ExpiresAt) {
+				m.networkPreview.PlanID = ""
+				m.err = errors.New("普通 TUN 预览已经过期，请重新预览")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			if len(m.networkPreview.Conflicts) > 0 {
+				m.err = errors.New("普通 TUN 预览存在网络冲突，解决后请重新预览")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.busy = true
+			m.status = "正在提交普通 TUN 启用操作…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind: runtimeapi.ActionEnableTUN,
+				Params: runtimeapi.ActionParams{
+					PlanID: m.networkPreview.PlanID,
+				},
+			})
+		case "ctrl+x":
+			m.busy = true
+			m.status = "正在提交普通 TUN 停用操作…"
+			return m, m.executeCmd(runtimeapi.Action{Kind: runtimeapi.ActionDisableTUN})
 		case "y":
 			sourceID := m.selectedSource()
 			if sourceID == "" {
@@ -608,6 +673,9 @@ func (m Model) View() tea.View {
 		} else if m.editorMode == editorModeOverride {
 			editorTitle = "Submux Runtime · 高级覆盖"
 			editorHelp = "Ctrl+P 预览 · Ctrl+S 校验并保存 · Esc 取消；Runtime 保留字段不能覆盖"
+		} else if m.editorMode == editorModeNetwork {
+			editorTitle = "Submux Runtime · 普通 TUN 设置"
+			editorHelp = "Ctrl+S 生成真实网络预览 · Esc 取消；IPv6 必须明确选择 proxy、direct 或 block"
 		}
 		content := strings.Join([]string{
 			titleStyle.Render(editorTitle),
@@ -636,6 +704,7 @@ func (m Model) View() tea.View {
 		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("Runtime"), runtimeVersion, labelStyle.Render("服务"), serviceState),
 		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("Mihomo 实际"), mihomoState, labelStyle.Render("期望"), mihomoDesired),
 		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("崩溃恢复"), mihomoRecovery, labelStyle.Render("运行方式"), runMode),
+		fmt.Sprintf("%s %s  %s %t", labelStyle.Render("网络接管"), valueOr(m.snapshot.Network.State, "未知"), labelStyle.Render("特权服务"), m.snapshot.Network.Available),
 		fmt.Sprintf("%s %d  %s %s", labelStyle.Render("重试次数"), m.snapshot.Mihomo.CrashAttempts, labelStyle.Render("下次重试"), nextRestart),
 		fmt.Sprintf("%s %d  %s %d", labelStyle.Render("Revision"), m.snapshot.Revision, labelStyle.Render("队列"), m.snapshot.Operations.Queued),
 	}
@@ -645,6 +714,51 @@ func (m Model) View() tea.View {
 			m.snapshot.Mihomo.Fault.Code,
 			m.snapshot.Mihomo.Fault.Message,
 		)))
+	}
+	if m.snapshot.Network.Fault != nil {
+		lines = append(lines, errorStyle.Render(fmt.Sprintf(
+			"网络故障：%s · %s",
+			m.snapshot.Network.Fault.Code,
+			m.snapshot.Network.Fault.Message,
+		)))
+	}
+	for _, conflict := range m.snapshot.Network.Conflicts {
+		lines = append(lines, errorStyle.Render(fmt.Sprintf(
+			"网络冲突：%s · %s · %s",
+			conflict.Kind,
+			valueOr(conflict.Owner, "未知所有者"),
+			conflict.Detail,
+		)))
+	}
+	if len(m.snapshot.Network.Residuals) > 0 {
+		for _, residual := range m.snapshot.Network.Residuals {
+			lines = append(lines, errorStyle.Render(fmt.Sprintf(
+				"网络残留：%s · %s · %s",
+				residual.Kind,
+				residual.Name,
+				residual.State,
+			)))
+		}
+	}
+	if m.networkPreview.PlanID != "" {
+		lines = append(lines,
+			"",
+			labelStyle.Render("普通 TUN 预览"),
+			fmt.Sprintf("%s · IPv6 %s · DNS %s", m.networkPreview.PlanID, m.networkPreview.Settings.IPv6Policy, m.networkPreview.Settings.DNSPolicy),
+		)
+		for _, route := range m.networkPreview.Routes {
+			disposition := "绕过"
+			if !route.Bypass {
+				disposition = "接管"
+			}
+			lines = append(lines, fmt.Sprintf("%s · %s · %s · %s", route.ID, route.CIDR, route.Interface, disposition))
+		}
+		for _, conflict := range m.networkPreview.Conflicts {
+			lines = append(lines, errorStyle.Render("冲突："+conflict.Detail))
+		}
+		for _, warning := range m.networkPreview.Warnings {
+			lines = append(lines, warnStyle.Render("警告："+warning))
+		}
 	}
 	if m.preview.CandidateSHA256 != "" {
 		lines = append(lines,
@@ -728,7 +842,7 @@ func (m Model) View() tea.View {
 		renderStatus(m.status, m.err, m.busy),
 		"",
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
-		mutedStyle.Render("[/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		mutedStyle.Render("Ctrl+T 编辑/预览普通 TUN · Ctrl+E 启用 TUN · Ctrl+X 停用 TUN · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -740,6 +854,20 @@ func (m Model) observeCmd() tea.Cmd {
 			return errMsg{err: err}
 		}
 		return snapshotMsg{snapshot: snapshot}
+	}
+}
+
+func (m Model) previewNetworkCmd(request runtimeapi.NetworkPreviewRequest) tea.Cmd {
+	return func() tea.Msg {
+		client, ok := m.client.(NetworkClient)
+		if !ok {
+			return errMsg{err: errors.New("当前 Runtime 客户端不支持网络预览")}
+		}
+		preview, err := client.PreviewNetwork(m.ctx, request)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return networkPreviewMsg{preview: preview}
 	}
 }
 
@@ -1169,5 +1297,13 @@ func defaultResourceDraft() string {
   "name": "provider",
   "kind": "proxy-provider-yaml",
   "content": "proxies:\n  - name: example\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n"
+}`
+}
+
+func defaultNetworkDraft() string {
+	return `{
+  "ipv6_policy": "proxy",
+  "dns_policy": "hijack",
+  "capture_route_ids": []
 }`
 }

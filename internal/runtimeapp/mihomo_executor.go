@@ -15,6 +15,7 @@ import (
 	"submux/internal/mihomo"
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimecore"
+	"submux/internal/runtimenet"
 	"submux/internal/runtimeprocess"
 	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
@@ -31,9 +32,17 @@ type MihomoExecutor struct {
 	Verifier        mihomo.RuntimeVerifier
 	Sources         *runtimesource.Manager
 	Network         FailOpenController
+	TUN             TUNController
 	Now             func() time.Time
 
 	lifecycleMu sync.Mutex
+}
+
+type TUNController interface {
+	Prepare(context.Context, string, string) (runtimenet.PreparedTUN, error)
+	Commit(context.Context, string, string) (runtimeapi.NetworkStatus, error)
+	Release(context.Context, string, string, string) (runtimeapi.NetworkStatus, error)
+	Observe(context.Context) (runtimeapi.NetworkStatus, error)
 }
 
 func (e *MihomoExecutor) PreviewCandidate(
@@ -132,7 +141,11 @@ func (e *MihomoExecutor) Execute(
 	case runtimeapi.ActionStartProxy:
 		return e.start(ctx, report)
 	case runtimeapi.ActionStopProxy:
-		return e.stop(ctx, report)
+		return e.stop(ctx, operation, report)
+	case runtimeapi.ActionEnableTUN:
+		return e.enableTUN(ctx, operation, report)
+	case runtimeapi.ActionDisableTUN:
+		return e.disableTUN(ctx, operation, report)
 	case runtimeapi.ActionAddManagedResource:
 		return e.addManagedResource(operation, report)
 	case runtimeapi.ActionSetAdvancedOverride:
@@ -211,12 +224,37 @@ func (e *MihomoExecutor) FailOpen(ctx context.Context) error {
 	if e == nil {
 		return errors.New("Mihomo Runtime executor is unavailable")
 	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+	snapshot, stateErr := e.State.Observe("", e.now())
+	if stateErr != nil {
+		return stateErr
+	}
+	wasTUN := snapshot.RunMode == runtimeapi.RunModeTUN
 	if e.Network == nil {
-		// Explicit-proxy mode has no system network takeover. Once Mihomo has
-		// exited, applications naturally use their direct path.
+		if wasTUN {
+			return errors.New("ordinary TUN fail-open controller is unavailable")
+		}
 		return nil
 	}
-	return e.Network.FailOpen(ctx)
+	if e.TUN != nil {
+		if status, err := e.TUN.Observe(ctx); err == nil {
+			wasTUN = status.OwnershipID != ""
+		}
+	}
+	if err := e.Network.FailOpen(ctx); err != nil {
+		return err
+	}
+	if !wasTUN {
+		return nil
+	}
+	_, err := e.prepareCurrentCandidate(
+		ctx,
+		fmt.Sprintf("op_failopen_%d", e.now().UnixNano()),
+		nil,
+		func(string, int, bool) error { return nil },
+	)
+	return err
 }
 
 func (e *MihomoExecutor) ExitEvents() <-chan runtimeprocess.ExitEvent {
@@ -729,6 +767,14 @@ func (e *MihomoExecutor) buildDetailedCandidate(
 	source []byte,
 	override []byte,
 ) (mihomo.DetailedCandidate, error) {
+	return e.buildDetailedCandidateForNetwork(source, override, nil)
+}
+
+func (e *MihomoExecutor) buildDetailedCandidateForNetwork(
+	source []byte,
+	override []byte,
+	tun *mihomo.TUNCandidateSettings,
+) (mihomo.DetailedCandidate, error) {
 	resources, err := e.State.ManagedResources()
 	if err != nil {
 		return mihomo.DetailedCandidate{}, err
@@ -745,6 +791,7 @@ func (e *MihomoExecutor) buildDetailedCandidate(
 		Port:            e.ProxyPort,
 		ControlEndpoint: e.ControlEndpoint,
 		Platform:        e.Platform,
+		TUN:             tun,
 	}
 	return builder.BuildDetailed(source, override, managed)
 }
@@ -963,14 +1010,250 @@ func (e *MihomoExecutor) start(ctx context.Context, report StageReporter) (*runt
 	}, nil
 }
 
-func (e *MihomoExecutor) stop(ctx context.Context, report StageReporter) (*runtimeapi.OperationResult, error) {
+func (e *MihomoExecutor) enableTUN(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if e.TUN == nil {
+		return nil, errors.New("privileged Runtime network service is unavailable")
+	}
+	if err := report("preparing_tun", 10, false); err != nil {
+		return nil, err
+	}
+	wasRunning, err := e.Process.IsRunning(ctx)
+	if err != nil {
+		return nil, err
+	}
+	prepared, err := e.TUN.Prepare(ctx, operation.ID, operation.Action.Params.PlanID)
+	if err != nil {
+		return nil, err
+	}
+	rollback := func(cause error) (*runtimeapi.OperationResult, error) {
+		rollbackErr := e.rollbackPreparedTUN(
+			prepared,
+			operation.ID+"_rollback",
+			wasRunning,
+		)
+		return nil, errors.Join(cause, rollbackErr)
+	}
+	if err := report("building_tun_candidate", 25, true); err != nil {
+		return rollback(err)
+	}
+	deployment, err := e.prepareCurrentCandidate(ctx, operation.ID, &mihomo.TUNCandidateSettings{
+		Device:      prepared.Device,
+		RoutingMark: prepared.RoutingMark,
+		IPv6Policy:  prepared.Settings.IPv6Policy,
+		HijackDNS:   prepared.Settings.DNSPolicy == runtimeapi.TUNDNSHijack,
+	}, report)
+	if err != nil {
+		return rollback(err)
+	}
+	if !deployment.Verified {
+		started, startErr := e.start(ctx, report)
+		if startErr != nil {
+			return rollback(startErr)
+		}
+		deployment.ProxyKind = started.ProxyKind
+		deployment.ProxyAddresses = append([]string(nil), started.ProxyAddresses...)
+		deployment.Verified = started.Verified
+	}
+	if err := report("committing_tun_routes", 90, false); err != nil {
+		return rollback(err)
+	}
+	status, err := e.TUN.Commit(ctx, operation.ID, prepared.OwnershipID)
+	if err != nil {
+		return rollback(err)
+	}
+	deployment.RunMode = runtimeapi.RunModeTUN
+	deployment.Network = &status
+	deployment.Verified = status.State == runtimeapi.NetworkStateActive
+	return deployment, nil
+}
+
+func (e *MihomoExecutor) disableTUN(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if e.TUN == nil {
+		return nil, errors.New("privileged Runtime network service is unavailable")
+	}
+	status, err := e.TUN.Observe(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if status.OwnershipID == "" {
+		return &runtimeapi.OperationResult{
+			RunMode:  runtimeapi.RunModeExplicit,
+			Network:  &status,
+			Verified: status.State == runtimeapi.NetworkStateInactive,
+		}, nil
+	}
+	wasRunning, err := e.Process.IsRunning(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := report("releasing_tun_routes", 20, false); err != nil {
+		return nil, err
+	}
+	status, err = e.TUN.Release(
+		ctx,
+		operation.ID,
+		status.OwnershipID,
+		runtimenet.ReleaseOperator,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if err := report("stopping_tun_proxy", 45, false); err != nil {
+		return nil, err
+	}
+	if err := e.Process.Stop(ctx); err != nil {
+		return nil, err
+	}
+	deployment, err := e.prepareCurrentCandidate(ctx, operation.ID+"_explicit", nil, report)
+	if err != nil {
+		return nil, err
+	}
+	if wasRunning {
+		started, startErr := e.start(ctx, report)
+		if startErr != nil {
+			return nil, startErr
+		}
+		deployment.ProxyKind = started.ProxyKind
+		deployment.ProxyAddresses = append([]string(nil), started.ProxyAddresses...)
+		deployment.Verified = started.Verified
+	}
+	deployment.RunMode = runtimeapi.RunModeExplicit
+	deployment.Network = &status
+	return deployment, nil
+}
+
+func (e *MihomoExecutor) stop(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	wasTUN := false
+	var networkStatus *runtimeapi.NetworkStatus
+	if e.TUN != nil {
+		status, observeErr := e.TUN.Observe(ctx)
+		if observeErr == nil {
+			wasTUN = status.OwnershipID != ""
+			networkStatus = &status
+		} else {
+			return nil, fmt.Errorf(
+				"cannot stop Mihomo while ordinary TUN ownership is unavailable: %w",
+				observeErr,
+			)
+		}
+	} else {
+		snapshot, stateErr := e.State.Observe("", e.now())
+		if stateErr != nil {
+			return nil, stateErr
+		}
+		if snapshot.RunMode == runtimeapi.RunModeTUN {
+			return nil, errors.New("cannot stop Mihomo without the privileged Runtime network controller")
+		}
+	}
+	if wasTUN {
+		if e.Network == nil {
+			return nil, errors.New("cannot stop Mihomo without the privileged Runtime network fail-open controller")
+		}
+		if err := report("releasing_tun_routes", 35, false); err != nil {
+			return nil, err
+		}
+		if err := e.Network.FailOpen(ctx); err != nil {
+			return nil, err
+		}
+		status, err := e.TUN.Observe(ctx)
+		if err != nil {
+			return nil, err
+		}
+		networkStatus = &status
+	}
 	if err := report("stopping_proxy", 60, false); err != nil {
 		return nil, err
 	}
 	if err := e.Process.Stop(ctx); err != nil {
 		return nil, err
 	}
-	return &runtimeapi.OperationResult{Verified: true}, nil
+	if wasTUN {
+		if _, err := e.prepareCurrentCandidate(
+			ctx,
+			operation.ID+"_explicit",
+			nil,
+			report,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return &runtimeapi.OperationResult{
+		Verified: true,
+		RunMode:  runtimeapi.RunModeExplicit,
+		Network:  networkStatus,
+	}, nil
+}
+
+func (e *MihomoExecutor) prepareCurrentCandidate(
+	ctx context.Context,
+	operationID string,
+	tun *mihomo.TUNCandidateSettings,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	source, err := os.ReadFile(filepath.Join(e.ConfigRoot, "current", "source.yaml"))
+	if err != nil {
+		return nil, fmt.Errorf("read current Mihomo source: %w", err)
+	}
+	override, _, err := e.State.AdvancedOverride()
+	if err != nil {
+		return nil, err
+	}
+	detailed, err := e.buildDetailedCandidateForNetwork(source, override, tun)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(source)
+	return e.deployCandidate(
+		ctx,
+		operationID,
+		hex.EncodeToString(digest[:]),
+		source,
+		detailed.YAML,
+		"",
+		report,
+	)
+}
+
+func (e *MihomoExecutor) rollbackPreparedTUN(
+	prepared runtimenet.PreparedTUN,
+	operationID string,
+	wasRunning bool,
+) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	_, releaseErr := e.TUN.Release(
+		ctx,
+		operationID,
+		prepared.OwnershipID,
+		runtimenet.ReleaseMihomoFailure,
+	)
+	if releaseErr != nil {
+		return releaseErr
+	}
+	stopErr := e.Process.Stop(ctx)
+	_, prepareErr := e.prepareCurrentCandidate(
+		ctx,
+		operationID+"_explicit",
+		nil,
+		func(string, int, bool) error { return nil },
+	)
+	var startErr error
+	if wasRunning && prepareErr == nil {
+		_, startErr = e.start(ctx, func(string, int, bool) error { return nil })
+	}
+	return errors.Join(stopErr, releaseErr, prepareErr, startErr)
 }
 
 func (e *MihomoExecutor) currentCore() (string, string, error) {

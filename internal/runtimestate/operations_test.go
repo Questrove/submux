@@ -332,3 +332,73 @@ func TestPreparedConfigurationRemainsStoppedUntilExplicitStart(t *testing.T) {
 		t.Fatalf("source-prepared Runtime snapshot = %#v", snapshot)
 	}
 }
+
+func TestCompleteTUNOperationsRecordsRunModeTransitions(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 7, 30, 10, 0, 0, 0, time.UTC)
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	enable, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
+		RequestID:  "enable-tun",
+		IfRevision: 1,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionEnableTUN,
+			Params: runtimeapi.ActionParams{
+				PlanID: "plan_0123456789abcdef0123456789abcdef",
+			},
+		},
+	}, 4, now)
+	if err != nil {
+		t.Fatalf("submit enable TUN operation: %v", err)
+	}
+	if _, found, err := store.BeginNextOperation(now); err != nil || !found {
+		t.Fatalf("begin enable TUN operation: found=%v err=%v", found, err)
+	}
+	if err := store.CompleteOperation(
+		enable.ID,
+		runtimeapi.OperationSucceeded,
+		&runtimeapi.OperationResult{Verified: true, RunMode: runtimeapi.RunModeTUN},
+		nil,
+		now,
+	); err != nil {
+		t.Fatalf("complete enable TUN operation: %v", err)
+	}
+	snapshot, err := store.Observe("test", now)
+	if err != nil {
+		t.Fatalf("observe enabled TUN Runtime: %v", err)
+	}
+	if snapshot.RunMode != runtimeapi.RunModeTUN || snapshot.Mihomo.State != "running" {
+		t.Fatalf("enabled TUN snapshot=%#v", snapshot)
+	}
+
+	disable, _, err := store.SubmitOperation(peer, "test", "test", runtimeapi.CreateOperationRequest{
+		RequestID:  "disable-tun",
+		IfRevision: snapshot.Revision,
+		Action:     runtimeapi.Action{Kind: runtimeapi.ActionDisableTUN},
+	}, 4, now)
+	if err != nil {
+		t.Fatalf("submit disable TUN operation: %v", err)
+	}
+	if _, found, err := store.BeginNextOperation(now); err != nil || !found {
+		t.Fatalf("begin disable TUN operation: found=%v err=%v", found, err)
+	}
+	if err := store.CompleteOperation(
+		disable.ID,
+		runtimeapi.OperationSucceeded,
+		&runtimeapi.OperationResult{Verified: true, RunMode: runtimeapi.RunModeExplicit},
+		nil,
+		now,
+	); err != nil {
+		t.Fatalf("complete disable TUN operation: %v", err)
+	}
+	snapshot, err = store.Observe("test", now)
+	if err != nil {
+		t.Fatalf("observe disabled TUN Runtime: %v", err)
+	}
+	if snapshot.RunMode != runtimeapi.RunModeExplicit || snapshot.Mihomo.State != "running" {
+		t.Fatalf("disabled TUN snapshot=%#v", snapshot)
+	}
+}

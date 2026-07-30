@@ -27,6 +27,7 @@ import (
 	"submux/internal/runtimeinstance"
 	"submux/internal/runtimeipc"
 	"submux/internal/runtimelog"
+	"submux/internal/runtimenet"
 	"submux/internal/runtimepaths"
 	"submux/internal/runtimeprivacy"
 	"submux/internal/runtimeprocess"
@@ -76,6 +77,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "proxy" {
 		return runProxy(arguments[1:], stdout, stderr)
 	}
+	if arguments[0] == "network" {
+		return runNetwork(arguments[1:], stdout, stderr)
+	}
 	if arguments[0] == "source" {
 		return runSource(arguments[1:], os.Stdin, stdout, stderr)
 	}
@@ -88,7 +92,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "diagnostics" {
 		return runDiagnostics(arguments[1:], stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|source|resource|override|diagnostics|version|--version-json]")
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|network|source|resource|override|diagnostics|version|--version-json]")
 	return 2
 }
 
@@ -136,6 +140,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	stateRoot := flags.String("state-dir", defaults.StateRoot, "Runtime state directory")
 	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	networkEndpoint := flags.String("network-endpoint", defaults.NetworkEndpoint, "internal privileged Runtime network endpoint")
 	proxyPort := flags.Int("proxy-port", mihomo.DefaultExplicitProxyPort, "loopback explicit proxy port")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
@@ -162,6 +167,19 @@ func runServe(arguments []string, stderr io.Writer) int {
 		return 1
 	}
 	defer state.Close()
+	var network *runtimenet.Connector
+	if runtime.GOOS == "linux" && *networkEndpoint != "" {
+		installationID, idErr := state.InstallationID()
+		if idErr != nil {
+			writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, idErr.Error(), true)
+			return 1
+		}
+		network = &runtimenet.Connector{
+			Endpoint:          *networkEndpoint,
+			RuntimeInstanceID: installationID,
+		}
+		defer network.Close()
+	}
 	logs, err := runtimelog.Open(filepath.Join(*stateRoot, "logs"))
 	if err != nil {
 		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
@@ -225,6 +243,8 @@ func runServe(arguments []string, stderr io.Writer) int {
 		ProxyPort:       *proxyPort,
 		Platform:        runtime.GOOS,
 		Verifier:        verifier,
+		Network:         network,
+		TUN:             network,
 	}
 	executor.Sources = &runtimesource.Manager{
 		State: state,
@@ -241,6 +261,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 		State:    state,
 		Executor: executor,
 		Recovery: supervisor,
+		Network:  network,
 		Diagnostics: &runtimediag.Service{
 			State:          state,
 			StateRoot:      *stateRoot,
@@ -283,8 +304,15 @@ func runServe(arguments []string, stderr io.Writer) int {
 	logGCErr := <-logGCResult
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
-	processErr := process.Stop(shutdownContext)
-	if err := errors.Join(serverErr, workerErr, logGCErr, processErr); err != nil {
+	var networkErr error
+	if network != nil {
+		networkErr = network.FailOpen(shutdownContext)
+	}
+	var processErr error
+	if networkErr == nil {
+		processErr = process.Stop(shutdownContext)
+	}
+	if err := errors.Join(serverErr, workerErr, logGCErr, processErr, networkErr); err != nil {
 		runtimeLogger.Printf("service stopped with error: %s", runtimeprivacy.RedactError(err))
 		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
 		return 1
@@ -353,6 +381,7 @@ func runStatus(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Mihomo fault: %s: %s\n", snapshot.Mihomo.Fault.Code, snapshot.Mihomo.Fault.Message)
 	}
 	fmt.Fprintf(stdout, "Revision: %d\n", snapshot.Revision)
+	writeNetworkStatus(stdout, snapshot.Network)
 	fmt.Fprintf(stdout, "Latest event cursor: %d\n", snapshot.LatestEventCursor)
 	writeSourceStatus(stdout, snapshot.Sources)
 	writeResourceStatus(stdout, snapshot.Resources)
@@ -362,6 +391,172 @@ func runStatus(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "Advanced override: not configured")
 	}
 	return 0
+}
+
+func runNetwork(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime network [status|preview|enable|disable]")
+		return 2
+	}
+	command := arguments[0]
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("network "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	wait := flags.Bool("wait", false, "wait for the operation to finish")
+	ipv6Policy := flags.String("ipv6", runtimeapi.TUNIPv6Proxy, "IPv6 policy: proxy, direct, or block")
+	dnsPolicy := flags.String("dns", runtimeapi.TUNDNSHijack, "DNS policy: hijack or off")
+	planID := flags.String("plan-id", "", "validated Runtime network plan ID")
+	var captureRoutes stringListFlag
+	flags.Var(&captureRoutes, "capture-route", "specific route ID to include in TUN; repeat as needed")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return 2
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(stderr, "network command does not accept positional arguments")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	defer client.CloseIdleConnections()
+	ctx := context.Background()
+	switch command {
+	case "status":
+		if *wait || *planID != "" || len(captureRoutes) > 0 ||
+			*ipv6Policy != runtimeapi.TUNIPv6Proxy ||
+			*dnsPolicy != runtimeapi.TUNDNSHijack {
+			fmt.Fprintln(stderr, "network status accepts only --endpoint and --json")
+			return 2
+		}
+		snapshot, err := client.Observe(ctx)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		if *jsonOutput {
+			_ = json.NewEncoder(stdout).Encode(snapshot.Network)
+		} else {
+			writeNetworkStatus(stdout, snapshot.Network)
+		}
+		return 0
+	case "preview":
+		if *wait || *planID != "" {
+			fmt.Fprintln(stderr, "network preview does not accept --wait or --plan-id")
+			return 2
+		}
+		preview, err := client.PreviewNetwork(ctx, runtimeapi.NetworkPreviewRequest{
+			Mode:            runtimeapi.RunModeTUN,
+			IPv6Policy:      *ipv6Policy,
+			DNSPolicy:       *dnsPolicy,
+			CaptureRouteIDs: append([]string(nil), captureRoutes...),
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		if *jsonOutput {
+			_ = json.NewEncoder(stdout).Encode(preview)
+			return 0
+		}
+		fmt.Fprintf(stdout, "Plan: %s (expires %s)\n", preview.PlanID, preview.ExpiresAt.Format(time.RFC3339))
+		fmt.Fprintf(stdout, "Device: %s; IPv6: %s; DNS: %s\n", preview.Device, preview.Settings.IPv6Policy, preview.Settings.DNSPolicy)
+		for _, route := range preview.Routes {
+			disposition := "bypass"
+			if !route.Bypass {
+				disposition = "capture"
+			}
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", route.ID, route.Family, route.CIDR, route.Interface, disposition)
+		}
+		for _, conflict := range preview.Conflicts {
+			fmt.Fprintf(stdout, "conflict: %s: %s (%s)\n", conflict.Kind, conflict.Detail, conflict.Owner)
+		}
+		for _, warning := range preview.Warnings {
+			fmt.Fprintf(stdout, "warning: %s\n", warning)
+		}
+		return 0
+	case "enable", "disable":
+		if command == "enable" && *planID == "" {
+			fmt.Fprintln(stderr, "network enable requires --plan-id from network preview")
+			return 2
+		}
+		if command == "disable" && *planID != "" {
+			fmt.Fprintln(stderr, "network disable does not accept --plan-id")
+			return 2
+		}
+		if len(captureRoutes) > 0 ||
+			*ipv6Policy != runtimeapi.TUNIPv6Proxy ||
+			*dnsPolicy != runtimeapi.TUNDNSHijack {
+			fmt.Fprintf(stderr, "network %s accepts settings only through a validated preview\n", command)
+			return 2
+		}
+		snapshot, err := client.Observe(ctx)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		action := runtimeapi.Action{Kind: runtimeapi.ActionDisableTUN}
+		if command == "enable" {
+			action.Kind = runtimeapi.ActionEnableTUN
+			action.Params.PlanID = *planID
+		}
+		operation, err := client.Execute(ctx, runtimeapi.CreateOperationRequest{
+			IfRevision: snapshot.Revision,
+			Action:     action,
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		if *wait {
+			operation, err = client.WaitOperation(ctx, operation.ID, 250*time.Millisecond)
+			if err != nil {
+				return writeClientFailure(stdout, stderr, *jsonOutput, err)
+			}
+		}
+		return writeOperation(stdout, *jsonOutput, operation)
+	default:
+		fmt.Fprintln(stderr, "usage: submux-runtime network [status|preview|enable|disable]")
+		return 2
+	}
+}
+
+func writeNetworkStatus(writer io.Writer, status runtimeapi.NetworkStatus) {
+	fmt.Fprintf(
+		writer,
+		"Network available: %t; mode: %s; state: %s",
+		status.Available,
+		status.Mode,
+		status.State,
+	)
+	if status.Device != "" {
+		fmt.Fprintf(writer, "; device: %s", status.Device)
+	}
+	fmt.Fprintln(writer)
+	if status.LeaseExpiresAt != nil {
+		fmt.Fprintf(writer, "Network lease expires: %s\n", status.LeaseExpiresAt.Format(time.RFC3339))
+	}
+	for _, conflict := range status.Conflicts {
+		fmt.Fprintf(writer, "Network conflict: %s: %s (%s)\n", conflict.Kind, conflict.Detail, conflict.Owner)
+	}
+	for _, residual := range status.Residuals {
+		fmt.Fprintf(writer, "Network residual: %s %s %s\n", residual.Kind, residual.Name, residual.State)
+	}
+	if status.Fault != nil {
+		fmt.Fprintf(writer, "Network fault: %s: %s\n", status.Fault.Code, status.Fault.Message)
+	}
+}
+
+type stringListFlag []string
+
+func (values *stringListFlag) String() string {
+	return strings.Join(*values, ",")
+}
+
+func (values *stringListFlag) Set(value string) error {
+	if value == "" {
+		return errors.New("route ID must not be empty")
+	}
+	*values = append(*values, value)
+	return nil
 }
 
 func runImport(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {

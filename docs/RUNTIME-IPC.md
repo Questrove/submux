@@ -282,8 +282,8 @@ Rust 层只负责传输、版本协商和 OS 错误转换，不复制 Runtime �
 
 `submux-runtime-net` 使用另一条仅供 Runtime 调用的本机 IPC：
 
-- Linux/macOS 只允许 Runtime 服务账户和 root；
-- Windows 只允许 Runtime 服务 SID 与 LocalSystem；
+- Linux/macOS 客户端只允许 Runtime 服务账户；root 是特权进程的服务端身份，不能作为客户端调用；
+- Windows 客户端只允许 Runtime 服务 SID；LocalSystem 是特权进程的服务端身份，不能作为客户端调用；
 - GUI、TUI、CLI 和其他操作员不能直接连接；
 - 消息只包含版本化的固定网络操作和经过 Runtime 验证的对象 ID；
 - 不接受配置来源地址、凭据、任意路径、命令、脚本、argv、防火墙片段或服务名；

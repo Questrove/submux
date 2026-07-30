@@ -320,6 +320,57 @@ impl RuntimeBridge {
         )
     }
 
+    pub fn preview_network(
+        &self,
+        ipv6_policy: &str,
+        dns_policy: &str,
+        capture_route_ids: &[String],
+    ) -> Result<Value, BridgeError> {
+        if !matches!(ipv6_policy, "proxy" | "direct" | "block") {
+            return Err(BridgeError::request("Runtime TUN IPv6 policy is invalid"));
+        }
+        if !matches!(dns_policy, "hijack" | "off") {
+            return Err(BridgeError::request("Runtime TUN DNS policy is invalid"));
+        }
+        if capture_route_ids.len() > 512
+            || capture_route_ids.iter().any(|value| {
+                value.len() < 3
+                    || value.len() > 96
+                    || !value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+            })
+        {
+            return Err(BridgeError::request(
+                "Runtime TUN captured route selection is invalid",
+            ));
+        }
+        let body = serde_json::to_vec(&json!({
+            "mode": "tun",
+            "ipv6_policy": ipv6_policy,
+            "dns_policy": dns_policy,
+            "capture_route_ids": capture_route_ids,
+        }))
+        .map_err(BridgeError::internal)?;
+        self.call_json(
+            "POST",
+            "/v1/network/preview",
+            Some("application/json"),
+            &[],
+            &body,
+            None,
+        )
+    }
+
+    pub fn enable_tun(&self, plan_id: &str) -> Result<Value, BridgeError> {
+        validate_plan_id(plan_id)?;
+        self.execute_action_with_params("network.enable_tun", json!({ "plan_id": plan_id }))
+    }
+
+    pub fn disable_tun(&self) -> Result<Value, BridgeError> {
+        self.execute_action_with_params("network.disable_tun", json!({}))
+    }
+
     pub fn apply_candidate(&self, content_id: &str) -> Result<Value, BridgeError> {
         self.execute_action("proxy.apply_import", Some(content_id))
     }
@@ -831,6 +882,17 @@ fn validate_operation_id(operation_id: &str) -> Result<(), BridgeError> {
         Ok(())
     } else {
         Err(BridgeError::request("Runtime operation ID is invalid"))
+    }
+}
+
+fn validate_plan_id(plan_id: &str) -> Result<(), BridgeError> {
+    let valid = plan_id.starts_with("plan_")
+        && plan_id.len() == 37
+        && plan_id[5..].bytes().all(|byte| byte.is_ascii_hexdigit());
+    if valid {
+        Ok(())
+    } else {
+        Err(BridgeError::request("Runtime network plan ID is invalid"))
     }
 }
 

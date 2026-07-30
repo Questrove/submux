@@ -43,6 +43,9 @@ func TestWebViewOnlyUsesAllowlistedTauriCommands(t *testing.T) {
 		"runtime_apply_source",
 		"runtime_start_proxy",
 		"runtime_stop_proxy",
+		"runtime_preview_network",
+		"runtime_enable_tun",
+		"runtime_disable_tun",
 		"runtime_get_operation",
 		"runtime_wait_operation",
 		"runtime_cancel_operation",
@@ -141,6 +144,60 @@ func TestGUIRendersMihomoDesiredActualAndRecoveryState(t *testing.T) {
 	} {
 		if !strings.Contains(script, field) {
 			t.Fatalf("GUI does not render Mihomo lifecycle field %q", field)
+		}
+	}
+}
+
+func TestGUIExposesTypedOrdinaryTUNPreviewStatusAndControls(t *testing.T) {
+	page := readGUIFile(t, "ui", "index.html")
+	for _, id := range []string{
+		`id="network-state"`,
+		`id="network-ipv6"`,
+		`id="network-dns"`,
+		`id="network-route-list"`,
+		`id="network-preview"`,
+		`id="preview-network"`,
+		`id="enable-tun"`,
+		`id="disable-tun"`,
+	} {
+		if !strings.Contains(page, id) {
+			t.Fatalf("GUI ordinary TUN control %s is missing", id)
+		}
+	}
+	script := readGUIFile(t, "ui", "app.js")
+	for _, contract := range []string{
+		"network.conflicts",
+		"network.residuals",
+		"preview.warnings",
+		"preview.conflicts",
+		"captureRouteIds",
+		"networkPlanExpiresAt",
+		"clearNetworkPlan",
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("GUI ordinary TUN contract %q is missing", contract)
+		}
+	}
+	bridge := readGUIFile(t, "src-tauri", "src", "runtime_ipc.rs")
+	for _, contract := range []string{
+		"/v1/network/preview",
+		"network.enable_tun",
+		"network.disable_tun",
+		"capture_route_ids",
+		"validate_plan_id",
+	} {
+		if !strings.Contains(bridge, contract) {
+			t.Fatalf("GUI ordinary TUN Runtime IPC contract %q is missing", contract)
+		}
+	}
+	registration := readGUIFile(t, "src-tauri", "src", "lib.rs")
+	for _, command := range []string{
+		"runtime_preview_network",
+		"runtime_enable_tun",
+		"runtime_disable_tun",
+	} {
+		if !strings.Contains(registration, command) {
+			t.Fatalf("Tauri ordinary TUN command %q is not registered", command)
 		}
 	}
 }

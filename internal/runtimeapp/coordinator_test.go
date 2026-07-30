@@ -29,6 +29,22 @@ type blockingStartupRecovery struct {
 	release chan struct{}
 }
 
+type networkServiceFunc struct {
+	preview func(context.Context, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
+	observe func(context.Context) (runtimeapi.NetworkStatus, error)
+}
+
+func (service networkServiceFunc) Preview(
+	ctx context.Context,
+	request runtimeapi.NetworkPreviewRequest,
+) (runtimeapi.NetworkPreview, error) {
+	return service.preview(ctx, request)
+}
+
+func (service networkServiceFunc) Observe(ctx context.Context) (runtimeapi.NetworkStatus, error) {
+	return service.observe(ctx)
+}
+
 func (recovery *blockingStartupRecovery) RecoverStartup(context.Context) error {
 	close(recovery.started)
 	<-recovery.release
@@ -113,6 +129,99 @@ func TestCoordinatorRunsPersistedOperationAfterSubmission(t *testing.T) {
 	cancel()
 	if err := <-result; err != nil {
 		t.Fatalf("stop Runtime coordinator: %v", err)
+	}
+}
+
+func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	called := 0
+	coordinator := &Coordinator{
+		State: state,
+		Network: networkServiceFunc{
+			preview: func(
+				_ context.Context,
+				request runtimeapi.NetworkPreviewRequest,
+			) (runtimeapi.NetworkPreview, error) {
+				called++
+				if request.IPv6Policy != runtimeapi.TUNIPv6Direct ||
+					request.DNSPolicy != runtimeapi.TUNDNSOff {
+					t.Fatalf("network preview request=%#v", request)
+				}
+				return runtimeapi.NetworkPreview{PlanID: "plan_0123456789abcdef0123456789abcdef"}, nil
+			},
+			observe: func(context.Context) (runtimeapi.NetworkStatus, error) {
+				return runtimeapi.NetworkStatus{
+					Available:   true,
+					Mode:        runtimeapi.RunModeTUN,
+					State:       runtimeapi.NetworkStateActive,
+					OwnershipID: "net_0123456789abcdef",
+				}, nil
+			},
+		},
+		Version: "test",
+	}
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	preview, err := coordinator.PreviewNetwork(t.Context(), peer, runtimeapi.NetworkPreviewRequest{
+		Mode:       runtimeapi.RunModeTUN,
+		IPv6Policy: runtimeapi.TUNIPv6Direct,
+		DNSPolicy:  runtimeapi.TUNDNSOff,
+	})
+	if err != nil || called != 1 || preview.PlanID == "" {
+		t.Fatalf("network preview=%#v calls=%d err=%v", preview, called, err)
+	}
+	snapshot, err := coordinator.Observe(t.Context(), peer)
+	if err != nil {
+		t.Fatalf("observe Runtime network: %v", err)
+	}
+	if snapshot.RunMode != runtimeapi.RunModeTUN ||
+		snapshot.Network.State != runtimeapi.NetworkStateActive ||
+		snapshot.Network.OwnershipID == "" {
+		t.Fatalf("observed Runtime network snapshot=%#v", snapshot)
+	}
+}
+
+func TestCoordinatorReportsUnavailableNetworkWithoutClaimingCleanup(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatalf("open Runtime state: %v", err)
+	}
+	defer state.Close()
+	coordinator := &Coordinator{
+		State: state,
+		Network: networkServiceFunc{
+			preview: func(context.Context, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error) {
+				return runtimeapi.NetworkPreview{}, nil
+			},
+			observe: func(context.Context) (runtimeapi.NetworkStatus, error) {
+				return runtimeapi.NetworkStatus{
+					Mode:  runtimeapi.RunModeTUN,
+					State: runtimeapi.NetworkStateUnknown,
+					Residuals: []runtimeapi.NetworkObject{{
+						Kind: "policy_rule",
+						ID:   "rule_test",
+						Name: "12000",
+					}},
+				}, errors.New("helper unavailable")
+			},
+		},
+		Version: "test",
+	}
+	snapshot, err := coordinator.Observe(
+		t.Context(),
+		runtimeapi.PeerIdentity{Platform: "linux", UID: 1000},
+	)
+	if err != nil {
+		t.Fatalf("observe unavailable Runtime network: %v", err)
+	}
+	if snapshot.Network.State != runtimeapi.NetworkStateUnavailable ||
+		snapshot.Network.Available ||
+		snapshot.Network.Fault == nil ||
+		len(snapshot.Network.Residuals) != 1 {
+		t.Fatalf("unavailable Runtime network snapshot=%#v", snapshot.Network)
 	}
 }
 

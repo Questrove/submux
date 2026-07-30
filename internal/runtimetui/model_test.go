@@ -27,6 +27,8 @@ type fakeClient struct {
 	diagnosticPreviews int
 	diagnosticCreates  int
 	operationSerial    int
+	networkRequests    []runtimeapi.NetworkPreviewRequest
+	networkPreview     runtimeapi.NetworkPreview
 }
 
 func (f *fakeClient) Observe(context.Context) (runtimeapi.Snapshot, error) {
@@ -141,6 +143,24 @@ func (f *fakeClient) CreateDiagnostics(
 ) (runtimeapi.DiagnosticsResult, error) {
 	f.diagnosticCreates++
 	return runtimeapi.DiagnosticsResult{FileName: "diagnostics.zip", Size: 10}, nil
+}
+
+func (f *fakeClient) PreviewNetwork(
+	_ context.Context,
+	request runtimeapi.NetworkPreviewRequest,
+) (runtimeapi.NetworkPreview, error) {
+	f.networkRequests = append(f.networkRequests, request)
+	preview := f.networkPreview
+	if preview.PlanID == "" {
+		preview = runtimeapi.NetworkPreview{
+			PlanID:    "plan_0123456789abcdef0123456789abcdef",
+			Mode:      runtimeapi.RunModeTUN,
+			Device:    "smxtun0",
+			Settings:  runtimeapi.TUNSettings{IPv6Policy: request.IPv6Policy, DNSPolicy: request.DNSPolicy},
+			ExpiresAt: time.Now().Add(5 * time.Minute),
+		}
+	}
+	return preview, nil
 }
 
 func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
@@ -268,6 +288,106 @@ func TestQuitDoesNotSubmitStopOperation(t *testing.T) {
 	}
 	if len(client.actions) != 0 {
 		t.Fatalf("quitting TUI submitted actions: %#v", client.actions)
+	}
+}
+
+func TestModelPreviewsDisplaysAndControlsOrdinaryTUN(t *testing.T) {
+	client := &fakeClient{
+		snapshot: runtimeapi.Snapshot{
+			ProtocolVersion: runtimeapi.ProtocolVersion,
+			Runtime:         runtimeapi.RuntimeStatus{Version: "dev", ServiceState: "running"},
+			Network: runtimeapi.NetworkStatus{
+				Available: true,
+				Mode:      runtimeapi.RunModeExplicit,
+				State:     runtimeapi.NetworkStateConflict,
+				Conflicts: []runtimeapi.NetworkConflict{{
+					Kind:   "full_tunnel",
+					Owner:  "wg0",
+					Detail: "另一个默认路由正在生效",
+				}},
+				Residuals: []runtimeapi.NetworkObject{{
+					Kind:  "policy_rule",
+					ID:    "rule_test",
+					Name:  "12000",
+					State: runtimeapi.NetworkStateUnknown,
+				}},
+			},
+		},
+		networkPreview: runtimeapi.NetworkPreview{
+			PlanID: "plan_0123456789abcdef0123456789abcdef",
+			Mode:   runtimeapi.RunModeTUN,
+			Device: "smxtun0",
+			Settings: runtimeapi.TUNSettings{
+				IPv6Policy: runtimeapi.TUNIPv6Direct,
+				DNSPolicy:  runtimeapi.TUNDNSOff,
+			},
+			Conflicts: []runtimeapi.NetworkConflict{{
+				Kind:   "full_tunnel",
+				Owner:  "wg0",
+				Detail: "冲突预览",
+			}},
+			Warnings:  []string{"IPv6 将直连"},
+			ExpiresAt: time.Now().Add(5 * time.Minute),
+		},
+	}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+	updated, command := model.Update(ctrlKey('t'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("ordinary TUN editor did not focus")
+	}
+	model.editor.SetValue(`{"ipv6_policy":"direct","dns_policy":"off","capture_route_ids":["route_lan"]}`)
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("ordinary TUN preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if len(client.networkRequests) != 1 ||
+		client.networkRequests[0].Mode != runtimeapi.RunModeTUN ||
+		client.networkRequests[0].IPv6Policy != runtimeapi.TUNIPv6Direct ||
+		client.networkRequests[0].DNSPolicy != runtimeapi.TUNDNSOff ||
+		len(client.networkRequests[0].CaptureRouteIDs) != 1 {
+		t.Fatalf("ordinary TUN preview requests=%#v", client.networkRequests)
+	}
+	view := model.View().Content
+	for _, expected := range []string{"网络冲突", "网络残留", "冲突预览", "IPv6 将直连"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("ordinary TUN view missing %q: %q", expected, view)
+		}
+	}
+	updated, command = model.Update(ctrlKey('e'))
+	model = updated.(Model)
+	if command != nil || len(client.actions) != 0 {
+		t.Fatalf("conflicting ordinary TUN preview was enabled: command=%v actions=%#v", command, client.actions)
+	}
+
+	model.networkPreview.Conflicts = nil
+	updated, command = model.Update(ctrlKey('e'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("ordinary TUN enable did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if len(client.actions) != 1 ||
+		client.actions[0].Kind != runtimeapi.ActionEnableTUN ||
+		client.actions[0].Params.PlanID != model.networkPreview.PlanID {
+		t.Fatalf("ordinary TUN enable actions=%#v", client.actions)
+	}
+	model.busy = false
+	updated, command = model.Update(ctrlKey('x'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("ordinary TUN disable did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if len(client.actions) != 2 || client.actions[1].Kind != runtimeapi.ActionDisableTUN {
+		t.Fatalf("ordinary TUN disable actions=%#v", client.actions)
 	}
 }
 

@@ -34,7 +34,7 @@ func TestDiagnosticsAreLocalPreviewedAndRedactedByDefault(t *testing.T) {
 		At:            now,
 		Error: &runtimeapi.ProtocolError{
 			Code:    "failed",
-			Message: `GET https://user:pass@[2001:db8::1]/x?token=one&token=two C:\Users\Test\config.yaml`,
+			Message: `GET https://diag-user:diag-pass@[2001:db8::1]/x?token=submux-secret-alpha&token=submux-secret-beta C:\Users\DiagnosticSecret\config.yaml`,
 		},
 	}); err != nil {
 		t.Fatalf("record Runtime audit: %v", err)
@@ -74,7 +74,12 @@ func TestDiagnosticsAreLocalPreviewedAndRedactedByDefault(t *testing.T) {
 		_ = reader.Close()
 		combined.Write(body)
 	}
-	for _, secret := range []string{"user:pass", "one", "two", `C:\Users\Test`} {
+	for _, secret := range []string{
+		"diag-user:diag-pass",
+		"submux-secret-alpha",
+		"submux-secret-beta",
+		`C:\Users\DiagnosticSecret`,
+	} {
 		if strings.Contains(combined.String(), secret) {
 			t.Fatalf("default diagnostics leaked %q: %s", secret, combined.String())
 		}
