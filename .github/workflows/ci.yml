@@ -22,6 +22,17 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
+      - name: Runtime security and interface parity gates
+        run: |
+          go test ./internal/runtimesource ./internal/runtimeipc ./internal/runtimegui \
+            ./internal/runtimeupdate ./internal/productupdate -count=1
+
+      - name: Validate Runtime support claims
+        run: go run ./cmd/submux-release-check matrix --file docs/runtime-support.json
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+
       - name: Linux Runtime network namespaces
         run: |
           sudo apt-get update
@@ -36,12 +47,68 @@ jobs:
       - name: Build (static, CGO_ENABLED=0)
         run: |
           CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /tmp/submux ./cmd/submux
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /tmp/submux-runtime ./cmd/submux-runtime
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false -o /tmp/submux-runtime-net ./cmd/submux-runtime-net
+          CGO_ENABLED=0 GOARCH=arm64 go build -trimpath -buildvcs=false -o /tmp/submux-runtime-arm64 ./cmd/submux-runtime
+          CGO_ENABLED=0 GOARCH=arm64 go build -trimpath -buildvcs=false -o /tmp/submux-runtime-net-arm64 ./cmd/submux-runtime-net
 
       - name: Installer syntax
         run: |
           bash -n scripts/install.sh
           bash -n scripts/test-installers.sh
+          shellcheck -S warning packaging/linux/*.sh packaging/macos/*.sh
           bash scripts/test-installers.sh
+
+  linux-packages:
+    name: Linux package lifecycle
+    runs-on: ubuntu-24.04
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install package tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes rpm zstd fakeroot nftables
+
+      - name: Build online DEB, RPM and tar.zst
+        run: |
+          mkdir -p "$RUNNER_TEMP/runtime-bin" "$RUNNER_TEMP/runtime-packages"
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -o "$RUNNER_TEMP/runtime-bin/submux-runtime" ./cmd/submux-runtime
+          CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -o "$RUNNER_TEMP/runtime-bin/submux-runtime-net" ./cmd/submux-runtime-net
+          packaging/linux/build.sh \
+            --version v0.0.0 \
+            --arch amd64 \
+            --kind online \
+            --runtime "$RUNNER_TEMP/runtime-bin/submux-runtime" \
+            --runtime-net "$RUNNER_TEMP/runtime-bin/submux-runtime-net" \
+            --sbom packaging/testdata/minimal.spdx.json \
+            --licenses packaging/testdata/licenses \
+            --output "$RUNNER_TEMP/runtime-packages" \
+            --formats deb,rpm,tar
+          (cd "$RUNNER_TEMP/runtime-packages" && sha256sum -c submux-runtime_0.0.0_amd64_online.sha256)
+
+      - name: Exercise Linux package state machine
+        run: |
+          for format in deb rpm tar; do
+            package="$RUNNER_TEMP/runtime-packages/submux-runtime_0.0.0_amd64_online"
+            case "$format" in
+              deb) package="$package.deb" ;;
+              rpm) package="$package.rpm" ;;
+              tar) package="$package.tar.zst" ;;
+            esac
+            sudo packaging/linux/integration-test.sh \
+              --format "$format" \
+              --package "$package" \
+              --desktop-user "$USER"
+          done
 
   windows:
     runs-on: windows-latest
@@ -66,6 +133,26 @@ jobs:
           go build -trimpath -buildvcs=false -o submux.exe ./cmd/submux
           go build -trimpath -buildvcs=false -o submux-runtime.exe ./cmd/submux-runtime
           go build -trimpath -buildvcs=false -o submux-runtime-net.exe ./cmd/submux-runtime-net
+
+      - name: Build Windows GUI
+        run: cargo build --locked --release --manifest-path desktop/submux-runtime-gui/src-tauri/Cargo.toml
+
+      - name: Build and validate Windows MSI
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.Util.wixext/6.0.2
+          ./packaging/windows/build.ps1 `
+            -Version v0.0.0 `
+            -Architecture amd64 `
+            -Kind online `
+            -Runtime ./submux-runtime.exe `
+            -RuntimeNet ./submux-runtime-net.exe `
+            -Gui ./desktop/submux-runtime-gui/src-tauri/target/release/submux-runtime-gui.exe `
+            -Sbom ./packaging/testdata/minimal.spdx.json `
+            -License ./packaging/testdata/licenses/NOTICE.txt `
+            -OutputDirectory "$env:RUNNER_TEMP/runtime-msi"
+          wix msi validate "$env:RUNNER_TEMP/runtime-msi/submux-runtime_0.0.0_amd64_online.msi"
 
       - name: Cross-build Windows arm64 preview
         env:
@@ -95,6 +182,16 @@ jobs:
       - name: Validate LaunchDaemon templates
         run: plutil -lint packaging/macos/*.plist
 
+      - name: Prepare Universal GUI targets
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --locked --release \
+            --target x86_64-apple-darwin \
+            --manifest-path desktop/submux-runtime-gui/src-tauri/Cargo.toml
+          cargo build --locked --release \
+            --target aarch64-apple-darwin \
+            --manifest-path desktop/submux-runtime-gui/src-tauri/Cargo.toml
+
       - name: Build macOS amd64 preview
         env:
           CGO_ENABLED: "0"
@@ -112,3 +209,22 @@ jobs:
           go build -trimpath -buildvcs=false -o submux-arm64 ./cmd/submux
           go build -trimpath -buildvcs=false -o submux-runtime-arm64 ./cmd/submux-runtime
           go build -trimpath -buildvcs=false -o submux-runtime-net-arm64 ./cmd/submux-runtime-net
+
+      - name: Build and inspect unsigned Universal PKG preview
+        run: |
+          packaging/macos/build.sh \
+            --version v0.0.0 \
+            --kind online \
+            --runtime-amd64 ./submux-runtime-amd64 \
+            --runtime-arm64 ./submux-runtime-arm64 \
+            --runtime-net-amd64 ./submux-runtime-net-amd64 \
+            --runtime-net-arm64 ./submux-runtime-net-arm64 \
+            --gui-amd64 ./desktop/submux-runtime-gui/src-tauri/target/x86_64-apple-darwin/release/submux-runtime-gui \
+            --gui-arm64 ./desktop/submux-runtime-gui/src-tauri/target/aarch64-apple-darwin/release/submux-runtime-gui \
+            --sbom ./packaging/testdata/minimal.spdx.json \
+            --license ./packaging/testdata/licenses/NOTICE.txt \
+            --output "$RUNNER_TEMP/runtime-pkg"
+          pkgutil --expand-full \
+            "$RUNNER_TEMP/runtime-pkg/submux-runtime_0.0.0_universal_online_unsigned.pkg" \
+            "$RUNNER_TEMP/runtime-pkg-expanded"
+          test -f "$RUNNER_TEMP/runtime-pkg-expanded/Distribution"

@@ -62,7 +62,9 @@ require_tree() {
 
 require_regular "--runtime" "$runtime_binary"
 require_regular "--runtime-net" "$network_binary"
-require_regular "--gui" "$gui_binary"
+if [[ -n $gui_binary ]]; then
+  require_regular "--gui" "$gui_binary"
+fi
 require_regular "--sbom" "$sbom_file"
 require_tree "--licenses" "$licenses_dir"
 if [[ $package_kind == offline ]]; then
@@ -99,7 +101,9 @@ install -d \
   "$root/usr/sbin"
 install -m 0755 "$runtime_binary" "$root/usr/lib/submux-runtime/submux-runtime"
 install -m 0755 "$network_binary" "$root/usr/lib/submux-runtime/submux-runtime-net"
-install -m 0755 "$gui_binary" "$root/usr/lib/submux-runtime/submux-runtime-gui"
+if [[ -n $gui_binary ]]; then
+  install -m 0755 "$gui_binary" "$root/usr/lib/submux-runtime/submux-runtime-gui"
+fi
 install -m 0755 "$script_dir/runtime-lifecycle.sh" "$root/usr/lib/submux-runtime/runtime-lifecycle"
 install -m 0755 "$script_dir/postremove.sh" "$root/usr/lib/submux-runtime/postremove.sh"
 install -m 0755 "$script_dir/uninstall.sh" "$root/usr/sbin/submux-runtime-uninstall"
@@ -112,7 +116,9 @@ cp -a "$licenses_dir/." "$root/usr/lib/submux-runtime/licenses/"
 find "$root/usr/lib/submux-runtime/licenses" -type d -exec chmod 0755 {} +
 find "$root/usr/lib/submux-runtime/licenses" -type f -exec chmod 0644 {} +
 ln -s ../lib/submux-runtime/submux-runtime "$root/usr/bin/submux-runtime"
-ln -s ../lib/submux-runtime/submux-runtime-gui "$root/usr/bin/submux-runtime-gui"
+if [[ -n $gui_binary ]]; then
+  ln -s ../lib/submux-runtime/submux-runtime-gui "$root/usr/bin/submux-runtime-gui"
+fi
 
 if [[ $package_kind == offline ]]; then
   install -d "$root/usr/lib/submux-runtime/offline/tuf"
@@ -126,6 +132,11 @@ fi
   printf 'VERSION=%s\n' "$version"
   printf 'ARCH=%s\n' "$architecture"
   printf 'KIND=%s\n' "$package_kind"
+  if [[ -n $gui_binary ]]; then
+    printf 'GUI=present\n'
+  else
+    printf 'GUI=absent\n'
+  fi
   printf 'SUPPORT=stable-systemd-glibc\n'
   printf 'MUSL_OPENWRT_NONSYSTEMD=preview-only\n'
 } >"$work/PACKAGE-METADATA"

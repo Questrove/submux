@@ -1,6 +1,8 @@
 # Linux Runtime packages
 
 `build.sh` produces DEB, RPM, and tar.zst packages for systemd/glibc hosts.
+`--gui` is optional for server packages; when supplied it must be the real
+Runtime GUI executable for the target architecture.
 The server form authorizes only root by default. A desktop installation must
 name the user explicitly:
 

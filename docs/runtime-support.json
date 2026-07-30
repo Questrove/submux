@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "id": "linux-ubuntu-24.04-amd64",
+      "platform": "linux",
+      "system": "Ubuntu 24.04 systemd/glibc",
+      "arch": "amd64",
+      "status": "preview",
+      "evidence": [
+        {
+          "category": "native-install",
+          "level": "virtualized",
+          "source": "packaging/linux/integration-test.sh"
+        },
+        {
+          "category": "tun-ipv4-tcp",
+          "level": "native",
+          "source": ".github/workflows/ci.yml#linux-runtime-network-namespaces"
+        },
+        {
+          "category": "gateway-ipv4-tcp",
+          "level": "native",
+          "source": ".github/workflows/ci.yml#linux-runtime-network-namespaces"
+        },
+        {
+          "category": "fail-open",
+          "level": "native",
+          "source": ".github/workflows/ci.yml#linux-runtime-network-namespaces"
+        }
+      ],
+      "missing": [
+        "native arm64 execution",
+        "IPv6 and UDP system matrix",
+        "real reboot and complete product update rollback",
+        "non-virtualized target-distribution package evidence"
+      ]
+    },
+    {
+      "id": "linux-systemd-glibc-arm64",
+      "platform": "linux",
+      "system": "supported systemd/glibc distributions",
+      "arch": "arm64",
+      "status": "preview",
+      "evidence": [
+        {
+          "category": "compile",
+          "level": "cross-build",
+          "source": ".github/workflows/ci.yml#linux-cross-builds"
+        }
+      ],
+      "missing": [
+        "native install, IPC, network, crash, reboot, update, rollback and uninstall evidence"
+      ]
+    },
+    {
+      "id": "windows-supported-amd64",
+      "platform": "windows",
+      "system": "Windows 10 22H2, Windows 11 and Windows Server 2019 or newer",
+      "arch": "amd64",
+      "status": "preview",
+      "evidence": [
+        {
+          "category": "compile-and-unit",
+          "level": "native",
+          "source": ".github/workflows/ci.yml#windows"
+        },
+        {
+          "category": "msi-validation",
+          "level": "native",
+          "source": ".github/workflows/ci.yml#windows-msi"
+        }
+      ],
+      "missing": [
+        "native service install, IPC, TUN, crash, reboot, update, rollback and uninstall evidence",
+        "trusted Authenticode signature"
+      ]
+    },
+    {
+      "id": "windows-supported-arm64",
+      "platform": "windows",
+      "system": "Windows 11 and Windows Server arm64",
+      "arch": "arm64",
+      "status": "preview",
+      "evidence": [
+        {
+          "category": "compile",
+          "level": "cross-build",
+          "source": ".github/workflows/ci.yml#windows-cross-build-arm64"
+        }
+      ],
+      "missing": [
+        "native arm64 install, IPC, TUN, crash, reboot, update, rollback and uninstall evidence",
+        "trusted Authenticode signature"
+      ]
+    },
+    {
+      "id": "macos-13-plus-amd64",
+      "platform": "darwin",
+      "system": "macOS 13 or newer on Intel",
+      "arch": "amd64",
+      "status": "preview",
+      "evidence": [
+        {
+          "category": "compile",
+          "level": "cross-build",
+          "source": ".github/workflows/ci.yml#macos-cross-builds"
+        },
+        {
+          "category": "pkg-structure",
+          "level": "native",
+          "source": ".github/workflows/ci.yml#macos-pkg"
+        }
+      ],
+      "missing": [
+        "native Intel install, IPC, TUN, crash, reboot, update, rollback and uninstall evidence",
+        "Developer ID Installer signature and notarization"
+      ]
+    },
+    {
+      "id": "macos-13-plus-arm64",
+      "platform": "darwin",
+      "system": "macOS 13 or newer on Apple Silicon",
+      "arch": "arm64",
+      "status": "preview",
+      "evidence": [
+        {
+          "category": "compile-and-unit",
+          "level": "native",
+          "source": ".github/workflows/ci.yml#macos"
+        },
+        {
+          "category": "pkg-structure",
+          "level": "native",
+          "source": ".github/workflows/ci.yml#macos-pkg"
+        }
+      ],
+      "missing": [
+        "native service install, IPC, TUN, crash, reboot, update, rollback and uninstall evidence",
+        "Developer ID Installer signature and notarization"
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # Submux Runtime 安装、更新与发行
 
-本文定义 Submux Runtime 的目标发行方式。目标安装器、安装包和 Release 产物尚未实现。
+本文定义 Submux Runtime 的发行方式。三平台安装器、安装包构建和 Release 门禁已经实现；当前稳定/预览状态以 `docs/runtime-support.json` 为准。没有完成真实系统验收的产物仍只能作为预览发布。
 
 ## 支持范围
 
@@ -14,7 +14,7 @@
 
 Linux 稳定包以 Debian/Ubuntu、Fedora/RHEL 系和其他满足依赖的 systemd 发行版为主要目标。Alpine、OpenWrt、musl 和非 systemd 系统不属于第一版承诺；后续可以提供专门适配，不能让通用 tar 包暗示完整的机器级 TUN 支持。
 
-编译成功不等于稳定支持。某个系统或架构没有完成安装、IPC、权限、TUN、更新、回滚和卸载测试时，其产物必须标为预览，不能列入稳定支持矩阵。
+编译成功不等于稳定支持。某个系统或架构没有完成安装、IPC、权限、TUN、更新、回滚和卸载测试时，其产物必须标为预览，不能列入稳定支持矩阵。机器可读矩阵和稳定证据门禁见 `docs/runtime-support.json` 与 `docs/RUNTIME-SUPPORT.md`。
 
 ## 机器级安装
 
@@ -27,7 +27,9 @@ Runtime 是机器服务，不依赖桌面登录。每台机器只允许一份 Ru
 - 操作员组：`submux-runtime`
 - 配置根：`/etc/submux-runtime`
 - 状态根：`/var/lib/submux-runtime`
+- 特权状态根：`/var/lib/submux-runtime-privileged`
 - 运行根：`/run/submux-runtime`
+- 特权运行根：`/run/submux-runtime-privileged`
 - 管理 Socket：`/run/submux-runtime/runtime.sock`
 
 服务账户和操作员组都使用 `submux-runtime` 这个系统名称，但状态目录保持 `0700`、文件保持 `0600`、服务使用 `umask 0077`；只有管理 Socket 以该组和 `0660` 开放。服务器安装默认只允许 root 管理。桌面安装器可以在明确确认后把当前用户加入操作员组。Mihomo 和主 Runtime 默认不持有 `CAP_NET_ADMIN`。
