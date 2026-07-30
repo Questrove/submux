@@ -1454,7 +1454,7 @@ fn validate_identifier_list(values: &[String], label: &str) -> Result<(), Bridge
     if valid {
         Ok(())
     } else {
-        Err(BridgeError::request(format!("{label} is invalid")))
+        Err(BridgeError::request(&format!("{label} is invalid")))
     }
 }
 
@@ -1675,6 +1675,15 @@ mod tests {
         assert!(validate_operation_id("op_with?query").is_err());
         assert!(validate_operation_id("op_with\r\nheader").is_err());
         assert!(validate_operation_id(&format!("op_{}", "a".repeat(126))).is_err());
+    }
+
+    #[test]
+    fn identifier_lists_use_the_runtime_identifier_format() {
+        assert!(validate_identifier_list(&["route.main".to_string()], "Runtime route").is_ok());
+        let error = validate_identifier_list(&["x".to_string()], "Runtime route")
+            .expect_err("short identifier should be rejected");
+        assert_eq!(error.code, "invalid_request");
+        assert_eq!(error.message, "Runtime route is invalid");
     }
 
     #[test]
