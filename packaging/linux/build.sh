@@ -269,6 +269,7 @@ EOF
 
 build_rpm() {
   command -v rpmbuild >/dev/null || fail "rpmbuild is required for RPM output"
+  command -v rpm >/dev/null || fail "rpm is required to validate RPM output"
   rpm_arch=x86_64
   [[ $architecture == arm64 ]] && rpm_arch=aarch64
   rpm_license=MIT
@@ -282,7 +283,6 @@ Version: ${version#v}
 Release: 1
 Summary: Local-only Submux Runtime
 License: $rpm_license
-BuildArch: $rpm_arch
 Requires: systemd, glibc
 
 %description
@@ -416,6 +416,9 @@ EOF
     --define "_payload $root"
   rpm_file=$(find "$top/RPMS" -type f -name '*.rpm' -print -quit)
   [[ -n $rpm_file ]] || fail "rpmbuild did not produce an RPM"
+  actual_rpm_arch=$(rpm -qp --queryformat '%{ARCH}' "$rpm_file")
+  [[ $actual_rpm_arch == "$rpm_arch" ]] ||
+    fail "rpmbuild produced architecture $actual_rpm_arch, expected $rpm_arch"
   cp "$rpm_file" "$output_dir/$package_base.rpm"
 }
 
