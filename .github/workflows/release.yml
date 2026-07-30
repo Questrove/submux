@@ -27,8 +27,12 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Scan repository history for secrets
-        run: bash scripts/scan-secrets.sh
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_CONFIG: .gitleaks.toml
       - name: Validate tag, tests, support claims and fixed Mihomo provenance
         run: |
           set -euo pipefail

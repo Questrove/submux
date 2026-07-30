@@ -33,7 +33,11 @@ jobs:
         run: go run ./cmd/submux-release-check matrix --file docs/runtime-support.json
 
       - name: Secret scan
-        run: bash scripts/scan-secrets.sh
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+          GITLEAKS_CONFIG: .gitleaks.toml
 
       - name: Linux Runtime network namespaces
         run: |
