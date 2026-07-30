@@ -1527,7 +1527,11 @@ fn validate_gateway_exceptions(
             }
         }
         if let Some(uid) = object.get("uid") {
-            if !allow_uid || uid.as_u64().is_none_or(|value| value > u32::MAX.into()) {
+            if !allow_uid
+                || uid
+                    .as_u64()
+                    .is_none_or(|value| value > u64::from(u32::MAX))
+            {
                 return Err(BridgeError::request(
                     "Runtime gateway exception UID is invalid",
                 ));
@@ -1714,5 +1718,29 @@ mod tests {
         assert!(validate_resource_name("provider/name").is_err());
         assert!(validate_resource_kind("proxy-provider-yaml").is_ok());
         assert!(validate_resource_kind("arbitrary-file").is_err());
+    }
+
+    #[test]
+    fn gateway_exception_uid_uses_the_unsigned_32_bit_range() {
+        let maximum = serde_json::json!([{"uid": u32::MAX}]);
+        assert!(validate_gateway_exceptions(
+            maximum.as_array().expect("UID fixture should be an array"),
+            true,
+        )
+        .is_ok());
+
+        let overflow = serde_json::json!([{"uid": u64::from(u32::MAX) + 1}]);
+        assert!(validate_gateway_exceptions(
+            overflow
+                .as_array()
+                .expect("overflow UID fixture should be an array"),
+            true,
+        )
+        .is_err());
+        assert!(validate_gateway_exceptions(
+            maximum.as_array().expect("UID fixture should be an array"),
+            false,
+        )
+        .is_err());
     }
 }
