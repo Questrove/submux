@@ -895,7 +895,9 @@ func requestHasBody(request *http.Request) bool {
 }
 
 func validAction(action runtimeapi.Action) bool {
-	if action.Kind != runtimeapi.ActionEnableTUN && action.Params.PlanID != "" {
+	if action.Kind != runtimeapi.ActionEnableTUN &&
+		action.Kind != runtimeapi.ActionEnableGateway &&
+		action.Params.PlanID != "" {
 		return false
 	}
 	switch action.Kind {
@@ -918,7 +920,7 @@ func validAction(action runtimeapi.Action) bool {
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == "" &&
 			action.Params.PlanID == ""
-	case runtimeapi.ActionEnableTUN:
+	case runtimeapi.ActionEnableTUN, runtimeapi.ActionEnableGateway:
 		return validPlanID(action.Params.PlanID) &&
 			action.Params.ContentID == "" &&
 			action.Params.SourceID == "" &&
@@ -928,7 +930,7 @@ func validAction(action runtimeapi.Action) bool {
 			!action.Params.Confirm &&
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == ""
-	case runtimeapi.ActionDisableTUN:
+	case runtimeapi.ActionDisableTUN, runtimeapi.ActionDisableGateway:
 		return action.Params.ContentID == "" &&
 			action.Params.SourceID == "" &&
 			action.Params.SourceName == "" &&

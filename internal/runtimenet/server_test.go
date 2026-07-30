@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -26,7 +27,8 @@ func TestPrivilegedNetworkServerAcceptsOnlyRuntimeUIDAndTypedPayloads(t *testing
 	}
 	handler := server.Handler()
 	connectionID := "conn_test"
-	validRequest := `{"request":{"protocol_version":1,"runtime_instance_id":"runtime_0123456789abcdef0123456789abcdef","client_nonce":"` +
+	validRequest := `{"request":{"protocol_version":` + strconv.Itoa(ProtocolVersion) +
+		`,"runtime_instance_id":"runtime_0123456789abcdef0123456789abcdef","client_nonce":"` +
 		strings.Repeat("a", 64) + `"}}`
 
 	rootResponse := serveNetworkRequest(handler, connectionID, 0, "/v1/session", validRequest)

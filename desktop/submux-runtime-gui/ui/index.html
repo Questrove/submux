@@ -41,12 +41,19 @@
       <section class="panel">
         <div class="panel-heading">
           <div>
-            <p class="eyebrow">ORDINARY TUN</p>
-            <h2>普通 TUN 网络接管</h2>
+            <p class="eyebrow">LOCAL NETWORK</p>
+            <h2>普通 TUN 与 Linux 网关</h2>
           </div>
           <span id="network-state" class="badge">正在读取</span>
         </div>
         <div class="form-grid">
+          <label>
+            运行方式
+            <select id="network-mode">
+              <option value="tun">普通 TUN</option>
+              <option value="gateway">Linux 默认网关</option>
+            </select>
+          </label>
           <label>
             IPv6
             <select id="network-ipv6">
@@ -62,8 +69,32 @@
               <option value="off">不劫持 53 端口</option>
             </select>
           </label>
+          <label>
+            网关 TCP
+            <input id="network-tcp" type="checkbox" checked>
+          </label>
+          <label>
+            网关 UDP
+            <input id="network-udp" type="checkbox" checked>
+          </label>
+          <label>
+            网关主机流量
+            <input id="network-host" type="checkbox">
+          </label>
+          <label>
+            DNS 直连 IPv4/CIDR（每行一个）
+            <textarea id="network-dns-direct" rows="3" placeholder="10.0.0.53/32"></textarea>
+          </label>
+          <label>
+            UDP 直连例外（JSON 数组）
+            <textarea id="network-udp-exceptions" rows="5">[]</textarea>
+          </label>
+          <label>
+            主机直连例外（JSON 数组）
+            <textarea id="network-host-exceptions" rows="5">[]</textarea>
+          </label>
         </div>
-        <p class="muted">默认保留发现的局域网、VPN、容器和更具体路由。勾选“纳入 TUN”后重新预览，才会改变最终计划。</p>
+        <p class="muted">普通 TUN 默认保留更具体路由；Linux 网关默认纳入发现的 LAN 路由。修改勾选或设置后必须重新预览。</p>
         <div id="network-route-list" class="source-list muted">尚未生成网络预览。</div>
         <pre id="network-preview">尚未生成网络预览。</pre>
         <div class="actions">

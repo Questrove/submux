@@ -322,12 +322,25 @@ impl RuntimeBridge {
 
     pub fn preview_network(
         &self,
+        mode: &str,
         ipv6_policy: &str,
         dns_policy: &str,
         capture_route_ids: &[String],
+        capture_tcp: bool,
+        capture_udp: bool,
+        proxy_host_traffic: bool,
+        excluded_route_ids: &[String],
+        udp_exceptions: &[Value],
+        dns_direct_cidrs: &[String],
+        host_exceptions: &[Value],
     ) -> Result<Value, BridgeError> {
-        if !matches!(ipv6_policy, "proxy" | "direct" | "block") {
-            return Err(BridgeError::request("Runtime TUN IPv6 policy is invalid"));
+        if !matches!(mode, "tun" | "gateway") {
+            return Err(BridgeError::request("Runtime network mode is invalid"));
+        }
+        if !matches!(ipv6_policy, "proxy" | "direct" | "block")
+            || (mode == "gateway" && ipv6_policy == "proxy")
+        {
+            return Err(BridgeError::request("Runtime network IPv6 policy is invalid"));
         }
         if !matches!(dns_policy, "hijack" | "off") {
             return Err(BridgeError::request("Runtime TUN DNS policy is invalid"));
@@ -342,14 +355,46 @@ impl RuntimeBridge {
             })
         {
             return Err(BridgeError::request(
-                "Runtime TUN captured route selection is invalid",
+                "Runtime captured route selection is invalid",
+            ));
+        }
+        validate_identifier_list(excluded_route_ids, "Runtime gateway route exclusion")?;
+        if dns_direct_cidrs.len() > 128
+            || dns_direct_cidrs
+                .iter()
+                .any(|value| value.is_empty() || value.len() > 64)
+        {
+            return Err(BridgeError::request(
+                "Runtime gateway DNS direct list is invalid",
+            ));
+        }
+        validate_gateway_exceptions(udp_exceptions, false)?;
+        validate_gateway_exceptions(host_exceptions, true)?;
+        if mode == "tun"
+            && (!excluded_route_ids.is_empty()
+                || !udp_exceptions.is_empty()
+                || !dns_direct_cidrs.is_empty()
+                || !host_exceptions.is_empty()
+                || !capture_tcp
+                || !capture_udp
+                || proxy_host_traffic)
+        {
+            return Err(BridgeError::request(
+                "ordinary TUN does not accept gateway settings",
             ));
         }
         let body = serde_json::to_vec(&json!({
-            "mode": "tun",
+            "mode": mode,
             "ipv6_policy": ipv6_policy,
             "dns_policy": dns_policy,
             "capture_route_ids": capture_route_ids,
+            "capture_tcp": capture_tcp,
+            "capture_udp": capture_udp,
+            "proxy_host_traffic": proxy_host_traffic,
+            "excluded_route_ids": excluded_route_ids,
+            "udp_exceptions": udp_exceptions,
+            "dns_direct_cidrs": dns_direct_cidrs,
+            "host_exceptions": host_exceptions,
         }))
         .map_err(BridgeError::internal)?;
         self.call_json(
@@ -369,6 +414,18 @@ impl RuntimeBridge {
 
     pub fn disable_tun(&self) -> Result<Value, BridgeError> {
         self.execute_action_with_params("network.disable_tun", json!({}))
+    }
+
+    pub fn enable_gateway(&self, plan_id: &str) -> Result<Value, BridgeError> {
+        validate_plan_id(plan_id)?;
+        self.execute_action_with_params(
+            "network.enable_gateway",
+            json!({ "plan_id": plan_id }),
+        )
+    }
+
+    pub fn disable_gateway(&self) -> Result<Value, BridgeError> {
+        self.execute_action_with_params("network.disable_gateway", json!({}))
     }
 
     pub fn apply_candidate(&self, content_id: &str) -> Result<Value, BridgeError> {
@@ -883,6 +940,101 @@ fn validate_operation_id(operation_id: &str) -> Result<(), BridgeError> {
     } else {
         Err(BridgeError::request("Runtime operation ID is invalid"))
     }
+}
+
+fn validate_identifier_list(values: &[String], label: &str) -> Result<(), BridgeError> {
+    let valid = values.len() <= 512
+        && values.iter().all(|value| {
+            value.len() >= 3
+                && value.len() <= 96
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(BridgeError::request(format!("{label} is invalid")))
+    }
+}
+
+fn validate_gateway_exceptions(
+    values: &[Value],
+    allow_uid: bool,
+) -> Result<(), BridgeError> {
+    if values.len() > 128 {
+        return Err(BridgeError::request(
+            "Runtime gateway exception list exceeds 128 entries",
+        ));
+    }
+    for value in values {
+        let object = value
+            .as_object()
+            .ok_or_else(|| BridgeError::request("Runtime gateway exception must be an object"))?;
+        if object.is_empty()
+            || object.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "source_cidr" | "destination_cidr" | "destination_ports" | "uid"
+                )
+            })
+        {
+            return Err(BridgeError::request(
+                "Runtime gateway exception contains invalid fields",
+            ));
+        }
+        for key in ["source_cidr", "destination_cidr"] {
+            if let Some(value) = object.get(key) {
+                let text = value.as_str().ok_or_else(|| {
+                    BridgeError::request("Runtime gateway exception CIDR must be a string")
+                })?;
+                if text.is_empty() || text.len() > 64 {
+                    return Err(BridgeError::request(
+                        "Runtime gateway exception CIDR is invalid",
+                    ));
+                }
+            }
+        }
+        if let Some(ports) = object.get("destination_ports") {
+            let ports = ports.as_array().ok_or_else(|| {
+                BridgeError::request("Runtime gateway destination_ports must be an array")
+            })?;
+            if ports.len() > 128 {
+                return Err(BridgeError::request(
+                    "Runtime gateway destination port list is too large",
+                ));
+            }
+            for port_range in ports {
+                let port_range = port_range.as_object().ok_or_else(|| {
+                    BridgeError::request("Runtime gateway port range must be an object")
+                })?;
+                if port_range
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "start" | "end"))
+                    || port_range
+                        .get("start")
+                        .and_then(Value::as_u64)
+                        .is_none_or(|port| port == 0 || port > 65535)
+                    || port_range
+                        .get("end")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|port| port > 65535)
+                {
+                    return Err(BridgeError::request(
+                        "Runtime gateway port range is invalid",
+                    ));
+                }
+            }
+        }
+        if let Some(uid) = object.get("uid") {
+            if !allow_uid || uid.as_u64().is_none_or(|value| value > u32::MAX.into()) {
+                return Err(BridgeError::request(
+                    "Runtime gateway exception UID is invalid",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_plan_id(plan_id: &str) -> Result<(), BridgeError> {

@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ProtocolVersion = 1
+	ProtocolVersion = 2
 
 	DefaultPlanTTL      = 5 * time.Minute
 	DefaultLeaseTTL     = 10 * time.Second
@@ -22,8 +22,8 @@ const (
 	ReleaseServiceRestart = "service_restart"
 	ReleaseUpdate         = "update"
 
-	OperationPrepare = "prepare_tun"
-	OperationCommit  = "commit_tun"
+	OperationPrepare = "prepare_network"
+	OperationCommit  = "commit_network"
 	OperationRenew   = "renew_lease"
 	OperationRelease = "release"
 )
@@ -51,11 +51,13 @@ type RequestMeta struct {
 	Deadline        time.Time `json:"deadline"`
 }
 
-type PreparedTUN struct {
-	OwnershipID string                 `json:"ownership_id"`
-	Device      string                 `json:"device"`
-	RoutingMark int                    `json:"routing_mark"`
-	Settings    runtimeapi.TUNSettings `json:"settings"`
+type PreparedNetwork struct {
+	OwnershipID     string                      `json:"ownership_id"`
+	Mode            string                      `json:"mode"`
+	Device          string                      `json:"device"`
+	RoutingMark     int                         `json:"routing_mark"`
+	Settings        runtimeapi.TUNSettings      `json:"settings"`
+	GatewaySettings *runtimeapi.GatewaySettings `json:"gateway_settings,omitempty"`
 }
 
 type CommittedResult struct {
@@ -89,9 +91,11 @@ type Ownership struct {
 	Device            string
 	IPv6Available     bool
 	RoutingMark       int
+	CaptureMark       int
 	RouteTable        int
 	RulePriority      int
 	Settings          runtimeapi.TUNSettings
+	GatewaySettings   *runtimeapi.GatewaySettings
 	Routes            []runtimeapi.NetworkRoute
 	Original          map[string]string
 	Objects           []runtimeapi.NetworkObject
@@ -106,14 +110,18 @@ type Ownership struct {
 type SystemPreparation struct {
 	Objects      []runtimeapi.NetworkObject
 	RoutingMark  int
+	CaptureMark  int
 	RouteTable   int
 	RulePriority int
 }
 
 type System interface {
 	Discover(context.Context, runtimeapi.TUNSettings) (Discovery, error)
+	DiscoverGateway(context.Context, runtimeapi.GatewaySettings) (Discovery, error)
 	PrepareTUN(context.Context, Ownership) (SystemPreparation, error)
+	PrepareGateway(context.Context, Ownership) (SystemPreparation, error)
 	ApplyTUN(context.Context, Ownership) ([]runtimeapi.NetworkObject, error)
+	ApplyGateway(context.Context, Ownership) ([]runtimeapi.NetworkObject, error)
 	Cleanup(context.Context, Ownership) ([]runtimeapi.NetworkObject, error)
 	Observe(context.Context, *Ownership) (runtimeapi.NetworkStatus, error)
 }

@@ -39,7 +39,7 @@ type MihomoExecutor struct {
 }
 
 type TUNController interface {
-	Prepare(context.Context, string, string) (runtimenet.PreparedTUN, error)
+	Prepare(context.Context, string, string) (runtimenet.PreparedNetwork, error)
 	Commit(context.Context, string, string) (runtimeapi.NetworkStatus, error)
 	Release(context.Context, string, string, string) (runtimeapi.NetworkStatus, error)
 	Observe(context.Context) (runtimeapi.NetworkStatus, error)
@@ -143,9 +143,13 @@ func (e *MihomoExecutor) Execute(
 	case runtimeapi.ActionStopProxy:
 		return e.stop(ctx, operation, report)
 	case runtimeapi.ActionEnableTUN:
-		return e.enableTUN(ctx, operation, report)
+		return e.enableNetwork(ctx, operation, runtimeapi.RunModeTUN, report)
 	case runtimeapi.ActionDisableTUN:
-		return e.disableTUN(ctx, operation, report)
+		return e.disableNetwork(ctx, operation, runtimeapi.RunModeTUN, report)
+	case runtimeapi.ActionEnableGateway:
+		return e.enableNetwork(ctx, operation, runtimeapi.RunModeGateway, report)
+	case runtimeapi.ActionDisableGateway:
+		return e.disableNetwork(ctx, operation, runtimeapi.RunModeGateway, report)
 	case runtimeapi.ActionAddManagedResource:
 		return e.addManagedResource(operation, report)
 	case runtimeapi.ActionSetAdvancedOverride:
@@ -230,22 +234,23 @@ func (e *MihomoExecutor) FailOpen(ctx context.Context) error {
 	if stateErr != nil {
 		return stateErr
 	}
-	wasTUN := snapshot.RunMode == runtimeapi.RunModeTUN
+	hadTakeover := snapshot.RunMode == runtimeapi.RunModeTUN ||
+		snapshot.RunMode == runtimeapi.RunModeGateway
 	if e.Network == nil {
-		if wasTUN {
-			return errors.New("ordinary TUN fail-open controller is unavailable")
+		if hadTakeover {
+			return errors.New("Runtime network fail-open controller is unavailable")
 		}
 		return nil
 	}
 	if e.TUN != nil {
 		if status, err := e.TUN.Observe(ctx); err == nil {
-			wasTUN = status.OwnershipID != ""
+			hadTakeover = status.OwnershipID != ""
 		}
 	}
 	if err := e.Network.FailOpen(ctx); err != nil {
 		return err
 	}
-	if !wasTUN {
+	if !hadTakeover {
 		return nil
 	}
 	_, err := e.prepareCurrentCandidate(
@@ -1010,15 +1015,19 @@ func (e *MihomoExecutor) start(ctx context.Context, report StageReporter) (*runt
 	}, nil
 }
 
-func (e *MihomoExecutor) enableTUN(
+func (e *MihomoExecutor) enableNetwork(
 	ctx context.Context,
 	operation runtimeapi.Operation,
+	mode string,
 	report StageReporter,
 ) (*runtimeapi.OperationResult, error) {
 	if e.TUN == nil {
 		return nil, errors.New("privileged Runtime network service is unavailable")
 	}
-	if err := report("preparing_tun", 10, false); err != nil {
+	if mode != runtimeapi.RunModeTUN && mode != runtimeapi.RunModeGateway {
+		return nil, errors.New("Runtime network mode is invalid")
+	}
+	if err := report("preparing_network", 10, false); err != nil {
 		return nil, err
 	}
 	wasRunning, err := e.Process.IsRunning(ctx)
@@ -1030,21 +1039,34 @@ func (e *MihomoExecutor) enableTUN(
 		return nil, err
 	}
 	rollback := func(cause error) (*runtimeapi.OperationResult, error) {
-		rollbackErr := e.rollbackPreparedTUN(
+		rollbackErr := e.rollbackPreparedNetwork(
 			prepared,
 			operation.ID+"_rollback",
 			wasRunning,
 		)
 		return nil, errors.Join(cause, rollbackErr)
 	}
-	if err := report("building_tun_candidate", 25, true); err != nil {
+	if prepared.Mode != mode {
+		return rollback(fmt.Errorf(
+			"Runtime network plan prepared mode %s instead of %s",
+			prepared.Mode,
+			mode,
+		))
+	}
+	if err := report("building_network_candidate", 25, true); err != nil {
 		return rollback(err)
+	}
+	ipv6Policy := prepared.Settings.IPv6Policy
+	hijackDNS := prepared.Settings.DNSPolicy == runtimeapi.TUNDNSHijack
+	if prepared.GatewaySettings != nil {
+		ipv6Policy = prepared.GatewaySettings.IPv6Policy
+		hijackDNS = prepared.GatewaySettings.DNSPolicy == runtimeapi.TUNDNSHijack
 	}
 	deployment, err := e.prepareCurrentCandidate(ctx, operation.ID, &mihomo.TUNCandidateSettings{
 		Device:      prepared.Device,
 		RoutingMark: prepared.RoutingMark,
-		IPv6Policy:  prepared.Settings.IPv6Policy,
-		HijackDNS:   prepared.Settings.DNSPolicy == runtimeapi.TUNDNSHijack,
+		IPv6Policy:  ipv6Policy,
+		HijackDNS:   hijackDNS,
 	}, report)
 	if err != nil {
 		return rollback(err)
@@ -1058,22 +1080,23 @@ func (e *MihomoExecutor) enableTUN(
 		deployment.ProxyAddresses = append([]string(nil), started.ProxyAddresses...)
 		deployment.Verified = started.Verified
 	}
-	if err := report("committing_tun_routes", 90, false); err != nil {
+	if err := report("committing_network_takeover", 90, false); err != nil {
 		return rollback(err)
 	}
 	status, err := e.TUN.Commit(ctx, operation.ID, prepared.OwnershipID)
 	if err != nil {
 		return rollback(err)
 	}
-	deployment.RunMode = runtimeapi.RunModeTUN
+	deployment.RunMode = mode
 	deployment.Network = &status
 	deployment.Verified = status.State == runtimeapi.NetworkStateActive
 	return deployment, nil
 }
 
-func (e *MihomoExecutor) disableTUN(
+func (e *MihomoExecutor) disableNetwork(
 	ctx context.Context,
 	operation runtimeapi.Operation,
+	mode string,
 	report StageReporter,
 ) (*runtimeapi.OperationResult, error) {
 	if e.TUN == nil {
@@ -1090,11 +1113,14 @@ func (e *MihomoExecutor) disableTUN(
 			Verified: status.State == runtimeapi.NetworkStateInactive,
 		}, nil
 	}
+	if status.Mode != mode {
+		return nil, fmt.Errorf("active Runtime network mode is %s, not %s", status.Mode, mode)
+	}
 	wasRunning, err := e.Process.IsRunning(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := report("releasing_tun_routes", 20, false); err != nil {
+	if err := report("releasing_network_takeover", 20, false); err != nil {
 		return nil, err
 	}
 	status, err = e.TUN.Release(
@@ -1106,7 +1132,7 @@ func (e *MihomoExecutor) disableTUN(
 	if err != nil {
 		return nil, err
 	}
-	if err := report("stopping_tun_proxy", 45, false); err != nil {
+	if err := report("stopping_network_proxy", 45, false); err != nil {
 		return nil, err
 	}
 	if err := e.Process.Stop(ctx); err != nil {
@@ -1135,16 +1161,16 @@ func (e *MihomoExecutor) stop(
 	operation runtimeapi.Operation,
 	report StageReporter,
 ) (*runtimeapi.OperationResult, error) {
-	wasTUN := false
+	hadTakeover := false
 	var networkStatus *runtimeapi.NetworkStatus
 	if e.TUN != nil {
 		status, observeErr := e.TUN.Observe(ctx)
 		if observeErr == nil {
-			wasTUN = status.OwnershipID != ""
+			hadTakeover = status.OwnershipID != ""
 			networkStatus = &status
 		} else {
 			return nil, fmt.Errorf(
-				"cannot stop Mihomo while ordinary TUN ownership is unavailable: %w",
+				"cannot stop Mihomo while Runtime network ownership is unavailable: %w",
 				observeErr,
 			)
 		}
@@ -1153,15 +1179,16 @@ func (e *MihomoExecutor) stop(
 		if stateErr != nil {
 			return nil, stateErr
 		}
-		if snapshot.RunMode == runtimeapi.RunModeTUN {
+		if snapshot.RunMode == runtimeapi.RunModeTUN ||
+			snapshot.RunMode == runtimeapi.RunModeGateway {
 			return nil, errors.New("cannot stop Mihomo without the privileged Runtime network controller")
 		}
 	}
-	if wasTUN {
+	if hadTakeover {
 		if e.Network == nil {
 			return nil, errors.New("cannot stop Mihomo without the privileged Runtime network fail-open controller")
 		}
-		if err := report("releasing_tun_routes", 35, false); err != nil {
+		if err := report("releasing_network_takeover", 35, false); err != nil {
 			return nil, err
 		}
 		if err := e.Network.FailOpen(ctx); err != nil {
@@ -1179,7 +1206,7 @@ func (e *MihomoExecutor) stop(
 	if err := e.Process.Stop(ctx); err != nil {
 		return nil, err
 	}
-	if wasTUN {
+	if hadTakeover {
 		if _, err := e.prepareCurrentCandidate(
 			ctx,
 			operation.ID+"_explicit",
@@ -1226,8 +1253,8 @@ func (e *MihomoExecutor) prepareCurrentCandidate(
 	)
 }
 
-func (e *MihomoExecutor) rollbackPreparedTUN(
-	prepared runtimenet.PreparedTUN,
+func (e *MihomoExecutor) rollbackPreparedNetwork(
+	prepared runtimenet.PreparedNetwork,
 	operationID string,
 	wasRunning bool,
 ) error {

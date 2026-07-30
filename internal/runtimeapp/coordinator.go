@@ -124,7 +124,8 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 	}
 	if network.State == runtimeapi.NetworkStateActive {
 		snapshot.RunMode = network.Mode
-	} else if snapshot.RunMode == runtimeapi.RunModeTUN {
+	} else if snapshot.RunMode == runtimeapi.RunModeTUN ||
+		snapshot.RunMode == runtimeapi.RunModeGateway {
 		snapshot.RunMode = runtimeapi.RunModeExplicit
 	}
 	return snapshot, nil
@@ -642,8 +643,10 @@ func (c *Coordinator) now() time.Time {
 }
 
 func validateAction(action runtimeapi.Action) error {
-	if action.Kind != runtimeapi.ActionEnableTUN && action.Params.PlanID != "" {
-		return errors.New("plan_id is only accepted by network.enable_tun")
+	if action.Kind != runtimeapi.ActionEnableTUN &&
+		action.Kind != runtimeapi.ActionEnableGateway &&
+		action.Params.PlanID != "" {
+		return errors.New("plan_id is only accepted by a network enable action")
 	}
 	switch action.Kind {
 	case runtimeapi.ActionApplyImportedConfig:
@@ -672,7 +675,7 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.PlanID != "" {
 			return errors.New("proxy start and stop do not accept parameters")
 		}
-	case runtimeapi.ActionEnableTUN:
+	case runtimeapi.ActionEnableTUN, runtimeapi.ActionEnableGateway:
 		if !validPlanID(action.Params.PlanID) ||
 			action.Params.ContentID != "" ||
 			action.Params.SourceID != "" ||
@@ -682,9 +685,9 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
-			return errors.New("network.enable_tun requires only a valid plan_id")
+			return errors.New("network enable requires only a valid plan_id")
 		}
-	case runtimeapi.ActionDisableTUN:
+	case runtimeapi.ActionDisableTUN, runtimeapi.ActionDisableGateway:
 		if action.Params.PlanID != "" ||
 			action.Params.ContentID != "" ||
 			action.Params.SourceID != "" ||
@@ -694,7 +697,7 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.Confirm ||
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
-			return errors.New("network.disable_tun does not accept parameters")
+			return errors.New("network disable does not accept parameters")
 		}
 	case runtimeapi.ActionAddRemoteSource:
 		if !validContentID(action.Params.ContentID) ||
@@ -863,6 +866,10 @@ func publicExecutionMessage(kind string) string {
 		return "Runtime could not enable ordinary TUN networking"
 	case runtimeapi.ActionDisableTUN:
 		return "Runtime could not disable ordinary TUN networking"
+	case runtimeapi.ActionEnableGateway:
+		return "Runtime could not enable Linux gateway networking"
+	case runtimeapi.ActionDisableGateway:
+		return "Runtime could not disable Linux gateway networking"
 	case runtimeapi.ActionAddRemoteSource:
 		return "Runtime could not add the remote configuration source"
 	case runtimeapi.ActionAddImportedSource:

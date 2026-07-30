@@ -22,7 +22,7 @@ jobs:
       - name: Test
         run: go test ./... -count=1
 
-      - name: Linux ordinary TUN network namespace
+      - name: Linux Runtime network namespaces
         run: |
           sudo apt-get update
           sudo apt-get install --yes nftables
@@ -31,7 +31,7 @@ jobs:
           sudo env SUBMUX_RUN_PRIVILEGED_NETNS_TESTS=1 \
             /tmp/submux-runtimenet.test \
             -test.v \
-            -test.run '^TestLinuxNetworkNamespaceOrdinaryTUN$'
+            -test.run '^TestLinuxNetworkNamespace(OrdinaryTUN|Gateway|GatewaySingleArm)$'
 
       - name: Build (static, CGO_ENABLED=0)
         run: |

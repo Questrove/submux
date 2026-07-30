@@ -38,26 +38,27 @@ type NetworkClient interface {
 }
 
 type Model struct {
-	ctx              context.Context
-	client           Client
-	editor           textarea.Model
-	editing          bool
-	editorMode       string
-	busy             bool
-	width            int
-	height           int
-	snapshot         runtimeapi.Snapshot
-	selectedSourceID string
-	preview          runtimeapi.CandidatePreview
-	networkPreview   runtimeapi.NetworkPreview
-	lastOperation    runtimeapi.Operation
-	verification     runtimeapi.ProxyVerification
-	status           string
-	err              error
-	sensitiveConfirm string
-	revealedURL      string
-	diagnostics      runtimeapi.DiagnosticsPreview
-	diagnosticsFile  runtimeapi.DiagnosticsResult
+	ctx               context.Context
+	client            Client
+	editor            textarea.Model
+	editing           bool
+	editorMode        string
+	busy              bool
+	width             int
+	height            int
+	snapshot          runtimeapi.Snapshot
+	selectedSourceID  string
+	preview           runtimeapi.CandidatePreview
+	networkPreview    runtimeapi.NetworkPreview
+	networkEditorMode string
+	lastOperation     runtimeapi.Operation
+	verification      runtimeapi.ProxyVerification
+	status            string
+	err               error
+	sensitiveConfirm  string
+	revealedURL       string
+	diagnostics       runtimeapi.DiagnosticsPreview
+	diagnosticsFile   runtimeapi.DiagnosticsResult
 }
 
 const (
@@ -263,7 +264,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.editing = false
 		m.err = nil
 		m.editor.Blur()
-		m.status = fmt.Sprintf("普通 TUN 预览已生成：%s", message.preview.PlanID)
+		m.status = fmt.Sprintf("%s 网络预览已生成：%s", message.preview.Mode, message.preview.PlanID)
 	case errMsg:
 		m.busy = false
 		m.err = message.err
@@ -293,12 +294,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					var request runtimeapi.NetworkPreviewRequest
 					if err := json.Unmarshal(body, &request); err != nil {
 						m.busy = false
-						m.err = errors.New("普通 TUN 设置必须是有效 JSON")
+						m.err = errors.New("网络设置必须是有效 JSON")
 						m.status = m.err.Error()
 						return m, nil
 					}
-					request.Mode = runtimeapi.RunModeTUN
-					m.status = "正在生成普通 TUN 网络预览…"
+					if request.Mode == "" {
+						request.Mode = m.networkEditorMode
+						if request.Mode == "" {
+							request.Mode = runtimeapi.RunModeTUN
+						}
+					}
+					if request.Mode != runtimeapi.RunModeTUN &&
+						request.Mode != runtimeapi.RunModeGateway {
+						m.busy = false
+						m.err = errors.New("网络设置 mode 必须是 tun 或 gateway")
+						m.status = m.err.Error()
+						return m, nil
+					}
+					m.status = "正在生成网络预览…"
 					return m, m.previewNetworkCmd(request)
 				}
 				if m.editorMode == editorModeSource {
@@ -512,39 +525,56 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+t":
 			m.editing = true
 			m.editorMode = editorModeNetwork
+			m.networkEditorMode = runtimeapi.RunModeTUN
 			m.err = nil
 			m.editor.SetValue(defaultNetworkDraft())
 			m.status = "编辑普通 TUN 设置后按 Ctrl+S 预览，Esc 取消"
 			return m, m.editor.Focus()
+		case "ctrl+l":
+			m.editing = true
+			m.editorMode = editorModeNetwork
+			m.networkEditorMode = runtimeapi.RunModeGateway
+			m.err = nil
+			m.editor.SetValue(defaultGatewayDraft())
+			m.status = "编辑 Linux 网关设置后按 Ctrl+S 预览，Esc 取消"
+			return m, m.editor.Focus()
 		case "ctrl+e":
 			if m.networkPreview.PlanID == "" {
-				m.err = errors.New("请先用 Ctrl+T 生成普通 TUN 预览")
+				m.err = errors.New("请先生成网络预览")
 				m.status = m.err.Error()
 				return m, nil
 			}
 			if !m.networkPreview.ExpiresAt.IsZero() && !time.Now().Before(m.networkPreview.ExpiresAt) {
 				m.networkPreview.PlanID = ""
-				m.err = errors.New("普通 TUN 预览已经过期，请重新预览")
+				m.err = errors.New("网络预览已经过期，请重新预览")
 				m.status = m.err.Error()
 				return m, nil
 			}
 			if len(m.networkPreview.Conflicts) > 0 {
-				m.err = errors.New("普通 TUN 预览存在网络冲突，解决后请重新预览")
+				m.err = errors.New("网络预览存在冲突，解决后请重新预览")
 				m.status = m.err.Error()
 				return m, nil
 			}
 			m.busy = true
-			m.status = "正在提交普通 TUN 启用操作…"
+			m.status = "正在提交网络接管启用操作…"
+			actionKind := runtimeapi.ActionEnableTUN
+			if m.networkPreview.Mode == runtimeapi.RunModeGateway {
+				actionKind = runtimeapi.ActionEnableGateway
+			}
 			return m, m.executeCmd(runtimeapi.Action{
-				Kind: runtimeapi.ActionEnableTUN,
+				Kind: actionKind,
 				Params: runtimeapi.ActionParams{
 					PlanID: m.networkPreview.PlanID,
 				},
 			})
 		case "ctrl+x":
 			m.busy = true
-			m.status = "正在提交普通 TUN 停用操作…"
-			return m, m.executeCmd(runtimeapi.Action{Kind: runtimeapi.ActionDisableTUN})
+			m.status = "正在提交网络接管停用操作…"
+			actionKind := runtimeapi.ActionDisableTUN
+			if m.snapshot.Network.Mode == runtimeapi.RunModeGateway {
+				actionKind = runtimeapi.ActionDisableGateway
+			}
+			return m, m.executeCmd(runtimeapi.Action{Kind: actionKind})
 		case "y":
 			sourceID := m.selectedSource()
 			if sourceID == "" {
@@ -675,6 +705,9 @@ func (m Model) View() tea.View {
 			editorHelp = "Ctrl+P 预览 · Ctrl+S 校验并保存 · Esc 取消；Runtime 保留字段不能覆盖"
 		} else if m.editorMode == editorModeNetwork {
 			editorTitle = "Submux Runtime · 普通 TUN 设置"
+			if m.networkEditorMode == runtimeapi.RunModeGateway {
+				editorTitle = "Submux Runtime · Linux 网关设置"
+			}
 			editorHelp = "Ctrl+S 生成真实网络预览 · Esc 取消；IPv6 必须明确选择 proxy、direct 或 block"
 		}
 		content := strings.Join([]string{
@@ -698,13 +731,25 @@ func (m Model) View() tea.View {
 		nextRestart = m.snapshot.Mihomo.NextRestartAt.Local().Format(time.RFC3339)
 	}
 	runMode := valueOr(m.snapshot.RunMode, "未配置")
+	networkMode := valueOr(m.snapshot.Network.Mode, "未配置")
+	if m.snapshot.Network.PreviewOnly {
+		networkMode += "（预览）"
+	}
 	lines := []string{
 		titleStyle.Render("Submux Runtime"),
 		"",
 		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("Runtime"), runtimeVersion, labelStyle.Render("服务"), serviceState),
 		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("Mihomo 实际"), mihomoState, labelStyle.Render("期望"), mihomoDesired),
 		fmt.Sprintf("%s %s  %s %s", labelStyle.Render("崩溃恢复"), mihomoRecovery, labelStyle.Render("运行方式"), runMode),
-		fmt.Sprintf("%s %s  %s %t", labelStyle.Render("网络接管"), valueOr(m.snapshot.Network.State, "未知"), labelStyle.Render("特权服务"), m.snapshot.Network.Available),
+		fmt.Sprintf(
+			"%s %s · %s%s  %s %t",
+			labelStyle.Render("网络接管"),
+			valueOr(m.snapshot.Network.State, "未知"),
+			networkMode,
+			networkDeviceSuffix(m.snapshot.Network.Device),
+			labelStyle.Render("特权服务"),
+			m.snapshot.Network.Available,
+		),
 		fmt.Sprintf("%s %d  %s %s", labelStyle.Render("重试次数"), m.snapshot.Mihomo.CrashAttempts, labelStyle.Render("下次重试"), nextRestart),
 		fmt.Sprintf("%s %d  %s %d", labelStyle.Render("Revision"), m.snapshot.Revision, labelStyle.Render("队列"), m.snapshot.Operations.Queued),
 	}
@@ -740,18 +785,52 @@ func (m Model) View() tea.View {
 			)))
 		}
 	}
+	if m.snapshot.Network.GatewaySettings != nil {
+		lines = append(lines, fmt.Sprintf(
+			"%s IPv6 %s · DNS %s · TCP %t · UDP %t · 主机 %t",
+			labelStyle.Render("网关设置"),
+			m.snapshot.Network.GatewaySettings.IPv6Policy,
+			m.snapshot.Network.GatewaySettings.DNSPolicy,
+			m.snapshot.Network.GatewaySettings.CaptureTCP,
+			m.snapshot.Network.GatewaySettings.CaptureUDP,
+			m.snapshot.Network.GatewaySettings.ProxyHostTraffic,
+		))
+	}
 	if m.networkPreview.PlanID != "" {
+		previewMode := m.networkPreview.Mode
+		if m.networkPreview.PreviewOnly {
+			previewMode += "（预览）"
+		}
+		previewSettings := fmt.Sprintf(
+			"%s · %s · IPv6 %s · DNS %s",
+			m.networkPreview.PlanID,
+			m.networkPreview.Device,
+			m.networkPreview.Settings.IPv6Policy,
+			m.networkPreview.Settings.DNSPolicy,
+		)
+		if m.networkPreview.GatewaySettings != nil {
+			previewSettings = fmt.Sprintf(
+				"%s · %s · IPv6 %s · DNS %s · TCP %t · UDP %t · 主机 %t",
+				m.networkPreview.PlanID,
+				m.networkPreview.Device,
+				m.networkPreview.GatewaySettings.IPv6Policy,
+				m.networkPreview.GatewaySettings.DNSPolicy,
+				m.networkPreview.GatewaySettings.CaptureTCP,
+				m.networkPreview.GatewaySettings.CaptureUDP,
+				m.networkPreview.GatewaySettings.ProxyHostTraffic,
+			)
+		}
 		lines = append(lines,
 			"",
-			labelStyle.Render("普通 TUN 预览"),
-			fmt.Sprintf("%s · IPv6 %s · DNS %s", m.networkPreview.PlanID, m.networkPreview.Settings.IPv6Policy, m.networkPreview.Settings.DNSPolicy),
+			labelStyle.Render(previewMode+" 网络预览"),
+			previewSettings,
 		)
 		for _, route := range m.networkPreview.Routes {
 			disposition := "绕过"
 			if !route.Bypass {
 				disposition = "接管"
 			}
-			lines = append(lines, fmt.Sprintf("%s · %s · %s · %s", route.ID, route.CIDR, route.Interface, disposition))
+			lines = append(lines, fmt.Sprintf("%s · %s · %s · %s · %s", route.ID, route.CIDR, route.Interface, route.Role, disposition))
 		}
 		for _, conflict := range m.networkPreview.Conflicts {
 			lines = append(lines, errorStyle.Render("冲突："+conflict.Detail))
@@ -842,7 +921,7 @@ func (m Model) View() tea.View {
 		renderStatus(m.status, m.err, m.busy),
 		"",
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
-		mutedStyle.Render("Ctrl+T 编辑/预览普通 TUN · Ctrl+E 启用 TUN · Ctrl+X 停用 TUN · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		mutedStyle.Render("Ctrl+T 编辑/预览普通 TUN · Ctrl+L 编辑/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -1249,6 +1328,13 @@ func valueOr(value, fallback string) string {
 	return value
 }
 
+func networkDeviceSuffix(device string) string {
+	if device == "" {
+		return ""
+	}
+	return " · " + device
+}
+
 func shortDigest(value string) string {
 	if len(value) <= 12 {
 		return value
@@ -1302,8 +1388,24 @@ func defaultResourceDraft() string {
 
 func defaultNetworkDraft() string {
 	return `{
+  "mode": "tun",
   "ipv6_policy": "proxy",
   "dns_policy": "hijack",
   "capture_route_ids": []
+}`
+}
+
+func defaultGatewayDraft() string {
+	return `{
+  "mode": "gateway",
+  "ipv6_policy": "direct",
+  "dns_policy": "hijack",
+  "capture_tcp": true,
+  "capture_udp": true,
+  "proxy_host_traffic": false,
+  "excluded_route_ids": [],
+  "udp_exceptions": [],
+  "dns_direct_cidrs": [],
+  "host_exceptions": []
 }`
 }

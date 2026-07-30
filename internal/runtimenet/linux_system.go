@@ -331,6 +331,9 @@ func (system *LinuxSystem) Cleanup(
 	ctx context.Context,
 	ownership Ownership,
 ) ([]runtimeapi.NetworkObject, error) {
+	if ownership.Mode == runtimeapi.RunModeGateway {
+		return system.cleanupGateway(ctx, ownership)
+	}
 	if err := system.validatePreparedOwnership(ownership); err != nil {
 		return nil, err
 	}
@@ -374,7 +377,7 @@ func (system *LinuxSystem) Observe(
 		return runtimeapi.NetworkStatus{}, err
 	}
 	if ownership == nil {
-		link, exists, err := system.link(ctx, linuxTUNDevice)
+		links, err := system.links(ctx)
 		if err != nil {
 			return runtimeapi.NetworkStatus{}, err
 		}
@@ -382,15 +385,21 @@ func (system *LinuxSystem) Observe(
 			Mode:  runtimeapi.RunModeExplicit,
 			State: runtimeapi.NetworkStateInactive,
 		}
-		if exists {
+		for _, link := range links {
+			if link.Name != linuxTUNDevice && link.Name != linuxGatewayTUNDevice {
+				continue
+			}
 			status.State = runtimeapi.NetworkStateConflict
-			status.Conflicts = []runtimeapi.NetworkConflict{{
+			status.Conflicts = append(status.Conflicts, runtimeapi.NetworkConflict{
 				Kind:   "tun_name",
 				Owner:  link.Alias,
-				Detail: "TUN device smxtun0 exists without active Runtime ownership",
-			}}
+				Detail: fmt.Sprintf("TUN device %s exists without active Runtime ownership", link.Name),
+			})
 		}
 		return status, nil
+	}
+	if ownership.Mode == runtimeapi.RunModeGateway {
+		return system.observeGateway(ctx, *ownership)
 	}
 	if err := system.validatePreparedOwnership(*ownership); err != nil {
 		return runtimeapi.NetworkStatus{}, err
@@ -869,19 +878,39 @@ func (system *LinuxSystem) routesInTable(
 }
 
 func (system *LinuxSystem) deleteOwnedNFT(ctx context.Context, token string) error {
-	body, err := system.run(ctx, nil,
-		"nft", "list", "table", "inet", linuxNFTTable(token),
-	)
+	body, err := system.run(ctx, nil, "nft", "-j", "list", "tables")
 	if err != nil {
-		return nil
+		return err
 	}
-	if !bytes.Contains(body, []byte(linuxOwnershipAlias(token))) {
-		return errors.New("ordinary TUN nftables table ownership changed; cleanup refused")
+	var listing struct {
+		NFTables []struct {
+			Table *struct {
+				Family  string `json:"family"`
+				Name    string `json:"name"`
+				Comment string `json:"comment"`
+			} `json:"table,omitempty"`
+		} `json:"nftables"`
 	}
-	_, err = system.run(ctx, nil,
-		"nft", "delete", "table", "inet", linuxNFTTable(token),
-	)
-	return err
+	if err := json.Unmarshal(body, &listing); err != nil {
+		return errors.New("Linux nftables table discovery returned invalid JSON")
+	}
+	expectedName := linuxNFTTable(token)
+	expectedComment := linuxOwnershipAlias(token)
+	for _, object := range listing.NFTables {
+		if object.Table == nil ||
+			object.Table.Family != "inet" ||
+			object.Table.Name != expectedName {
+			continue
+		}
+		if object.Table.Comment != expectedComment {
+			return errors.New("Runtime nftables table ownership changed; cleanup refused")
+		}
+		_, err = system.run(ctx, nil,
+			"nft", "delete", "table", "inet", expectedName,
+		)
+		return err
+	}
+	return nil
 }
 
 func (system *LinuxSystem) routes(ctx context.Context, family string) ([]linuxRoute, error) {
@@ -1009,13 +1038,13 @@ func linuxIPv6BlockRules(token string) string {
 	table := linuxNFTTable(token)
 	comment := linuxOwnershipAlias(token)
 	return fmt.Sprintf(
-		"add table inet %s\n"+
+		"add table inet %s { comment %q; }\n"+
 			"add chain inet %s output { type filter hook output priority -150; policy accept; }\n"+
 			"add rule inet %s output ip6 daddr ::1 accept\n"+
 			"add rule inet %s output ip6 daddr fe80::/10 accept\n"+
 			"add rule inet %s output ip6 daddr ff00::/8 accept\n"+
 			"add rule inet %s output meta nfproto ipv6 counter drop comment \"%s\"\n",
-		table, table, table, table, table, table, comment,
+		table, comment, table, table, table, table, table, comment,
 	)
 }
 

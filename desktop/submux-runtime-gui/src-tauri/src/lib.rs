@@ -144,11 +144,31 @@ fn runtime_stop_proxy(bridge: State<'_, RuntimeBridge>) -> Result<Value, BridgeE
 #[tauri::command]
 fn runtime_preview_network(
     bridge: State<'_, RuntimeBridge>,
+    mode: String,
     ipv6_policy: String,
     dns_policy: String,
     capture_route_ids: Vec<String>,
+    capture_tcp: bool,
+    capture_udp: bool,
+    proxy_host_traffic: bool,
+    excluded_route_ids: Vec<String>,
+    udp_exceptions: Vec<Value>,
+    dns_direct_cidrs: Vec<String>,
+    host_exceptions: Vec<Value>,
 ) -> Result<Value, BridgeError> {
-    bridge.preview_network(&ipv6_policy, &dns_policy, &capture_route_ids)
+    bridge.preview_network(
+        &mode,
+        &ipv6_policy,
+        &dns_policy,
+        &capture_route_ids,
+        capture_tcp,
+        capture_udp,
+        proxy_host_traffic,
+        &excluded_route_ids,
+        &udp_exceptions,
+        &dns_direct_cidrs,
+        &host_exceptions,
+    )
 }
 
 #[tauri::command]
@@ -162,6 +182,19 @@ fn runtime_enable_tun(
 #[tauri::command]
 fn runtime_disable_tun(bridge: State<'_, RuntimeBridge>) -> Result<Value, BridgeError> {
     bridge.disable_tun()
+}
+
+#[tauri::command]
+fn runtime_enable_gateway(
+    bridge: State<'_, RuntimeBridge>,
+    plan_id: String,
+) -> Result<Value, BridgeError> {
+    bridge.enable_gateway(&plan_id)
+}
+
+#[tauri::command]
+fn runtime_disable_gateway(bridge: State<'_, RuntimeBridge>) -> Result<Value, BridgeError> {
+    bridge.disable_gateway()
 }
 
 #[tauri::command]
@@ -259,6 +292,8 @@ pub fn run() {
             runtime_preview_network,
             runtime_enable_tun,
             runtime_disable_tun,
+            runtime_enable_gateway,
+            runtime_disable_gateway,
             runtime_get_operation,
             runtime_wait_operation,
             runtime_cancel_operation,

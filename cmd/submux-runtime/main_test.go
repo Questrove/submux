@@ -77,14 +77,51 @@ type commandExecutor struct {
 }
 
 type commandNetwork struct {
-	mu     sync.Mutex
-	active bool
+	mu             sync.Mutex
+	active         bool
+	mode           string
+	pendingMode    string
+	gatewaySetting *runtimeapi.GatewaySettings
 }
 
 func (network *commandNetwork) Preview(
 	_ context.Context,
 	request runtimeapi.NetworkPreviewRequest,
 ) (runtimeapi.NetworkPreview, error) {
+	network.mu.Lock()
+	defer network.mu.Unlock()
+	network.pendingMode = request.Mode
+	if request.Mode == runtimeapi.RunModeGateway {
+		captureTCP := request.CaptureTCP == nil || *request.CaptureTCP
+		captureUDP := request.CaptureUDP == nil || *request.CaptureUDP
+		network.gatewaySetting = &runtimeapi.GatewaySettings{
+			IPv6Policy:       request.IPv6Policy,
+			DNSPolicy:        request.DNSPolicy,
+			CaptureTCP:       captureTCP,
+			CaptureUDP:       captureUDP,
+			ProxyHostTraffic: request.ProxyHostTraffic,
+			ExcludedRouteIDs: append([]string(nil), request.ExcludedRouteIDs...),
+			UDPExceptions:    append([]runtimeapi.GatewayTrafficException(nil), request.UDPExceptions...),
+			DNSDirectCIDRs:   append([]string(nil), request.DNSDirectCIDRs...),
+			HostExceptions:   append([]runtimeapi.GatewayTrafficException(nil), request.HostExceptions...),
+		}
+		return runtimeapi.NetworkPreview{
+			PlanID:          "plan_0123456789abcdef0123456789abcdef",
+			Mode:            runtimeapi.RunModeGateway,
+			Device:          "smxgw0",
+			GatewaySettings: network.gatewaySetting,
+			Routes: []runtimeapi.NetworkRoute{{
+				ID:        "route_lan",
+				Family:    "ipv4",
+				CIDR:      "192.168.1.0/24",
+				Interface: "lan0",
+				Role:      runtimeapi.NetworkRouteRoleGatewayLAN,
+				Bypass:    len(request.ExcludedRouteIDs) > 0,
+			}},
+			ExpiresAt:  time.Now().UTC().Add(5 * time.Minute),
+			ObservedAt: time.Now().UTC(),
+		}, nil
+	}
 	return runtimeapi.NetworkPreview{
 		PlanID: "plan_0123456789abcdef0123456789abcdef",
 		Mode:   runtimeapi.RunModeTUN,
@@ -116,9 +153,14 @@ func (network *commandNetwork) Observe(context.Context) (runtimeapi.NetworkStatu
 		ObservedAt: time.Now().UTC(),
 	}
 	if network.active {
-		status.Mode = runtimeapi.RunModeTUN
+		status.Mode = network.mode
 		status.State = runtimeapi.NetworkStateActive
 		status.Device = "smxtun0"
+		if network.mode == runtimeapi.RunModeGateway {
+			status.Device = "smxgw0"
+			settings := *network.gatewaySetting
+			status.GatewaySettings = &settings
+		}
 		status.OwnershipID = "net_0123456789abcdef"
 	}
 	return status, nil
@@ -142,8 +184,16 @@ func (executor commandNetworkExecutor) Execute(
 	switch operation.Action.Kind {
 	case runtimeapi.ActionEnableTUN:
 		executor.network.active = true
+		executor.network.mode = runtimeapi.RunModeTUN
 		result.RunMode = runtimeapi.RunModeTUN
 	case runtimeapi.ActionDisableTUN:
+		executor.network.active = false
+		result.RunMode = runtimeapi.RunModeExplicit
+	case runtimeapi.ActionEnableGateway:
+		executor.network.active = true
+		executor.network.mode = runtimeapi.RunModeGateway
+		result.RunMode = runtimeapi.RunModeGateway
+	case runtimeapi.ActionDisableGateway:
 		executor.network.active = false
 		result.RunMode = runtimeapi.RunModeExplicit
 	}
@@ -845,6 +895,81 @@ func TestNetworkPreviewEnableStatusAndDisableCLI(t *testing.T) {
 		disabled.Operation.State != runtimeapi.OperationSucceeded ||
 		disabled.Operation.Action.Kind != runtimeapi.ActionDisableTUN {
 		t.Fatalf("network disable exit=%d operation=%#v stdout=%s stderr=%s", exitCode, disabled, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runNetwork([]string{
+		"preview",
+		"--endpoint", endpoint,
+		"--mode", runtimeapi.RunModeGateway,
+		"--ipv6", runtimeapi.TUNIPv6Block,
+		"--dns", runtimeapi.TUNDNSHijack,
+		"--udp=false",
+		"--proxy-host",
+		"--exclude-route", "route_lan",
+		"--dns-direct", "10.0.0.53/32",
+		"--udp-exception", `{"destination_cidr":"203.0.113.0/24","destination_ports":[{"start":443,"end":443}]}`,
+		"--host-exception", `{"uid":2001}`,
+		"--json",
+	}, &stdout, &stderr)
+	preview = runtimeapi.NetworkPreview{}
+	if exitCode != 0 || json.Unmarshal(stdout.Bytes(), &preview) != nil ||
+		preview.Mode != runtimeapi.RunModeGateway ||
+		preview.GatewaySettings == nil ||
+		preview.GatewaySettings.CaptureUDP ||
+		!preview.GatewaySettings.ProxyHostTraffic ||
+		len(preview.GatewaySettings.ExcludedRouteIDs) != 1 ||
+		len(preview.GatewaySettings.UDPExceptions) != 1 ||
+		len(preview.GatewaySettings.DNSDirectCIDRs) != 1 ||
+		len(preview.GatewaySettings.HostExceptions) != 1 {
+		t.Fatalf("gateway preview exit=%d preview=%#v stdout=%s stderr=%s", exitCode, preview, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runNetwork([]string{
+		"enable",
+		"--endpoint", endpoint,
+		"--mode", runtimeapi.RunModeGateway,
+		"--plan-id", preview.PlanID,
+		"--wait",
+		"--json",
+	}, &stdout, &stderr)
+	enabled = runtimeapi.OperationResponse{}
+	if exitCode != 0 || json.Unmarshal(stdout.Bytes(), &enabled) != nil ||
+		enabled.Operation.State != runtimeapi.OperationSucceeded ||
+		enabled.Operation.Action.Kind != runtimeapi.ActionEnableGateway {
+		t.Fatalf("gateway enable exit=%d operation=%#v stdout=%s stderr=%s", exitCode, enabled, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runNetwork([]string{"status", "--endpoint", endpoint, "--json"}, &stdout, &stderr)
+	status = runtimeapi.NetworkStatus{}
+	if exitCode != 0 || json.Unmarshal(stdout.Bytes(), &status) != nil ||
+		status.State != runtimeapi.NetworkStateActive ||
+		status.Mode != runtimeapi.RunModeGateway ||
+		status.Device != "smxgw0" ||
+		status.GatewaySettings == nil ||
+		status.GatewaySettings.CaptureUDP {
+		t.Fatalf("gateway status exit=%d status=%#v stdout=%s stderr=%s", exitCode, status, stdout.String(), stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	exitCode = runNetwork([]string{
+		"disable",
+		"--endpoint", endpoint,
+		"--mode", runtimeapi.RunModeGateway,
+		"--wait",
+		"--json",
+	}, &stdout, &stderr)
+	disabled = runtimeapi.OperationResponse{}
+	if exitCode != 0 || json.Unmarshal(stdout.Bytes(), &disabled) != nil ||
+		disabled.Operation.State != runtimeapi.OperationSucceeded ||
+		disabled.Operation.Action.Kind != runtimeapi.ActionDisableGateway {
+		t.Fatalf("gateway disable exit=%d operation=%#v stdout=%s stderr=%s", exitCode, disabled, stdout.String(), stderr.String())
 	}
 
 	stdout.Reset()

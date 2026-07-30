@@ -30,6 +30,15 @@ func (system *fakeSystem) Discover(context.Context, runtimeapi.TUNSettings) (Dis
 	return system.discovery, nil
 }
 
+func (system *fakeSystem) DiscoverGateway(
+	context.Context,
+	runtimeapi.GatewaySettings,
+) (Discovery, error) {
+	system.mu.Lock()
+	defer system.mu.Unlock()
+	return system.discovery, nil
+}
+
 func (system *fakeSystem) PrepareTUN(context.Context, Ownership) (SystemPreparation, error) {
 	system.mu.Lock()
 	defer system.mu.Unlock()
@@ -47,6 +56,13 @@ func (system *fakeSystem) PrepareTUN(context.Context, Ownership) (SystemPreparat
 	}, nil
 }
 
+func (system *fakeSystem) PrepareGateway(
+	ctx context.Context,
+	ownership Ownership,
+) (SystemPreparation, error) {
+	return system.PrepareTUN(ctx, ownership)
+}
+
 func (system *fakeSystem) ApplyTUN(context.Context, Ownership) ([]runtimeapi.NetworkObject, error) {
 	system.mu.Lock()
 	defer system.mu.Unlock()
@@ -58,6 +74,13 @@ func (system *fakeSystem) ApplyTUN(context.Context, Ownership) ([]runtimeapi.Net
 		Name:  "table-20220",
 		State: runtimeapi.NetworkStateActive,
 	}}, nil
+}
+
+func (system *fakeSystem) ApplyGateway(
+	ctx context.Context,
+	ownership Ownership,
+) ([]runtimeapi.NetworkObject, error) {
+	return system.ApplyTUN(ctx, ownership)
 }
 
 func (system *fakeSystem) Cleanup(context.Context, Ownership) ([]runtimeapi.NetworkObject, error) {
@@ -158,6 +181,97 @@ func TestManagerPreviewPrepareCommitRenewReleaseAndReplayProtection(t *testing.T
 	result, err := manager.Result(reconnected.ID, operationID, OperationCommit)
 	if err != nil || result.Sequence != 2 || result.OwnershipID != prepared.OwnershipID {
 		t.Fatalf("query committed Runtime network result=%#v err=%v", result, err)
+	}
+}
+
+func TestManagerGatewayPreviewUsesTypedSettingsAndModeSpecificLifecycle(t *testing.T) {
+	now := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+	system := &fakeSystem{discovery: Discovery{
+		Device:        linuxGatewayTUNDevice,
+		IPv6Available: true,
+		Routes: []runtimeapi.NetworkRoute{{
+			ID:        "route_lan",
+			Family:    "ipv4",
+			CIDR:      "10.0.0.0/24",
+			Interface: "lan0",
+			Role:      runtimeapi.NetworkRouteRoleGatewayLAN,
+		}, {
+			ID:        "route_container",
+			Family:    "ipv4",
+			CIDR:      "172.18.0.0/16",
+			Interface: "docker0",
+			Role:      runtimeapi.NetworkRouteRoleGatewayLAN,
+		}, {
+			ID:        "route_wan",
+			Family:    "ipv4",
+			CIDR:      "0.0.0.0/0",
+			Interface: "wan0",
+			Role:      runtimeapi.NetworkRouteRoleGatewayWAN,
+			Bypass:    true,
+		}},
+	}}
+	manager, err := OpenManager(filepath.Join(t.TempDir(), "network"), 1001, system)
+	if err != nil {
+		t.Fatalf("open privileged Runtime network manager: %v", err)
+	}
+	manager.Now = func() time.Time { return now }
+	session := openTestSession(t, manager, 1001)
+	captureUDP := false
+	preview, err := manager.Preview(t.Context(), session.ID, runtimeapi.NetworkPreviewRequest{
+		Mode:             runtimeapi.RunModeGateway,
+		CaptureUDP:       &captureUDP,
+		ExcludedRouteIDs: []string{"route_container"},
+		UDPExceptions: []runtimeapi.GatewayTrafficException{{
+			DestinationCIDR: "203.0.113.10",
+			DestinationPorts: []runtimeapi.NetworkPortRange{{
+				Start: 443,
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("preview Runtime gateway: %v", err)
+	}
+	if preview.GatewaySettings == nil ||
+		!preview.PreviewOnly ||
+		!preview.GatewaySettings.CaptureTCP ||
+		preview.GatewaySettings.CaptureUDP ||
+		preview.GatewaySettings.IPv6Policy != runtimeapi.TUNIPv6Direct ||
+		preview.GatewaySettings.UDPExceptions[0].DestinationCIDR != "203.0.113.10/32" {
+		t.Fatalf("Runtime gateway settings=%#v", preview.GatewaySettings)
+	}
+	routes := make(map[string]runtimeapi.NetworkRoute, len(preview.Routes))
+	for _, route := range preview.Routes {
+		routes[route.ID] = route
+	}
+	if routes["route_lan"].Role != runtimeapi.NetworkRouteRoleGatewayLAN ||
+		routes["route_lan"].Bypass ||
+		!routes["route_container"].Bypass ||
+		!routes["route_wan"].Bypass {
+		t.Fatalf("Runtime gateway routes=%#v", preview.Routes)
+	}
+	prepared, err := manager.Prepare(
+		t.Context(),
+		requestMeta(session, "op_gateway_enable_0123456789", 1, now),
+		preview.PlanID,
+	)
+	if err != nil {
+		t.Fatalf("prepare Runtime gateway: %v", err)
+	}
+	if prepared.Mode != runtimeapi.RunModeGateway ||
+		prepared.Device != linuxGatewayTUNDevice ||
+		prepared.GatewaySettings == nil {
+		t.Fatalf("prepared Runtime gateway=%#v", prepared)
+	}
+	status, err := manager.Commit(
+		t.Context(),
+		requestMeta(session, "op_gateway_enable_0123456789", 2, now),
+		prepared.OwnershipID,
+	)
+	if err != nil ||
+		status.Mode != runtimeapi.RunModeGateway ||
+		!status.PreviewOnly ||
+		status.GatewaySettings == nil {
+		t.Fatalf("commit Runtime gateway status=%#v err=%v", status, err)
 	}
 }
 

@@ -391,6 +391,112 @@ func TestModelPreviewsDisplaysAndControlsOrdinaryTUN(t *testing.T) {
 	}
 }
 
+func TestModelPreviewsDisplaysAndControlsLinuxGateway(t *testing.T) {
+	client := &fakeClient{
+		snapshot: runtimeapi.Snapshot{
+			ProtocolVersion: runtimeapi.ProtocolVersion,
+			Runtime:         runtimeapi.RuntimeStatus{Version: "dev", ServiceState: "running"},
+			Network: runtimeapi.NetworkStatus{
+				Available: true,
+				Mode:      runtimeapi.RunModeExplicit,
+				State:     runtimeapi.NetworkStateInactive,
+			},
+		},
+		networkPreview: runtimeapi.NetworkPreview{
+			PlanID: "plan_0123456789abcdef0123456789abcdef",
+			Mode:   runtimeapi.RunModeGateway,
+			Device: "smxgw0",
+			GatewaySettings: &runtimeapi.GatewaySettings{
+				IPv6Policy:       runtimeapi.TUNIPv6Block,
+				DNSPolicy:        runtimeapi.TUNDNSHijack,
+				CaptureTCP:       true,
+				CaptureUDP:       false,
+				ProxyHostTraffic: true,
+				ExcludedRouteIDs: []string{"route_lan"},
+			},
+			Routes: []runtimeapi.NetworkRoute{{
+				ID:        "route_lan",
+				Family:    "ipv4",
+				CIDR:      "10.0.0.0/24",
+				Interface: "lan0",
+				Role:      runtimeapi.NetworkRouteRoleGatewayLAN,
+				Bypass:    true,
+			}},
+			Warnings:    []string{"IPv6 转发将阻断"},
+			PreviewOnly: true,
+			ExpiresAt:   time.Now().Add(5 * time.Minute),
+		},
+	}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+	updated, command := model.Update(ctrlKey('l'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("Linux gateway editor did not focus")
+	}
+	model.editor.SetValue(`{
+		"mode":"gateway",
+		"ipv6_policy":"block",
+		"dns_policy":"hijack",
+		"capture_tcp":true,
+		"capture_udp":false,
+		"proxy_host_traffic":true,
+		"excluded_route_ids":["route_lan"],
+		"udp_exceptions":[{"destination_cidr":"203.0.113.0/24","destination_ports":[{"start":443,"end":443}]}],
+		"dns_direct_cidrs":["10.0.0.53/32"],
+		"host_exceptions":[{"uid":2001}]
+	}`)
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("Linux gateway preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if len(client.networkRequests) != 1 ||
+		client.networkRequests[0].Mode != runtimeapi.RunModeGateway ||
+		client.networkRequests[0].CaptureUDP == nil ||
+		*client.networkRequests[0].CaptureUDP ||
+		!client.networkRequests[0].ProxyHostTraffic ||
+		len(client.networkRequests[0].ExcludedRouteIDs) != 1 ||
+		len(client.networkRequests[0].UDPExceptions) != 1 ||
+		len(client.networkRequests[0].DNSDirectCIDRs) != 1 ||
+		len(client.networkRequests[0].HostExceptions) != 1 {
+		t.Fatalf("Linux gateway preview requests=%#v", client.networkRequests)
+	}
+	view := model.View().Content
+	for _, expected := range []string{"gateway（预览）", "smxgw0", "IPv6 转发将阻断", "route_lan"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("Linux gateway view missing %q: %q", expected, view)
+		}
+	}
+	updated, command = model.Update(ctrlKey('e'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("Linux gateway enable did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if len(client.actions) != 1 ||
+		client.actions[0].Kind != runtimeapi.ActionEnableGateway ||
+		client.actions[0].Params.PlanID != model.networkPreview.PlanID {
+		t.Fatalf("Linux gateway enable actions=%#v", client.actions)
+	}
+	model.busy = false
+	model.snapshot.Network.Mode = runtimeapi.RunModeGateway
+	updated, command = model.Update(ctrlKey('x'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("Linux gateway disable did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if len(client.actions) != 2 || client.actions[1].Kind != runtimeapi.ActionDisableGateway {
+		t.Fatalf("Linux gateway disable actions=%#v", client.actions)
+	}
+}
+
 func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testing.T) {
 	sourceID := "src_" + strings.Repeat("a", 32)
 	client := &fakeClient{snapshot: runtimeapi.Snapshot{

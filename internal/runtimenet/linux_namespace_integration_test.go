@@ -511,6 +511,7 @@ func testDNSQuery() []byte {
 type tunResponder struct {
 	fd      int
 	stopped atomic.Bool
+	packets atomic.Uint64
 	done    chan struct{}
 }
 
@@ -548,9 +549,17 @@ func (responder *tunResponder) Run() {
 			if len(reply) == 0 {
 				continue
 			}
+			responder.packets.Add(1)
 			_, _ = unix.Write(responder.fd, reply)
 		}
 	}()
+}
+
+func (responder *tunResponder) PacketCount() uint64 {
+	if responder == nil {
+		return 0
+	}
+	return responder.packets.Load()
 }
 
 func (responder *tunResponder) Close() {
@@ -817,17 +826,26 @@ func hasNetworkConflict(conflicts []runtimeapi.NetworkConflict, kind string) boo
 }
 
 func waitForNamespaceLinkState(t *testing.T, system *LinuxSystem, exists bool) {
+	waitForNamespaceDeviceState(t, system, linuxTUNDevice, exists)
+}
+
+func waitForNamespaceDeviceState(
+	t *testing.T,
+	system *LinuxSystem,
+	device string,
+	exists bool,
+) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		_, observed, err := system.link(t.Context(), linuxTUNDevice)
+		_, observed, err := system.link(t.Context(), device)
 		if err == nil && observed == exists {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	_, observed, err := system.link(t.Context(), linuxTUNDevice)
-	t.Fatalf("Linux namespace TUN link exists=%t, want %t; err=%v", observed, exists, err)
+	_, observed, err := system.link(t.Context(), device)
+	t.Fatalf("Linux namespace %s link exists=%t, want %t; err=%v", device, observed, exists, err)
 }
 
 func assertNamespaceRouteDevice(t *testing.T, destination, device string) {

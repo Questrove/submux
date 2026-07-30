@@ -362,6 +362,8 @@ const (
 	ActionSetAdvancedOverride = "override.set"
 	ActionEnableTUN           = "network.enable_tun"
 	ActionDisableTUN          = "network.disable_tun"
+	ActionEnableGateway       = "network.enable_gateway"
+	ActionDisableGateway      = "network.disable_gateway"
 
 	OperationQueued         = "queued"
 	OperationRunning        = "running"

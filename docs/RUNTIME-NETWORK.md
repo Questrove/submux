@@ -1,6 +1,6 @@
 # Submux Runtime 网络与权限设计
 
-本文定义显式代理、TUN 和 Linux 网关三种运行方式，以及 `submux-runtime-net` 的权限边界。Linux 普通 TUN 已按本文实现；Windows、macOS 和 Linux 网关部分仍是后续实现必须遵守的目标设计。
+本文定义显式代理、TUN 和 Linux 网关三种运行方式，以及 `submux-runtime-net` 的权限边界。Linux 普通 TUN 已按本文实现。Linux 网关也已实现，并通过 network namespace 的双网卡、单臂和故障恢复测试，但在真实物理网关验收前仍标记为预览功能。Windows 和 macOS 部分仍是后续实现必须遵守的目标设计。
 
 ## 共同规则
 
@@ -229,4 +229,6 @@ Snapshot 展示的是系统实际状态，不根据数据库中的期望值推�
 - 并发连接、Runtime/Mihomo 崩溃、服务重启、更新和卸载；
 - 只删除 Runtime 自有规则，保留用户 NAT 与防火墙。
 
-Linux 网关未通过这些测试时只能标为预览，不能作为稳定功能发布。
+当前实现已在 network namespace 中覆盖双网卡、单臂、新客户端、并发 TCP/UDP、QUIC 形态的 UDP/443、TCP/UDP DNS、UDP 全局关闭和类型化例外、WAN DNAT、宿主流量、IPv6 直连或阻断、Mihomo 故障、特权服务重启、更新清理和租约回收。测试还会确认用户 NAT 表保留且 Runtime 自有对象没有残留。
+
+这些等价环境测试不能替代真实物理网关验收。在实机验收完成并记录前，Runtime 的预览和状态接口、CLI、TUI、GUI 都必须持续显示 Linux 网关为预览功能，不能作为稳定功能发布。

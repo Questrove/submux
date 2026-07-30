@@ -19,7 +19,7 @@ import (
 
 type Controller interface {
 	Preview(context.Context, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
-	Prepare(context.Context, string, string) (PreparedTUN, error)
+	Prepare(context.Context, string, string) (PreparedNetwork, error)
 	Commit(context.Context, string, string) (runtimeapi.NetworkStatus, error)
 	Renew(context.Context, string, string) (runtimeapi.NetworkStatus, error)
 	Release(context.Context, string, string, string) (runtimeapi.NetworkStatus, error)
@@ -113,14 +113,14 @@ func (c *Client) Prepare(
 	ctx context.Context,
 	operationID string,
 	planID string,
-) (PreparedTUN, error) {
+) (PreparedNetwork, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	meta, err := c.nextMetaLocked(ctx, operationID)
 	if err != nil {
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
-	var prepared PreparedTUN
+	var prepared PreparedNetwork
 	err = c.postMutationLocked(ctx, OperationPrepare, operationID, "/v1/prepare", prepareEnvelope{
 		Meta:   meta,
 		PlanID: planID,

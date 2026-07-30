@@ -405,11 +405,23 @@ func runNetwork(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
 	jsonOutput := flags.Bool("json", false, "print stable JSON")
 	wait := flags.Bool("wait", false, "wait for the operation to finish")
-	ipv6Policy := flags.String("ipv6", runtimeapi.TUNIPv6Proxy, "IPv6 policy: proxy, direct, or block")
-	dnsPolicy := flags.String("dns", runtimeapi.TUNDNSHijack, "DNS policy: hijack or off")
+	mode := flags.String("mode", runtimeapi.RunModeTUN, "network mode: tun or gateway")
+	ipv6Policy := flags.String("ipv6", "", "IPv6 policy: proxy, direct, or block")
+	dnsPolicy := flags.String("dns", "", "DNS policy: hijack or off")
+	captureTCP := flags.Bool("tcp", true, "capture gateway TCP")
+	captureUDP := flags.Bool("udp", true, "capture gateway UDP")
+	proxyHost := flags.Bool("proxy-host", false, "capture gateway host traffic")
 	planID := flags.String("plan-id", "", "validated Runtime network plan ID")
 	var captureRoutes stringListFlag
 	flags.Var(&captureRoutes, "capture-route", "specific route ID to include in TUN; repeat as needed")
+	var excludedRoutes stringListFlag
+	flags.Var(&excludedRoutes, "exclude-route", "gateway LAN route ID to exclude; repeat as needed")
+	var dnsDirect stringListFlag
+	flags.Var(&dnsDirect, "dns-direct", "gateway DNS server IPv4 CIDR to keep direct; repeat as needed")
+	var udpExceptions gatewayExceptionListFlag
+	flags.Var(&udpExceptions, "udp-exception", "typed gateway UDP exception as JSON; repeat as needed")
+	var hostExceptions gatewayExceptionListFlag
+	flags.Var(&hostExceptions, "host-exception", "typed gateway host exception as JSON; repeat as needed")
 	if err := flags.Parse(arguments[1:]); err != nil {
 		return 2
 	}
@@ -426,8 +438,10 @@ func runNetwork(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	switch command {
 	case "status":
 		if *wait || *planID != "" || len(captureRoutes) > 0 ||
-			*ipv6Policy != runtimeapi.TUNIPv6Proxy ||
-			*dnsPolicy != runtimeapi.TUNDNSHijack {
+			len(excludedRoutes) > 0 || len(dnsDirect) > 0 ||
+			len(udpExceptions) > 0 || len(hostExceptions) > 0 ||
+			*mode != runtimeapi.RunModeTUN || *ipv6Policy != "" ||
+			*dnsPolicy != "" || !*captureTCP || !*captureUDP || *proxyHost {
 			fmt.Fprintln(stderr, "network status accepts only --endpoint and --json")
 			return 2
 		}
@@ -446,12 +460,36 @@ func runNetwork(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "network preview does not accept --wait or --plan-id")
 			return 2
 		}
-		preview, err := client.PreviewNetwork(ctx, runtimeapi.NetworkPreviewRequest{
-			Mode:            runtimeapi.RunModeTUN,
+		request := runtimeapi.NetworkPreviewRequest{
+			Mode:            *mode,
 			IPv6Policy:      *ipv6Policy,
 			DNSPolicy:       *dnsPolicy,
 			CaptureRouteIDs: append([]string(nil), captureRoutes...),
-		})
+		}
+		if *mode == runtimeapi.RunModeGateway {
+			request.CaptureTCP = captureTCP
+			request.CaptureUDP = captureUDP
+			request.ProxyHostTraffic = *proxyHost
+			request.ExcludedRouteIDs = append([]string(nil), excludedRoutes...)
+			request.UDPExceptions = append([]runtimeapi.GatewayTrafficException(nil), udpExceptions...)
+			request.DNSDirectCIDRs = append([]string(nil), dnsDirect...)
+			request.HostExceptions = append([]runtimeapi.GatewayTrafficException(nil), hostExceptions...)
+			if len(captureRoutes) > 0 {
+				fmt.Fprintln(stderr, "gateway preview does not accept --capture-route")
+				return 2
+			}
+		} else if *mode == runtimeapi.RunModeTUN {
+			if len(excludedRoutes) > 0 || len(dnsDirect) > 0 ||
+				len(udpExceptions) > 0 || len(hostExceptions) > 0 ||
+				!*captureTCP || !*captureUDP || *proxyHost {
+				fmt.Fprintln(stderr, "ordinary TUN preview does not accept gateway settings")
+				return 2
+			}
+		} else {
+			fmt.Fprintln(stderr, "network preview --mode must be tun or gateway")
+			return 2
+		}
+		preview, err := client.PreviewNetwork(ctx, request)
 		if err != nil {
 			return writeClientFailure(stdout, stderr, *jsonOutput, err)
 		}
@@ -460,13 +498,29 @@ func runNetwork(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			return 0
 		}
 		fmt.Fprintf(stdout, "Plan: %s (expires %s)\n", preview.PlanID, preview.ExpiresAt.Format(time.RFC3339))
-		fmt.Fprintf(stdout, "Device: %s; IPv6: %s; DNS: %s\n", preview.Device, preview.Settings.IPv6Policy, preview.Settings.DNSPolicy)
+		if preview.PreviewOnly {
+			fmt.Fprintln(stdout, "Feature status: preview; physical Linux gateway acceptance is still required.")
+		}
+		if preview.GatewaySettings != nil {
+			fmt.Fprintf(
+				stdout,
+				"Device: %s; mode: gateway; IPv6: %s; DNS: %s; TCP: %t; UDP: %t; host: %t\n",
+				preview.Device,
+				preview.GatewaySettings.IPv6Policy,
+				preview.GatewaySettings.DNSPolicy,
+				preview.GatewaySettings.CaptureTCP,
+				preview.GatewaySettings.CaptureUDP,
+				preview.GatewaySettings.ProxyHostTraffic,
+			)
+		} else {
+			fmt.Fprintf(stdout, "Device: %s; mode: tun; IPv6: %s; DNS: %s\n", preview.Device, preview.Settings.IPv6Policy, preview.Settings.DNSPolicy)
+		}
 		for _, route := range preview.Routes {
 			disposition := "bypass"
 			if !route.Bypass {
 				disposition = "capture"
 			}
-			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\n", route.ID, route.Family, route.CIDR, route.Interface, disposition)
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\n", route.ID, route.Family, route.CIDR, route.Interface, route.Role, disposition)
 		}
 		for _, conflict := range preview.Conflicts {
 			fmt.Fprintf(stdout, "conflict: %s: %s (%s)\n", conflict.Kind, conflict.Detail, conflict.Owner)
@@ -484,9 +538,10 @@ func runNetwork(arguments []string, stdout io.Writer, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "network disable does not accept --plan-id")
 			return 2
 		}
-		if len(captureRoutes) > 0 ||
-			*ipv6Policy != runtimeapi.TUNIPv6Proxy ||
-			*dnsPolicy != runtimeapi.TUNDNSHijack {
+		if len(captureRoutes) > 0 || len(excludedRoutes) > 0 ||
+			len(dnsDirect) > 0 || len(udpExceptions) > 0 || len(hostExceptions) > 0 ||
+			*ipv6Policy != "" || *dnsPolicy != "" ||
+			!*captureTCP || !*captureUDP || *proxyHost {
 			fmt.Fprintf(stderr, "network %s accepts settings only through a validated preview\n", command)
 			return 2
 		}
@@ -494,9 +549,19 @@ func runNetwork(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		if err != nil {
 			return writeClientFailure(stdout, stderr, *jsonOutput, err)
 		}
+		if *mode != runtimeapi.RunModeTUN && *mode != runtimeapi.RunModeGateway {
+			fmt.Fprintln(stderr, "network enable/disable --mode must be tun or gateway")
+			return 2
+		}
 		action := runtimeapi.Action{Kind: runtimeapi.ActionDisableTUN}
+		if *mode == runtimeapi.RunModeGateway {
+			action.Kind = runtimeapi.ActionDisableGateway
+		}
 		if command == "enable" {
 			action.Kind = runtimeapi.ActionEnableTUN
+			if *mode == runtimeapi.RunModeGateway {
+				action.Kind = runtimeapi.ActionEnableGateway
+			}
 			action.Params.PlanID = *planID
 		}
 		operation, err := client.Execute(ctx, runtimeapi.CreateOperationRequest{
@@ -531,8 +596,22 @@ func writeNetworkStatus(writer io.Writer, status runtimeapi.NetworkStatus) {
 		fmt.Fprintf(writer, "; device: %s", status.Device)
 	}
 	fmt.Fprintln(writer)
+	if status.PreviewOnly {
+		fmt.Fprintln(writer, "Feature status: preview; physical Linux gateway acceptance is still required.")
+	}
 	if status.LeaseExpiresAt != nil {
 		fmt.Fprintf(writer, "Network lease expires: %s\n", status.LeaseExpiresAt.Format(time.RFC3339))
+	}
+	if status.GatewaySettings != nil {
+		fmt.Fprintf(
+			writer,
+			"Gateway IPv6: %s; DNS: %s; TCP: %t; UDP: %t; host: %t\n",
+			status.GatewaySettings.IPv6Policy,
+			status.GatewaySettings.DNSPolicy,
+			status.GatewaySettings.CaptureTCP,
+			status.GatewaySettings.CaptureUDP,
+			status.GatewaySettings.ProxyHostTraffic,
+		)
 	}
 	for _, conflict := range status.Conflicts {
 		fmt.Fprintf(writer, "Network conflict: %s: %s (%s)\n", conflict.Kind, conflict.Detail, conflict.Owner)
@@ -553,9 +632,31 @@ func (values *stringListFlag) String() string {
 
 func (values *stringListFlag) Set(value string) error {
 	if value == "" {
-		return errors.New("route ID must not be empty")
+		return errors.New("value must not be empty")
 	}
 	*values = append(*values, value)
+	return nil
+}
+
+type gatewayExceptionListFlag []runtimeapi.GatewayTrafficException
+
+func (values *gatewayExceptionListFlag) String() string {
+	body, _ := json.Marshal(values)
+	return string(body)
+}
+
+func (values *gatewayExceptionListFlag) Set(value string) error {
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.DisallowUnknownFields()
+	var exception runtimeapi.GatewayTrafficException
+	if err := decoder.Decode(&exception); err != nil {
+		return fmt.Errorf("decode typed gateway exception: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return errors.New("typed gateway exception must contain one JSON object")
+	}
+	*values = append(*values, exception)
 	return nil
 }
 

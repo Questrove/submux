@@ -38,6 +38,9 @@ func (runner *scriptedCommandRunner) Run(
 	if response, ok := runner.responses[key]; ok {
 		return []byte(response.body), response.err
 	}
+	if strings.HasPrefix(key, "nft -j ") {
+		return []byte(`{"nftables":[]}`), nil
+	}
 	if strings.Contains(key, " -j ") {
 		return []byte("[]"), nil
 	}
@@ -45,6 +48,42 @@ func (runner *scriptedCommandRunner) Run(
 		return nil, errors.New("not found")
 	}
 	return nil, nil
+}
+
+func TestLinuxDeleteOwnedNFTRequiresTableComment(t *testing.T) {
+	token := strings.Repeat("a", 64)
+	table := linuxNFTTable(token)
+	listCommand := "nft -j list tables"
+
+	wrongOwner := &scriptedCommandRunner{responses: map[string]scriptedCommandResponse{
+		listCommand: {
+			body: `{"nftables":[{"table":{"family":"inet","name":"` + table + `","comment":"someone-else"}}]}`,
+		},
+	}}
+	system := &LinuxSystem{RuntimeUID: 1001, Runner: wrongOwner}
+	if err := system.deleteOwnedNFT(t.Context(), token); err == nil {
+		t.Fatal("delete nftables table accepted a mismatched table comment")
+	}
+	for _, call := range wrongOwner.calls {
+		if strings.HasPrefix(call, "nft delete table ") {
+			t.Fatalf("mismatched nftables table was deleted: %s", call)
+		}
+	}
+
+	owned := &scriptedCommandRunner{responses: map[string]scriptedCommandResponse{
+		listCommand: {
+			body: `{"nftables":[{"table":{"family":"inet","name":"` + table + `","comment":"` +
+				linuxOwnershipAlias(token) + `"}}]}`,
+		},
+	}}
+	system = &LinuxSystem{RuntimeUID: 1001, Runner: owned}
+	if err := system.deleteOwnedNFT(t.Context(), token); err != nil {
+		t.Fatalf("delete owned nftables table: %v", err)
+	}
+	deleteCommand := "nft delete table inet " + table
+	if len(owned.calls) != 2 || owned.calls[1] != deleteCommand {
+		t.Fatalf("owned nftables cleanup calls=%#v", owned.calls)
+	}
 }
 
 func TestLinuxSystemDiscoveryPreservesSpecificRoutesAndFindsFullTunnelConflicts(t *testing.T) {

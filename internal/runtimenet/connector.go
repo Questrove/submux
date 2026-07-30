@@ -44,12 +44,12 @@ func (connector *Connector) Prepare(
 	ctx context.Context,
 	operationID string,
 	planID string,
-) (PreparedTUN, error) {
+) (PreparedNetwork, error) {
 	connector.mu.Lock()
 	defer connector.mu.Unlock()
 	client, err := connector.clientForLocked(ctx)
 	if err != nil {
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
 	prepared, err := client.Prepare(ctx, operationID, planID)
 	if err == nil || !reconnectableNetworkError(err) {
@@ -57,12 +57,12 @@ func (connector *Connector) Prepare(
 	}
 	client, reconnectErr := connector.reconnectLocked(ctx)
 	if reconnectErr != nil {
-		return PreparedTUN{}, errors.Join(err, reconnectErr)
+		return PreparedNetwork{}, errors.Join(err, reconnectErr)
 	}
 	if resultErr := committedPayload(ctx, client, operationID, OperationPrepare, &prepared); resultErr == nil {
 		return prepared, nil
 	}
-	return PreparedTUN{}, err
+	return PreparedNetwork{}, err
 }
 
 func (connector *Connector) Commit(

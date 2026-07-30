@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +16,10 @@ import (
 
 	"submux/internal/runtimeapi"
 )
+
+// gatewayPreviewOnly remains true until a physical Linux gateway acceptance run
+// supplements the namespace and equivalent dual-interface coverage.
+const gatewayPreviewOnly = true
 
 type Manager struct {
 	Root       string
@@ -156,25 +161,50 @@ func (m *Manager) Preview(
 	if err := contextError(ctx); err != nil {
 		return runtimeapi.NetworkPreview{}, err
 	}
-	settings, err := normalizeTUNSettings(request)
-	if err != nil {
-		return runtimeapi.NetworkPreview{}, err
+	mode := request.Mode
+	if mode == "" {
+		mode = runtimeapi.RunModeTUN
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, err := m.sessionLocked(sessionID); err != nil {
 		return runtimeapi.NetworkPreview{}, err
 	}
-	discovery, err := m.System.Discover(ctx, settings)
+	var (
+		settings        runtimeapi.TUNSettings
+		gatewaySettings *runtimeapi.GatewaySettings
+		discovery       Discovery
+		err             error
+	)
+	switch mode {
+	case runtimeapi.RunModeTUN:
+		settings, err = normalizeTUNSettings(request)
+		if err == nil {
+			discovery, err = m.System.Discover(ctx, settings)
+		}
+	case runtimeapi.RunModeGateway:
+		var normalized runtimeapi.GatewaySettings
+		normalized, err = normalizeGatewaySettings(request)
+		if err == nil {
+			discovery, err = m.System.DiscoverGateway(ctx, normalized)
+			gatewaySettings = &normalized
+		}
+	default:
+		err = errors.New("Runtime network preview mode is invalid")
+	}
 	if err != nil {
 		return runtimeapi.NetworkPreview{}, err
 	}
 	if discovery.Device == "" || len(discovery.Device) > 15 {
 		return runtimeapi.NetworkPreview{}, errors.New("privileged Runtime network system returned an invalid TUN device")
 	}
-	capture := make(map[string]struct{}, len(settings.CaptureRouteIDs))
-	for _, id := range settings.CaptureRouteIDs {
-		capture[id] = struct{}{}
+	selections := settings.CaptureRouteIDs
+	if gatewaySettings != nil {
+		selections = gatewaySettings.ExcludedRouteIDs
+	}
+	selected := make(map[string]struct{}, len(selections))
+	for _, id := range selections {
+		selected[id] = struct{}{}
 	}
 	routes := append([]runtimeapi.NetworkRoute(nil), discovery.Routes...)
 	discovered := make(map[string]struct{}, len(routes))
@@ -186,12 +216,32 @@ func (m *Manager) Preview(
 			return runtimeapi.NetworkPreview{}, errors.New("privileged Runtime network system returned a duplicate route ID")
 		}
 		discovered[routes[index].ID] = struct{}{}
-		_, captured := capture[routes[index].ID]
-		routes[index].Bypass = !captured
+		_, chosen := selected[routes[index].ID]
+		if mode == runtimeapi.RunModeTUN {
+			routes[index].Bypass = !chosen
+			continue
+		}
+		switch routes[index].Role {
+		case runtimeapi.NetworkRouteRoleGatewayLAN:
+			routes[index].Bypass = chosen
+		case runtimeapi.NetworkRouteRoleGatewayWAN, runtimeapi.NetworkRouteRoleDirect:
+			routes[index].Bypass = true
+		default:
+			return runtimeapi.NetworkPreview{}, errors.New("privileged Runtime network system returned an invalid gateway route role")
+		}
 	}
-	for id := range capture {
-		if _, ok := discovered[id]; !ok {
-			return runtimeapi.NetworkPreview{}, errors.New("Runtime TUN route selection is stale or unknown")
+	for id := range selected {
+		route, ok := discovered[id]
+		if !ok {
+			return runtimeapi.NetworkPreview{}, errors.New("Runtime network route selection is stale or unknown")
+		}
+		_ = route
+		if mode == runtimeapi.RunModeGateway {
+			for _, candidate := range routes {
+				if candidate.ID == id && candidate.Role != runtimeapi.NetworkRouteRoleGatewayLAN {
+					return runtimeapi.NetworkPreview{}, errors.New("Runtime gateway can only exclude discovered LAN routes")
+				}
+			}
 		}
 	}
 	planID, err := randomIdentifier("plan_")
@@ -200,15 +250,17 @@ func (m *Manager) Preview(
 	}
 	now := m.now()
 	preview := runtimeapi.NetworkPreview{
-		PlanID:     planID,
-		Mode:       runtimeapi.RunModeTUN,
-		Device:     discovery.Device,
-		Settings:   settings,
-		Routes:     routes,
-		Conflicts:  append([]runtimeapi.NetworkConflict(nil), discovery.Conflicts...),
-		Warnings:   append([]string(nil), discovery.Warnings...),
-		ExpiresAt:  now.Add(m.planTTL()),
-		ObservedAt: now,
+		PlanID:          planID,
+		Mode:            mode,
+		Device:          discovery.Device,
+		Settings:        settings,
+		GatewaySettings: gatewaySettings,
+		Routes:          routes,
+		Conflicts:       append([]runtimeapi.NetworkConflict(nil), discovery.Conflicts...),
+		Warnings:        append([]string(nil), discovery.Warnings...),
+		PreviewOnly:     mode == runtimeapi.RunModeGateway && gatewayPreviewOnly,
+		ExpiresAt:       now.Add(m.planTTL()),
+		ObservedAt:      now,
 	}
 	discovery.Routes = routes
 	m.plans[planID] = planState{sessionID: sessionID, preview: preview, discovery: discovery}
@@ -220,36 +272,36 @@ func (m *Manager) Prepare(
 	ctx context.Context,
 	meta RequestMeta,
 	planID string,
-) (PreparedTUN, error) {
+) (PreparedNetwork, error) {
 	if err := contextError(ctx); err != nil {
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session, err := m.validateMutationLocked(meta)
 	if err != nil {
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
 	plan, ok := m.plans[planID]
 	if !ok || !plan.preview.ExpiresAt.After(m.now()) {
-		return PreparedTUN{}, errors.New("Runtime network plan is unavailable or expired")
+		return PreparedNetwork{}, errors.New("Runtime network plan is unavailable or expired")
 	}
 	if plan.sessionID != meta.SessionID {
-		return PreparedTUN{}, errors.New("Runtime network plan belongs to another connection")
+		return PreparedNetwork{}, errors.New("Runtime network plan belongs to another connection")
 	}
 	if len(plan.preview.Conflicts) > 0 {
-		return PreparedTUN{}, errors.New("Runtime network plan contains a full-tunnel conflict")
+		return PreparedNetwork{}, errors.New("Runtime network plan contains a full-tunnel conflict")
 	}
 	if m.ownership != nil {
-		return PreparedTUN{}, errors.New("Runtime network takeover is already owned")
+		return PreparedNetwork{}, errors.New("Runtime network takeover is already owned")
 	}
 	ownershipID, err := randomIdentifier("net_")
 	if err != nil {
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
 	token, err := randomHex(32)
 	if err != nil {
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
 	now := m.now()
 	ownership := Ownership{
@@ -257,10 +309,11 @@ func (m *Manager) Prepare(
 		Token:             token,
 		RuntimeInstanceID: session.RuntimeInstanceID,
 		OperationID:       meta.OperationID,
-		Mode:              runtimeapi.RunModeTUN,
+		Mode:              plan.preview.Mode,
 		Device:            plan.preview.Device,
 		IPv6Available:     plan.discovery.IPv6Available,
 		Settings:          plan.preview.Settings,
+		GatewaySettings:   cloneGatewaySettings(plan.preview.GatewaySettings),
 		Routes:            append([]runtimeapi.NetworkRoute(nil), plan.preview.Routes...),
 		Original:          cloneStringMap(plan.discovery.Original),
 		State:             runtimeapi.NetworkStatePrepared,
@@ -269,30 +322,41 @@ func (m *Manager) Prepare(
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
-	preparation, err := m.System.PrepareTUN(ctx, ownership)
+	var preparation SystemPreparation
+	switch ownership.Mode {
+	case runtimeapi.RunModeTUN:
+		preparation, err = m.System.PrepareTUN(ctx, ownership)
+	case runtimeapi.RunModeGateway:
+		preparation, err = m.System.PrepareGateway(ctx, ownership)
+	default:
+		err = errors.New("Runtime network plan mode is invalid")
+	}
 	if err != nil {
 		ownership.Objects = append([]runtimeapi.NetworkObject(nil), preparation.Objects...)
 		_, _ = m.System.Cleanup(context.Background(), ownership)
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
 	ownership.Objects = append([]runtimeapi.NetworkObject(nil), preparation.Objects...)
 	ownership.RoutingMark = preparation.RoutingMark
+	ownership.CaptureMark = preparation.CaptureMark
 	ownership.RouteTable = preparation.RouteTable
 	ownership.RulePriority = preparation.RulePriority
-	result := PreparedTUN{
-		OwnershipID: ownership.ID,
-		Device:      ownership.Device,
-		RoutingMark: ownership.RoutingMark,
-		Settings:    ownership.Settings,
+	result := PreparedNetwork{
+		OwnershipID:     ownership.ID,
+		Mode:            ownership.Mode,
+		Device:          ownership.Device,
+		RoutingMark:     ownership.RoutingMark,
+		Settings:        ownership.Settings,
+		GatewaySettings: cloneGatewaySettings(ownership.GatewaySettings),
 	}
 	outcome, err := m.newResult(session, meta, OperationPrepare, ownership.ID, result, nil)
 	if err != nil {
 		_, _ = m.System.Cleanup(context.Background(), ownership)
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
 	if err := m.persistLocked(&ownership, &outcome); err != nil {
 		_, _ = m.System.Cleanup(context.Background(), ownership)
-		return PreparedTUN{}, err
+		return PreparedNetwork{}, err
 	}
 	session.LastSequence = meta.Sequence
 	delete(m.plans, planID)
@@ -316,7 +380,15 @@ func (m *Manager) Commit(
 	if ownership.State != runtimeapi.NetworkStatePrepared {
 		return runtimeapi.NetworkStatus{}, errors.New("Runtime network ownership is not prepared")
 	}
-	objects, err := m.System.ApplyTUN(ctx, *ownership)
+	var objects []runtimeapi.NetworkObject
+	switch ownership.Mode {
+	case runtimeapi.RunModeTUN:
+		objects, err = m.System.ApplyTUN(ctx, *ownership)
+	case runtimeapi.RunModeGateway:
+		objects, err = m.System.ApplyGateway(ctx, *ownership)
+	default:
+		err = errors.New("Runtime network ownership mode is invalid")
+	}
 	if err != nil {
 		return runtimeapi.NetworkStatus{}, err
 	}
@@ -597,6 +669,7 @@ func (m *Manager) observeLocked(ctx context.Context) (runtimeapi.NetworkStatus, 
 		}
 		status.Device = m.ownership.Device
 		status.Settings = m.ownership.Settings
+		status.GatewaySettings = cloneGatewaySettings(m.ownership.GatewaySettings)
 		status.OwnershipID = m.ownership.ID
 		if len(status.Objects) == 0 {
 			status.Objects = append([]runtimeapi.NetworkObject(nil), m.ownership.Objects...)
@@ -606,6 +679,7 @@ func (m *Manager) observeLocked(ctx context.Context) (runtimeapi.NetworkStatus, 
 		expiresAt := m.ownership.LeaseExpiresAt
 		status.LeaseExpiresAt = &expiresAt
 	}
+	status.PreviewOnly = status.Mode == runtimeapi.RunModeGateway && gatewayPreviewOnly
 	return status, err
 }
 
@@ -644,6 +718,220 @@ func normalizeTUNSettings(request runtimeapi.NetworkPreviewRequest) (runtimeapi.
 		DNSPolicy:       dnsPolicy,
 		CaptureRouteIDs: capture,
 	}, nil
+}
+
+func normalizeGatewaySettings(request runtimeapi.NetworkPreviewRequest) (runtimeapi.GatewaySettings, error) {
+	if request.Mode != runtimeapi.RunModeGateway {
+		return runtimeapi.GatewaySettings{}, errors.New("Runtime gateway preview mode is required")
+	}
+	ipv6Policy := request.IPv6Policy
+	if ipv6Policy == "" {
+		ipv6Policy = runtimeapi.TUNIPv6Direct
+	}
+	if ipv6Policy != runtimeapi.TUNIPv6Direct && ipv6Policy != runtimeapi.TUNIPv6Block {
+		return runtimeapi.GatewaySettings{}, errors.New("Runtime gateway IPv6 policy must be direct or block")
+	}
+	dnsPolicy := request.DNSPolicy
+	if dnsPolicy == "" {
+		dnsPolicy = runtimeapi.TUNDNSHijack
+	}
+	if dnsPolicy != runtimeapi.TUNDNSHijack && dnsPolicy != runtimeapi.TUNDNSOff {
+		return runtimeapi.GatewaySettings{}, errors.New("Runtime gateway DNS policy is invalid")
+	}
+	captureTCP := true
+	if request.CaptureTCP != nil {
+		captureTCP = *request.CaptureTCP
+	}
+	captureUDP := true
+	if request.CaptureUDP != nil {
+		captureUDP = *request.CaptureUDP
+	}
+	excluded := append([]string(nil), request.ExcludedRouteIDs...)
+	sort.Strings(excluded)
+	for index, id := range excluded {
+		if !validOpaqueIdentifier(id, 3, 96) {
+			return runtimeapi.GatewaySettings{}, errors.New("Runtime gateway route exclusion contains an invalid ID")
+		}
+		if index > 0 && excluded[index-1] == id {
+			return runtimeapi.GatewaySettings{}, errors.New("Runtime gateway route exclusion contains a duplicate ID")
+		}
+	}
+	udpExceptions, err := normalizeGatewayExceptions(request.UDPExceptions, false)
+	if err != nil {
+		return runtimeapi.GatewaySettings{}, fmt.Errorf("Runtime gateway UDP exceptions: %w", err)
+	}
+	hostExceptions, err := normalizeGatewayExceptions(request.HostExceptions, true)
+	if err != nil {
+		return runtimeapi.GatewaySettings{}, fmt.Errorf("Runtime gateway host exceptions: %w", err)
+	}
+	dnsDirect := append([]string(nil), request.DNSDirectCIDRs...)
+	if len(dnsDirect) > 128 {
+		return runtimeapi.GatewaySettings{}, errors.New("Runtime gateway DNS direct list exceeds 128 entries")
+	}
+	for index, cidr := range dnsDirect {
+		normalized, err := normalizeGatewayCIDR(cidr)
+		if err != nil {
+			return runtimeapi.GatewaySettings{}, fmt.Errorf("Runtime gateway DNS direct CIDR: %w", err)
+		}
+		dnsDirect[index] = normalized
+	}
+	sort.Strings(dnsDirect)
+	for index := 1; index < len(dnsDirect); index++ {
+		if dnsDirect[index-1] == dnsDirect[index] {
+			return runtimeapi.GatewaySettings{}, errors.New("Runtime gateway DNS direct list contains a duplicate CIDR")
+		}
+	}
+	return runtimeapi.GatewaySettings{
+		IPv6Policy:       ipv6Policy,
+		DNSPolicy:        dnsPolicy,
+		CaptureTCP:       captureTCP,
+		CaptureUDP:       captureUDP,
+		ProxyHostTraffic: request.ProxyHostTraffic,
+		ExcludedRouteIDs: excluded,
+		UDPExceptions:    udpExceptions,
+		DNSDirectCIDRs:   dnsDirect,
+		HostExceptions:   hostExceptions,
+	}, nil
+}
+
+func normalizeGatewayExceptions(
+	source []runtimeapi.GatewayTrafficException,
+	allowUID bool,
+) ([]runtimeapi.GatewayTrafficException, error) {
+	if len(source) > 128 {
+		return nil, errors.New("list exceeds 128 entries")
+	}
+	result := make([]runtimeapi.GatewayTrafficException, len(source))
+	for index, exception := range source {
+		if exception.UID != nil && !allowUID {
+			return nil, errors.New("UID is only valid for host traffic")
+		}
+		normalized := runtimeapi.GatewayTrafficException{}
+		if exception.SourceCIDR != "" {
+			cidr, err := normalizeGatewayCIDR(exception.SourceCIDR)
+			if err != nil {
+				return nil, fmt.Errorf("source CIDR: %w", err)
+			}
+			normalized.SourceCIDR = cidr
+		}
+		if exception.DestinationCIDR != "" {
+			cidr, err := normalizeGatewayCIDR(exception.DestinationCIDR)
+			if err != nil {
+				return nil, fmt.Errorf("destination CIDR: %w", err)
+			}
+			normalized.DestinationCIDR = cidr
+		}
+		if exception.UID != nil {
+			uid := *exception.UID
+			normalized.UID = &uid
+		}
+		normalized.DestinationPorts = append(
+			[]runtimeapi.NetworkPortRange(nil),
+			exception.DestinationPorts...,
+		)
+		for portIndex := range normalized.DestinationPorts {
+			portRange := &normalized.DestinationPorts[portIndex]
+			if portRange.Start == 0 {
+				return nil, errors.New("destination port must be between 1 and 65535")
+			}
+			if portRange.End == 0 {
+				portRange.End = portRange.Start
+			}
+			if portRange.End < portRange.Start {
+				return nil, errors.New("destination port range is reversed")
+			}
+		}
+		sort.Slice(normalized.DestinationPorts, func(left, right int) bool {
+			if normalized.DestinationPorts[left].Start != normalized.DestinationPorts[right].Start {
+				return normalized.DestinationPorts[left].Start < normalized.DestinationPorts[right].Start
+			}
+			return normalized.DestinationPorts[left].End < normalized.DestinationPorts[right].End
+		})
+		for portIndex := 1; portIndex < len(normalized.DestinationPorts); portIndex++ {
+			previous := normalized.DestinationPorts[portIndex-1]
+			current := normalized.DestinationPorts[portIndex]
+			if previous == current {
+				return nil, errors.New("destination port list contains a duplicate range")
+			}
+		}
+		if normalized.SourceCIDR == "" &&
+			normalized.DestinationCIDR == "" &&
+			len(normalized.DestinationPorts) == 0 &&
+			normalized.UID == nil {
+			return nil, errors.New("entry must contain at least one typed condition")
+		}
+		result[index] = normalized
+	}
+	sort.Slice(result, func(left, right int) bool {
+		return gatewayExceptionKey(result[left]) < gatewayExceptionKey(result[right])
+	})
+	for index := 1; index < len(result); index++ {
+		if gatewayExceptionKey(result[index-1]) == gatewayExceptionKey(result[index]) {
+			return nil, errors.New("list contains a duplicate entry")
+		}
+	}
+	return result, nil
+}
+
+func normalizeGatewayCIDR(value string) (string, error) {
+	if prefix, err := netip.ParsePrefix(value); err == nil {
+		if !prefix.Addr().Is4() {
+			return "", errors.New("only IPv4 CIDRs are supported")
+		}
+		return prefix.Masked().String(), nil
+	}
+	address, err := netip.ParseAddr(value)
+	if err != nil || !address.Is4() {
+		return "", errors.New("only IPv4 addresses or CIDRs are supported")
+	}
+	return netip.PrefixFrom(address, 32).String(), nil
+}
+
+func gatewayExceptionKey(value runtimeapi.GatewayTrafficException) string {
+	uid := ""
+	if value.UID != nil {
+		uid = fmt.Sprintf("%d", *value.UID)
+	}
+	ports := make([]string, 0, len(value.DestinationPorts))
+	for _, portRange := range value.DestinationPorts {
+		ports = append(ports, fmt.Sprintf("%d-%d", portRange.Start, portRange.End))
+	}
+	return strings.Join([]string{
+		value.SourceCIDR,
+		value.DestinationCIDR,
+		strings.Join(ports, ","),
+		uid,
+	}, "\x00")
+}
+
+func cloneGatewaySettings(source *runtimeapi.GatewaySettings) *runtimeapi.GatewaySettings {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	clone.ExcludedRouteIDs = append([]string(nil), source.ExcludedRouteIDs...)
+	clone.DNSDirectCIDRs = append([]string(nil), source.DNSDirectCIDRs...)
+	clone.UDPExceptions = cloneGatewayExceptions(source.UDPExceptions)
+	clone.HostExceptions = cloneGatewayExceptions(source.HostExceptions)
+	return &clone
+}
+
+func cloneGatewayExceptions(
+	source []runtimeapi.GatewayTrafficException,
+) []runtimeapi.GatewayTrafficException {
+	result := make([]runtimeapi.GatewayTrafficException, len(source))
+	for index, exception := range source {
+		result[index] = exception
+		result[index].DestinationPorts = append(
+			[]runtimeapi.NetworkPortRange(nil),
+			exception.DestinationPorts...,
+		)
+		if exception.UID != nil {
+			uid := *exception.UID
+			result[index].UID = &uid
+		}
+	}
+	return result
 }
 
 func (m *Manager) expirePlansLocked(now time.Time) {

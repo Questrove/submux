@@ -399,7 +399,10 @@ func (s *Store) CompleteOperation(
 				if err := metadata.Put(runModeKey, []byte("explicit")); err != nil {
 					return err
 				}
-			case runtimeapi.ActionEnableTUN, runtimeapi.ActionDisableTUN:
+			case runtimeapi.ActionEnableTUN,
+				runtimeapi.ActionDisableTUN,
+				runtimeapi.ActionEnableGateway,
+				runtimeapi.ActionDisableGateway:
 				if result != nil && result.Verified {
 					if err := recordExplicitMihomoStart(metadata); err != nil {
 						return err
@@ -412,6 +415,8 @@ func (s *Store) CompleteOperation(
 				runMode := runtimeapi.RunModeExplicit
 				if operation.Action.Kind == runtimeapi.ActionEnableTUN {
 					runMode = runtimeapi.RunModeTUN
+				} else if operation.Action.Kind == runtimeapi.ActionEnableGateway {
+					runMode = runtimeapi.RunModeGateway
 				}
 				if result != nil && result.RunMode != "" {
 					runMode = result.RunMode

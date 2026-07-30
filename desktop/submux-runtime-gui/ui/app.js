@@ -12,8 +12,10 @@ const state = {
   sources: [],
   mihomoState: "",
   networkPlanId: "",
+  networkPlanMode: "",
   networkPlanExpiresAt: 0,
   networkPlanExpiryTimer: null,
+  activeNetworkMode: "",
 };
 
 const elements = {
@@ -26,8 +28,15 @@ const elements = {
   revision: document.querySelector("#revision"),
   queue: document.querySelector("#queue"),
   networkState: document.querySelector("#network-state"),
+  networkMode: document.querySelector("#network-mode"),
   networkIpv6: document.querySelector("#network-ipv6"),
   networkDns: document.querySelector("#network-dns"),
+  networkTcp: document.querySelector("#network-tcp"),
+  networkUdp: document.querySelector("#network-udp"),
+  networkHost: document.querySelector("#network-host"),
+  networkDnsDirect: document.querySelector("#network-dns-direct"),
+  networkUdpExceptions: document.querySelector("#network-udp-exceptions"),
+  networkHostExceptions: document.querySelector("#network-host-exceptions"),
   networkRouteList: document.querySelector("#network-route-list"),
   networkPreview: document.querySelector("#network-preview"),
   previewNetwork: document.querySelector("#preview-network"),
@@ -180,6 +189,7 @@ function errorText(error) {
 
 function clearNetworkPlan() {
   state.networkPlanId = "";
+  state.networkPlanMode = "";
   state.networkPlanExpiresAt = 0;
   if (state.networkPlanExpiryTimer !== null) {
     window.clearTimeout(state.networkPlanExpiryTimer);
@@ -202,10 +212,15 @@ function renderSnapshot(snapshot) {
     : recoverySummary;
   elements.runMode.textContent = `运行方式：${snapshot.run_mode || "未配置"}`;
   const network = snapshot.network || {};
+  state.activeNetworkMode = network.mode || "";
   elements.networkState.textContent =
     `${network.state || "未知"} · ${network.mode || "未配置"}` +
+    `${network.preview_only ? " · 预览功能" : ""}` +
     `${network.device ? ` · ${network.device}` : ""}`;
   const networkDetails = [];
+  if (network.preview_only) {
+    networkDetails.push("预览功能：仍需通过真实物理 Linux 网关验收。");
+  }
   if (network.fault) {
     networkDetails.push(`${network.fault.code}: ${network.fault.message}`);
   }
@@ -218,11 +233,23 @@ function renderSnapshot(snapshot) {
     networkDetails.push(`残留：${residual.kind} · ${residual.name} · ${residual.state}`);
   }
   if (!state.networkPlanId) {
-    if (["proxy", "direct", "block"].includes(network.settings?.ipv6_policy)) {
-      elements.networkIpv6.value = network.settings.ipv6_policy;
+    if (["tun", "gateway"].includes(network.mode)) {
+      elements.networkMode.value = network.mode;
     }
-    if (["hijack", "off"].includes(network.settings?.dns_policy)) {
-      elements.networkDns.value = network.settings.dns_policy;
+    const settings = network.gateway_settings || network.settings || {};
+    if (["proxy", "direct", "block"].includes(settings.ipv6_policy)) {
+      elements.networkIpv6.value = settings.ipv6_policy;
+    }
+    if (["hijack", "off"].includes(settings.dns_policy)) {
+      elements.networkDns.value = settings.dns_policy;
+    }
+    if (network.gateway_settings) {
+      elements.networkTcp.checked = Boolean(settings.capture_tcp);
+      elements.networkUdp.checked = Boolean(settings.capture_udp);
+      elements.networkHost.checked = Boolean(settings.proxy_host_traffic);
+      elements.networkDnsDirect.value = (settings.dns_direct_cidrs || []).join("\n");
+      elements.networkUdpExceptions.value = JSON.stringify(settings.udp_exceptions || [], null, 2);
+      elements.networkHostExceptions.value = JSON.stringify(settings.host_exceptions || [], null, 2);
     }
     renderNetworkRoutes(network.routes || []);
     elements.networkPreview.textContent = networkDetails.length
@@ -251,6 +278,35 @@ function selectedCapturedRoutes() {
   );
 }
 
+function selectedGatewayExcludedRoutes() {
+  return Array.from(
+    elements.networkRouteList.querySelectorAll(
+      'input[type="checkbox"][data-role="gateway_lan"]:not(:checked)',
+    ),
+    (input) => input.value,
+  );
+}
+
+function parseGatewayExceptions(value, label) {
+  let parsed;
+  try {
+    parsed = JSON.parse(value || "[]");
+  } catch (error) {
+    throw new Error(`${label}必须是有效 JSON 数组：${errorText(error)}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${label}必须是 JSON 数组。`);
+  }
+  return parsed;
+}
+
+function gatewayDNSDirectCIDRs() {
+  return elements.networkDnsDirect.value
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean);
+}
+
 function renderNetworkRoutes(routes) {
   elements.networkRouteList.replaceChildren();
   if (!routes.length) {
@@ -263,10 +319,20 @@ function renderNetworkRoutes(routes) {
     checkbox.type = "checkbox";
     checkbox.value = route.id;
     checkbox.checked = !route.bypass;
+    checkbox.dataset.role = route.role || "";
+    if (route.role && route.role !== "gateway_lan") {
+      checkbox.disabled = true;
+    }
     const title = document.createElement("strong");
     title.textContent = `${route.cidr} · ${route.interface} · ${route.family}`;
     const detail = document.createElement("small");
-    detail.textContent = `${route.id} · ${route.source || "未知来源"} · 勾选后纳入 TUN`;
+    const instruction =
+      route.role === "gateway_lan"
+        ? "勾选后纳入网关接管"
+        : route.role
+          ? "固定直连"
+          : "勾选后纳入 TUN";
+    detail.textContent = `${route.id} · ${route.source || "未知来源"} · ${route.role || "tun"} · ${instruction}`;
     item.append(checkbox, title, detail);
     elements.networkRouteList.append(item);
   }
@@ -280,17 +346,27 @@ function renderNetworkPreview(preview) {
   const expiresAt = Date.parse(preview.expires_at || "");
   if (!conflicts.length && preview.plan_id && Number.isFinite(expiresAt) && expiresAt > Date.now()) {
     state.networkPlanId = preview.plan_id;
+    state.networkPlanMode = preview.mode;
     state.networkPlanExpiresAt = expiresAt;
     state.networkPlanExpiryTimer = window.setTimeout(() => {
       clearNetworkPlan();
       setBusy(state.busy);
-      setMessage("普通 TUN 预览已经过期，请重新生成网络预览。");
+      setMessage("网络预览已经过期，请重新生成。");
     }, Math.min(expiresAt - Date.now(), 2_147_483_647));
   }
   renderNetworkRoutes(routes);
+  const settings = preview.gateway_settings || preview.settings || {};
   elements.networkPreview.textContent = [
     `计划：${preview.plan_id || "无"}`,
+    `方式：${preview.mode || "未知"}`,
+    `功能状态：${preview.preview_only ? "预览，仍需物理网关验收" : "稳定"}`,
     `设备：${preview.device || "无"}`,
+    `IPv6：${settings.ipv6_policy || "未知"} · DNS：${settings.dns_policy || "未知"}`,
+    ...(preview.gateway_settings
+      ? [
+          `TCP：${settings.capture_tcp} · UDP：${settings.capture_udp} · 主机：${settings.proxy_host_traffic}`,
+        ]
+      : []),
     `有效期：${preview.expires_at || "未知"}`,
     ...warnings.map((warning) => `警告：${warning}`),
     ...conflicts.map(
@@ -302,18 +378,38 @@ function renderNetworkPreview(preview) {
 }
 
 async function previewNetwork() {
-  setBusy(true, "正在读取路由并生成普通 TUN 预览…");
+  setBusy(true, "正在读取路由并生成网络预览…");
   try {
+    const mode = elements.networkMode.value;
+    if (mode === "gateway" && elements.networkIpv6.value === "proxy") {
+      throw new Error("Linux 网关第一版不代理 IPv6；请选择直连并警告或运行期间阻断。");
+    }
     const preview = await invoke("runtime_preview_network", {
+      mode,
       ipv6Policy: elements.networkIpv6.value,
       dnsPolicy: elements.networkDns.value,
-      captureRouteIds: selectedCapturedRoutes(),
+      captureRouteIds: mode === "tun" ? selectedCapturedRoutes() : [],
+      captureTcp: elements.networkTcp.checked,
+      captureUdp: elements.networkUdp.checked,
+      proxyHostTraffic: elements.networkHost.checked,
+      excludedRouteIds: mode === "gateway" ? selectedGatewayExcludedRoutes() : [],
+      udpExceptions:
+        mode === "gateway"
+          ? parseGatewayExceptions(elements.networkUdpExceptions.value, "UDP 直连例外")
+          : [],
+      dnsDirectCidrs: mode === "gateway" ? gatewayDNSDirectCIDRs() : [],
+      hostExceptions:
+        mode === "gateway"
+          ? parseGatewayExceptions(elements.networkHostExceptions.value, "主机直连例外")
+          : [],
     });
     renderNetworkPreview(preview);
     setMessage(
       preview.conflicts?.length
-        ? "发现其他全隧道或同名设备冲突；解决前不能启用。"
-        : "网络预览已生成。修改路由勾选后需再次预览。",
+        ? "发现网络冲突；解决前不能启用。"
+        : preview.preview_only
+          ? "网络预览已生成；该运行方式仍处于预览状态，尚未通过物理网关验收。"
+          : "网络预览已生成。修改路由勾选后需再次预览。",
       Boolean(preview.conflicts?.length),
     );
   } catch (error) {
@@ -332,14 +428,16 @@ async function enableTUN() {
     setMessage("普通 TUN 预览已经过期，请重新生成网络预览。", true);
     return;
   }
-  setBusy(true, "正在提交普通 TUN 启用操作…");
+  setBusy(true, "正在提交网络接管启用操作…");
   try {
-    const operation = await invoke("runtime_enable_tun", {
+    const command =
+      state.networkPlanMode === "gateway" ? "runtime_enable_gateway" : "runtime_enable_tun";
+    const operation = await invoke(command, {
       planId: state.networkPlanId,
     });
     clearNetworkPlan();
     renderOperation(operation);
-    setMessage("普通 TUN 启用操作已经持久化；等待完成后会显示真实网络状态。");
+    setMessage("网络接管启用操作已经持久化；等待完成后会显示真实网络状态。");
   } catch (error) {
     setMessage(errorText(error), true);
   } finally {
@@ -348,12 +446,14 @@ async function enableTUN() {
 }
 
 async function disableTUN() {
-  setBusy(true, "正在停用普通 TUN 并恢复直连…");
+  setBusy(true, "正在停用网络接管并恢复直连…");
   try {
-    const operation = await invoke("runtime_disable_tun");
+    const command =
+      state.activeNetworkMode === "gateway" ? "runtime_disable_gateway" : "runtime_disable_tun";
+    const operation = await invoke(command);
     clearNetworkPlan();
     renderOperation(operation);
-    setMessage("普通 TUN 停用操作已经持久化。");
+    setMessage("网络接管停用操作已经持久化。");
   } catch (error) {
     setMessage(errorText(error), true);
   } finally {
@@ -921,6 +1021,14 @@ elements.verify.addEventListener("click", verifyProxy);
 elements.previewNetwork.addEventListener("click", previewNetwork);
 elements.enableTun.addEventListener("click", enableTUN);
 elements.disableTun.addEventListener("click", disableTUN);
+elements.networkMode.addEventListener("change", () => {
+  if (elements.networkMode.value === "gateway" && elements.networkIpv6.value === "proxy") {
+    elements.networkIpv6.value = "direct";
+  }
+  clearNetworkPlan();
+  setBusy(state.busy);
+  setMessage("网络运行方式已改变，请重新生成网络预览。");
+});
 elements.networkIpv6.addEventListener("change", () => {
   clearNetworkPlan();
   setBusy(state.busy);
@@ -931,6 +1039,20 @@ elements.networkDns.addEventListener("change", () => {
   setBusy(state.busy);
   setMessage("DNS 设置已改变，请重新生成网络预览。");
 });
+for (const control of [
+  elements.networkTcp,
+  elements.networkUdp,
+  elements.networkHost,
+  elements.networkDnsDirect,
+  elements.networkUdpExceptions,
+  elements.networkHostExceptions,
+]) {
+  control.addEventListener("input", () => {
+    clearNetworkPlan();
+    setBusy(state.busy);
+    setMessage("网关设置已改变，请重新生成网络预览。");
+  });
+}
 elements.networkRouteList.addEventListener("change", (event) => {
   if (!(event.target instanceof HTMLInputElement) || event.target.type !== "checkbox") return;
   clearNetworkPlan();
