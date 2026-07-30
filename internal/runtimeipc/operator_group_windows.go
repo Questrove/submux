@@ -37,7 +37,7 @@ func windowsOperatorMemberSIDs() ([]string, error) {
 	members := make([]string, 0, 16)
 	seen := make(map[string]struct{})
 	for {
-		var buffer uintptr
+		var buffer *localGroupMembersInfo0
 		var entriesRead uint32
 		var totalEntries uint32
 		status, _, _ := netLocalGroupGetMembers.Call(
@@ -50,8 +50,8 @@ func windowsOperatorMemberSIDs() ([]string, error) {
 			uintptr(unsafe.Pointer(&totalEntries)),
 			uintptr(unsafe.Pointer(&resume)),
 		)
-		if buffer != 0 {
-			defer netApiBufferFree.Call(buffer)
+		if buffer != nil {
+			defer netApiBufferFree.Call(uintptr(unsafe.Pointer(buffer)))
 		}
 		if status != 0 && status != netAPIErrorMoreData {
 			return nil, fmt.Errorf("enumerate Runtime operator group members: Windows error %d", status)
@@ -61,7 +61,7 @@ func windowsOperatorMemberSIDs() ([]string, error) {
 			return nil, errors.New("Runtime operator group has too many direct members")
 		}
 		if entriesRead > 0 {
-			entries := unsafe.Slice((*localGroupMembersInfo0)(unsafe.Pointer(buffer)), entriesRead)
+			entries := unsafe.Slice(buffer, entriesRead)
 			for _, entry := range entries {
 				if entry.SID == nil || !entry.SID.IsValid() {
 					return nil, errors.New("Runtime operator group contains an invalid SID")
