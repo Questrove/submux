@@ -1,43 +1,717 @@
-name: Release
+name: Runtime Release
 
 on:
   push:
     tags: ['v*']
 
+concurrency:
+  group: runtime-release
+  cancel-in-progress: false
+
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+
+env:
+  MIHOMO_VERSION: v1.19.29
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  policy:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
-      - name: Cross-compile
-        env:
-          VERSION: ${{ github.ref_name }}
-          COMMIT: ${{ github.sha }}
+          cache: true
+      - name: Scan repository history and working tree for secrets
+        uses: gitleaks/gitleaks-action@v2
+      - name: Validate tag, tests, support claims and fixed Mihomo provenance
         run: |
           set -euo pipefail
-          mkdir -p dist
+          [[ "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          go vet ./...
+          go test ./... -count=1
+          go run ./cmd/submux-release-check matrix --file docs/runtime-support.json
+          go run ./cmd/submux-release-check mihomo --file "release/mihomo-${MIHOMO_VERSION}.json"
+
+  linux:
+    runs-on: ubuntu-24.04
+    needs: policy
+    env:
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux GUI and package dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev rpm zstd fakeroot
+      - name: Build Linux programs
+        run: |
+          set -euo pipefail
+          mkdir -p dist/linux/bin dist/products dist/descriptors dist/linux/installers dist/linux/sbom dist/linux/licenses
+          cp LICENSE dist/linux/licenses/Submux-LICENSE
           build_date="$(git show -s --format=%cI HEAD)"
           ldflags="-s -w -X submux/internal/buildinfo.Version=${VERSION} -X submux/internal/buildinfo.Commit=${COMMIT} -X submux/internal/buildinfo.Date=${build_date}"
-          for target in linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64; do
-            os="${target%/*}"; arch="${target#*/}"
-            out="dist/submux-${os}-${arch}"
-            [ "$os" = "windows" ] && out="${out}.exe"
-            echo "building $out"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath -buildvcs=false -ldflags="$ldflags" -o "$out" ./cmd/submux
+          for arch in amd64 arm64; do
+            for command in submux submux-runtime submux-runtime-net; do
+              CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
+                -trimpath -buildvcs=false -ldflags="$ldflags" \
+                -o "dist/linux/bin/${command}-linux-${arch}" "./cmd/${command}"
+            done
           done
-          (cd dist && sha256sum submux-* > checksums.txt)
-          ./dist/submux-linux-amd64 --version | grep -F "$VERSION"
-          ls -la dist
+          cargo build --locked --release \
+            --manifest-path desktop/submux-runtime-gui/src-tauri/Cargo.toml
+          cp desktop/submux-runtime-gui/src-tauri/target/release/submux-runtime-gui \
+            dist/linux/bin/submux-runtime-gui-linux-amd64
+      - uses: anchore/sbom-action@v0
+        with:
+          path: dist/linux/bin
+          format: spdx-json
+          output-file: dist/linux/sbom/SBOM.spdx.json
+          upload-artifact: false
+      - name: Build Linux product update and online installers
+        run: |
+          set -euo pipefail
+          root="$(pwd)"
+          go run ./cmd/submux-product-package \
+            --version "$VERSION" --platform linux --arch amd64 \
+            --runtime "$root/dist/linux/bin/submux-runtime-linux-amd64" \
+            --runtime-net "$root/dist/linux/bin/submux-runtime-net-linux-amd64" \
+            --gui "$root/dist/linux/bin/submux-runtime-gui-linux-amd64" \
+            --output "$root/dist/products/submux-runtime-${VERSION}-linux-amd64.zip" \
+            --descriptor "$root/dist/descriptors/product-linux-amd64.json" \
+            --release-notes "Submux Runtime ${VERSION} preview." \
+            --migration-summary "Runtime schema compatibility is declared by the signed product manifest."
+          packaging/linux/build.sh \
+            --version "$VERSION" --arch amd64 --kind online \
+            --runtime "$root/dist/linux/bin/submux-runtime-linux-amd64" \
+            --runtime-net "$root/dist/linux/bin/submux-runtime-net-linux-amd64" \
+            --gui "$root/dist/linux/bin/submux-runtime-gui-linux-amd64" \
+            --sbom "$root/dist/linux/sbom/SBOM.spdx.json" \
+            --licenses "$root/dist/linux/licenses" --output "$root/dist/linux/installers" --formats deb,rpm,tar
+          packaging/linux/build.sh \
+            --version "$VERSION" --arch arm64 --kind online \
+            --runtime "$root/dist/linux/bin/submux-runtime-linux-arm64" \
+            --runtime-net "$root/dist/linux/bin/submux-runtime-net-linux-arm64" \
+            --sbom "$root/dist/linux/sbom/SBOM.spdx.json" \
+            --licenses "$root/dist/linux/licenses" --output "$root/dist/linux/installers" --formats deb,rpm,tar
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-candidates
+          path: dist/**
+          if-no-files-found: error
 
-      - name: Create GitHub Release
+  windows:
+    runs-on: windows-2025
+    needs: policy
+    env:
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - name: Build Windows programs and GUI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/windows/bin,dist/products,dist/descriptors,dist/windows/installers,dist/windows/sbom | Out-Null
+          $buildDate = git show -s --format=%cI HEAD
+          $ldflags = "-s -w -X submux/internal/buildinfo.Version=$env:VERSION -X submux/internal/buildinfo.Commit=$env:COMMIT -X submux/internal/buildinfo.Date=$buildDate"
+          $env:CGO_ENABLED = '0'
+          foreach ($arch in @('amd64','arm64')) {
+            $env:GOARCH = $arch
+            foreach ($command in @('submux','submux-runtime','submux-runtime-net')) {
+              go build -trimpath -buildvcs=false -ldflags $ldflags -o "dist/windows/bin/$command-windows-$arch.exe" "./cmd/$command"
+            }
+          }
+          Remove-Item Env:GOARCH
+          cargo build --locked --release --manifest-path desktop/submux-runtime-gui/src-tauri/Cargo.toml
+          cargo build --locked --release --target aarch64-pc-windows-msvc --manifest-path desktop/submux-runtime-gui/src-tauri/Cargo.toml
+          Copy-Item desktop/submux-runtime-gui/src-tauri/target/release/submux-runtime-gui.exe dist/windows/bin/submux-runtime-gui-windows-amd64.exe
+          Copy-Item desktop/submux-runtime-gui/src-tauri/target/aarch64-pc-windows-msvc/release/submux-runtime-gui.exe dist/windows/bin/submux-runtime-gui-windows-arm64.exe
+      - uses: anchore/sbom-action@v0
+        with:
+          path: dist/windows/bin
+          format: spdx-json
+          output-file: dist/windows/sbom/SBOM.spdx.json
+          upload-artifact: false
+      - name: Build Windows product updates and online MSI files
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.Util.wixext/6.0.2
+          $root = (Get-Location).Path
+          foreach ($arch in @('amd64','arm64')) {
+            go run ./cmd/submux-product-package `
+              --version $env:VERSION --platform windows --arch $arch `
+              --runtime "$root/dist/windows/bin/submux-runtime-windows-$arch.exe" `
+              --runtime-net "$root/dist/windows/bin/submux-runtime-net-windows-$arch.exe" `
+              --gui "$root/dist/windows/bin/submux-runtime-gui-windows-$arch.exe" `
+              --output "$root/dist/products/submux-runtime-$env:VERSION-windows-$arch.zip" `
+              --descriptor "$root/dist/descriptors/product-windows-$arch.json" `
+              --release-notes "Submux Runtime $env:VERSION preview." `
+              --migration-summary "Runtime schema compatibility is declared by the signed product manifest."
+            ./packaging/windows/build.ps1 `
+              -Version $env:VERSION -Architecture $arch -Kind online `
+              -Runtime "$root/dist/windows/bin/submux-runtime-windows-$arch.exe" `
+              -RuntimeNet "$root/dist/windows/bin/submux-runtime-net-windows-$arch.exe" `
+              -Gui "$root/dist/windows/bin/submux-runtime-gui-windows-$arch.exe" `
+              -Sbom "$root/dist/windows/sbom/SBOM.spdx.json" `
+              -License "$root/LICENSE" `
+              -OutputDirectory "$root/dist/windows/installers"
+            wix msi validate "$root/dist/windows/installers/submux-runtime_$($env:VERSION.Substring(1))_${arch}_online.msi"
+          }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-candidates
+          path: dist/**
+          if-no-files-found: error
+
+  macos:
+    runs-on: macos-15
+    needs: policy
+    env:
+      VERSION: ${{ github.ref_name }}
+      COMMIT: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+      - name: Build macOS programs and GUI
+        run: |
+          set -euo pipefail
+          mkdir -p dist/darwin/bin dist/products dist/descriptors dist/darwin/installers dist/darwin/sbom
+          build_date="$(git show -s --format=%cI HEAD)"
+          ldflags="-s -w -X submux/internal/buildinfo.Version=${VERSION} -X submux/internal/buildinfo.Commit=${COMMIT} -X submux/internal/buildinfo.Date=${build_date}"
+          for arch in amd64 arm64; do
+            for command in submux submux-runtime submux-runtime-net; do
+              CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build \
+                -trimpath -buildvcs=false -ldflags="$ldflags" \
+                -o "dist/darwin/bin/${command}-darwin-${arch}" "./cmd/${command}"
+            done
+          done
+          cargo build --locked --release --target x86_64-apple-darwin \
+            --manifest-path desktop/submux-runtime-gui/src-tauri/Cargo.toml
+          cargo build --locked --release --target aarch64-apple-darwin \
+            --manifest-path desktop/submux-runtime-gui/src-tauri/Cargo.toml
+          cp desktop/submux-runtime-gui/src-tauri/target/x86_64-apple-darwin/release/submux-runtime-gui \
+            dist/darwin/bin/submux-runtime-gui-darwin-amd64
+          cp desktop/submux-runtime-gui/src-tauri/target/aarch64-apple-darwin/release/submux-runtime-gui \
+            dist/darwin/bin/submux-runtime-gui-darwin-arm64
+      - uses: anchore/sbom-action@v0
+        with:
+          path: dist/darwin/bin
+          format: spdx-json
+          output-file: dist/darwin/sbom/SBOM.spdx.json
+          upload-artifact: false
+      - name: Build macOS product updates and unsigned online PKG
+        run: |
+          set -euo pipefail
+          root="$(pwd)"
+          for arch in amd64 arm64; do
+            go run ./cmd/submux-product-package \
+              --version "$VERSION" --platform darwin --arch "$arch" \
+              --runtime "$root/dist/darwin/bin/submux-runtime-darwin-${arch}" \
+              --runtime-net "$root/dist/darwin/bin/submux-runtime-net-darwin-${arch}" \
+              --gui "$root/dist/darwin/bin/submux-runtime-gui-darwin-${arch}" \
+              --output "$root/dist/products/submux-runtime-${VERSION}-darwin-${arch}.zip" \
+              --descriptor "$root/dist/descriptors/product-darwin-${arch}.json" \
+              --release-notes "Submux Runtime ${VERSION} preview." \
+              --migration-summary "Runtime schema compatibility is declared by the signed product manifest."
+          done
+          packaging/macos/build.sh \
+            --version "$VERSION" --kind online \
+            --runtime-amd64 "$root/dist/darwin/bin/submux-runtime-darwin-amd64" \
+            --runtime-arm64 "$root/dist/darwin/bin/submux-runtime-darwin-arm64" \
+            --runtime-net-amd64 "$root/dist/darwin/bin/submux-runtime-net-darwin-amd64" \
+            --runtime-net-arm64 "$root/dist/darwin/bin/submux-runtime-net-darwin-arm64" \
+            --gui-amd64 "$root/dist/darwin/bin/submux-runtime-gui-darwin-amd64" \
+            --gui-arm64 "$root/dist/darwin/bin/submux-runtime-gui-darwin-arm64" \
+            --sbom "$root/dist/darwin/sbom/SBOM.spdx.json" \
+            --license "$root/LICENSE" \
+            --output "$root/dist/darwin/installers"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: macos-candidates
+          path: dist/**
+          if-no-files-found: error
+
+  mihomo:
+    runs-on: ubuntu-24.04
+    needs: policy
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download fixed upstream binaries, GPL license and source
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" dist/* --generate-notes
+        run: |
+          set -euo pipefail
+          mkdir -p mihomo
+          gh release download "$MIHOMO_VERSION" --repo MetaCubeX/mihomo --dir mihomo \
+            --pattern "mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" \
+            --pattern "mihomo-linux-arm64-${MIHOMO_VERSION}.gz" \
+            --pattern "mihomo-windows-amd64-compatible-${MIHOMO_VERSION}.zip" \
+            --pattern "mihomo-windows-arm64-${MIHOMO_VERSION}.zip" \
+            --pattern "mihomo-darwin-amd64-compatible-${MIHOMO_VERSION}.gz" \
+            --pattern "mihomo-darwin-arm64-${MIHOMO_VERSION}.gz"
+          gh api "repos/MetaCubeX/mihomo/tarball/${MIHOMO_VERSION}" \
+            > "mihomo/mihomo-${MIHOMO_VERSION}-source.tar.gz"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            "https://raw.githubusercontent.com/MetaCubeX/mihomo/${MIHOMO_VERSION}/LICENSE" \
+            --output mihomo/Mihomo-GPL-3.0.txt
+          cp "release/mihomo-${MIHOMO_VERSION}.json" mihomo/mihomo-provenance.json
+          go run ./cmd/submux-release-check mihomo \
+            --file "release/mihomo-${MIHOMO_VERSION}.json" \
+            --assets-dir "$(pwd)/mihomo"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: mihomo-release
+          path: mihomo/**
+          if-no-files-found: error
+
+  tuf:
+    runs-on: ubuntu-24.04
+    needs: [linux, windows, macos, mihomo]
+    env:
+      TUF_RELEASE_KEYS_B64: ${{ secrets.TUF_RELEASE_KEYS_B64 }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: '*-candidates'
+          path: candidates
+          merge-multiple: true
+      - uses: actions/download-artifact@v7
+        with:
+          name: mihomo-release
+          path: mihomo
+      - name: Sign Targets, Snapshot and Timestamp outside the Root-key boundary
+        run: |
+          set -euo pipefail
+          test -n "$TUF_RELEASE_KEYS_B64"
+          mkdir -p "$RUNNER_TEMP/tuf-keys"
+          key_archive="$RUNNER_TEMP/tuf-release-keys.tar.gz"
+          printf '%s' "$TUF_RELEASE_KEYS_B64" | base64 --decode > "$key_archive"
+          mapfile -t key_entries < <(tar -tzf "$key_archive")
+          test "${#key_entries[@]}" -ge 5
+          for entry in "${key_entries[@]}"; do
+            if [[ "$entry" == */* || "$entry" == .* ]]; then
+              echo "release-key archive entries must be flat files: $entry" >&2
+              exit 1
+            fi
+            case "$entry" in
+              manifest.json|*.pem) ;;
+              *)
+                echo "unsafe release-key archive entry: $entry" >&2
+                exit 1
+                ;;
+            esac
+          done
+          tar --extract --gzip --file "$key_archive" \
+            --directory "$RUNNER_TEMP/tuf-keys" \
+            --no-same-owner --no-same-permissions
+          if find "$RUNNER_TEMP/tuf-keys" -name 'root-*.pem' -print -quit | grep -q .; then
+            echo "Root private keys must never enter CI" >&2
+            exit 1
+          fi
+          go run ./cmd/submux-tuf prepare-manifest \
+            --descriptors-dir "$(pwd)/candidates/descriptors" \
+            --product-dir "$(pwd)/candidates/products" \
+            --mihomo-provenance "release/mihomo-${MIHOMO_VERSION}.json" \
+            --mihomo-assets-dir "$(pwd)/mihomo" \
+            --output "$RUNNER_TEMP/targets-manifest.json" \
+            --metadata-version "$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))"
+          go run ./cmd/submux-tuf publish \
+            --private-dir "$RUNNER_TEMP/tuf-keys" \
+            --root "$(pwd)/internal/runtimeupdate/assets/root.json" \
+            --targets-manifest "$RUNNER_TEMP/targets-manifest.json" \
+            --output-dir "$(pwd)/tuf" \
+            --confirm-publish
+      - name: Prove online and offline verification parity
+        run: |
+          set -euo pipefail
+          for descriptor in candidates/descriptors/*.json; do
+            platform="$(jq -r '.custom.platform' "$descriptor")"
+            arch="$(jq -r '.custom.arch' "$descriptor")"
+            go run ./cmd/submux-release-check tuf-parity \
+              --root "$(pwd)/tuf/root.json" \
+              --bundle "$(pwd)/tuf/offline-verification-bundle.zip" \
+              --repository "$(pwd)/tuf/repository" \
+              --platform "$platform" --arch "$arch" \
+              --version "${GITHUB_REF_NAME}" --kind product
+          done
+          jq -r '.assets[] | [.platform,.arch] | @tsv' \
+            "release/mihomo-${MIHOMO_VERSION}.json" |
+          while IFS=$'\t' read -r platform arch; do
+            go run ./cmd/submux-release-check tuf-parity \
+              --root "$(pwd)/tuf/root.json" \
+              --bundle "$(pwd)/tuf/offline-verification-bundle.zip" \
+              --repository "$(pwd)/tuf/repository" \
+              --platform "$platform" --arch "$arch" \
+              --version "$MIHOMO_VERSION" --kind mihomo
+          done
+      - name: Refuse leaked signing material
+        run: |
+          ! find tuf -type f \( -name '*.pem' -o -name 'manifest.json' \) -print -quit | grep -q .
+      - uses: actions/upload-artifact@v6
+        with:
+          name: tuf-publication
+          path: tuf/**
+          if-no-files-found: error
+
+  linux-offline:
+    runs-on: ubuntu-24.04
+    needs: [linux, mihomo, tuf]
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: linux-candidates
+          path: candidates
+      - uses: actions/download-artifact@v7
+        with:
+          name: mihomo-release
+          path: mihomo
+      - uses: actions/download-artifact@v7
+        with:
+          name: tuf-publication
+          path: tuf
+      - name: Build complete Linux offline packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes rpm zstd fakeroot
+          mkdir -p core licenses offline
+          gzip -dc "mihomo/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz" > core/mihomo-amd64
+          gzip -dc "mihomo/mihomo-linux-arm64-${MIHOMO_VERSION}.gz" > core/mihomo-arm64
+          chmod 0755 core/*
+          cp LICENSE licenses/Submux-LICENSE
+          cp mihomo/Mihomo-GPL-3.0.txt licenses/
+          root="$(pwd)"
+          for arch in amd64 arm64; do
+            gui=()
+            if [ "$arch" = amd64 ]; then
+              gui=(--gui "$root/candidates/linux/bin/submux-runtime-gui-linux-amd64")
+            fi
+            packaging/linux/build.sh \
+              --version "$VERSION" --arch "$arch" --kind offline \
+              --runtime "$root/candidates/linux/bin/submux-runtime-linux-${arch}" \
+              --runtime-net "$root/candidates/linux/bin/submux-runtime-net-linux-${arch}" \
+              "${gui[@]}" \
+              --sbom "$root/candidates/linux/sbom/SBOM.spdx.json" \
+              --licenses "$root/licenses" \
+              --mihomo "$root/core/mihomo-${arch}" \
+              --mihomo-provenance "$root/mihomo/mihomo-provenance.json" \
+              --mihomo-source "$root/mihomo/mihomo-${MIHOMO_VERSION}-source.tar.gz" \
+              --mihomo-license "$root/mihomo/Mihomo-GPL-3.0.txt" \
+              --tuf "$root/tuf" --output "$root/offline" --formats deb,rpm,tar
+          done
+      - uses: actions/upload-artifact@v6
+        with:
+          name: linux-offline
+          path: offline/**
+          if-no-files-found: error
+
+  windows-offline:
+    runs-on: windows-2025
+    needs: [windows, mihomo, tuf]
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: windows-candidates
+          path: candidates
+      - uses: actions/download-artifact@v7
+        with:
+          name: mihomo-release
+          path: mihomo
+      - uses: actions/download-artifact@v7
+        with:
+          name: tuf-publication
+          path: tuf
+      - name: Build complete unsigned Windows offline MSI files
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 6.0.2
+          wix extension add --global WixToolset.Util.wixext/6.0.2
+          New-Item -ItemType Directory -Force core,offline | Out-Null
+          Expand-Archive "mihomo/mihomo-windows-amd64-compatible-$env:MIHOMO_VERSION.zip" core/amd64
+          Expand-Archive "mihomo/mihomo-windows-arm64-$env:MIHOMO_VERSION.zip" core/arm64
+          $root = (Get-Location).Path
+          foreach ($arch in @('amd64','arm64')) {
+            $mihomo = (Get-ChildItem "core/$arch" -Filter *.exe -Recurse | Select-Object -First 1).FullName
+            ./packaging/windows/build.ps1 `
+              -Version $env:VERSION -Architecture $arch -Kind offline `
+              -Runtime "$root/candidates/windows/bin/submux-runtime-windows-$arch.exe" `
+              -RuntimeNet "$root/candidates/windows/bin/submux-runtime-net-windows-$arch.exe" `
+              -Gui "$root/candidates/windows/bin/submux-runtime-gui-windows-$arch.exe" `
+              -Sbom "$root/candidates/windows/sbom/SBOM.spdx.json" `
+              -License "$root/LICENSE" `
+              -Mihomo $mihomo `
+              -MihomoProvenance "$root/mihomo/mihomo-provenance.json" `
+              -MihomoSource "$root/mihomo/mihomo-$env:MIHOMO_VERSION-source.tar.gz" `
+              -MihomoLicense "$root/mihomo/Mihomo-GPL-3.0.txt" `
+              -TufDirectory "$root/tuf" `
+              -OutputDirectory "$root/offline"
+            wix msi validate "$root/offline/submux-runtime_$($env:VERSION.Substring(1))_${arch}_offline.msi"
+          }
+      - uses: actions/upload-artifact@v6
+        with:
+          name: windows-offline
+          path: offline/**
+          if-no-files-found: error
+
+  macos-offline:
+    runs-on: macos-15
+    needs: [macos, mihomo, tuf]
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v7
+        with:
+          name: macos-candidates
+          path: candidates
+      - uses: actions/download-artifact@v7
+        with:
+          name: mihomo-release
+          path: mihomo
+      - uses: actions/download-artifact@v7
+        with:
+          name: tuf-publication
+          path: tuf
+      - name: Build complete unsigned and unnotarized macOS offline PKG
+        run: |
+          set -euo pipefail
+          mkdir -p core offline
+          gzip -dc "mihomo/mihomo-darwin-amd64-compatible-${MIHOMO_VERSION}.gz" > core/mihomo-amd64
+          gzip -dc "mihomo/mihomo-darwin-arm64-${MIHOMO_VERSION}.gz" > core/mihomo-arm64
+          chmod 0755 core/*
+          root="$(pwd)"
+          packaging/macos/build.sh \
+            --version "$VERSION" --kind offline \
+            --runtime-amd64 "$root/candidates/darwin/bin/submux-runtime-darwin-amd64" \
+            --runtime-arm64 "$root/candidates/darwin/bin/submux-runtime-darwin-arm64" \
+            --runtime-net-amd64 "$root/candidates/darwin/bin/submux-runtime-net-darwin-amd64" \
+            --runtime-net-arm64 "$root/candidates/darwin/bin/submux-runtime-net-darwin-arm64" \
+            --gui-amd64 "$root/candidates/darwin/bin/submux-runtime-gui-darwin-amd64" \
+            --gui-arm64 "$root/candidates/darwin/bin/submux-runtime-gui-darwin-arm64" \
+            --sbom "$root/candidates/darwin/sbom/SBOM.spdx.json" \
+            --license "$root/LICENSE" \
+            --mihomo-amd64 "$root/core/mihomo-amd64" \
+            --mihomo-arm64 "$root/core/mihomo-arm64" \
+            --mihomo-provenance "$root/mihomo/mihomo-provenance.json" \
+            --mihomo-source "$root/mihomo/mihomo-${MIHOMO_VERSION}-source.tar.gz" \
+            --mihomo-license "$root/mihomo/Mihomo-GPL-3.0.txt" \
+            --tuf "$root/tuf" --output "$root/offline"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: macos-offline
+          path: offline/**
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-24.04
+    needs: [linux, windows, macos, mihomo, tuf, linux-offline, windows-offline, macos-offline]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: '*'
+          path: dist
+          merge-multiple: true
+      - name: Final supply-chain and product-boundary gates
+        id: channel
+        run: |
+          set -euo pipefail
+          ! find dist -type f \( -name '*.pem' -o -name 'manifest.json' \) -print -quit | grep -q .
+          test -f dist/root.json
+          test -f dist/timestamp.json
+          test -f dist/snapshot.json
+          test -f dist/targets.json
+          test -f dist/offline-verification-bundle.zip
+          find dist -type f -name 'SBOM.spdx.json' -print -quit | grep -q .
+          find dist -type f -name '*_offline.deb' -print -quit | grep -q .
+          find dist -type f -name '*_offline.msi' -print -quit | grep -q .
+          find dist -type f -name '*_offline_unsigned.pkg' -print -quit | grep -q .
+          test -d dist/repository/metadata
+          test -d dist/repository/targets
+          go run ./cmd/submux-release-check scan \
+            --dir "$(pwd)/dist" --policy release/runtime-release-policy.json
+
+          mkdir -p publish
+          copy_unique() {
+            source=$1
+            destination="publish/$(basename "$source")"
+            if [ -e "$destination" ]; then
+              echo "duplicate flat release asset: $destination" >&2
+              exit 1
+            fi
+            install -m 0644 "$source" "$destination"
+          }
+          for directory in \
+            dist/linux/bin dist/windows/bin dist/darwin/bin dist/products \
+            dist/linux/installers dist/windows/installers dist/darwin/installers; do
+            while IFS= read -r -d '' source; do
+              copy_unique "$source"
+            done < <(find "$directory" -type f -print0 | sort -z)
+          done
+          while IFS= read -r -d '' source; do
+            copy_unique "$source"
+          done < <(
+            find dist -maxdepth 1 -type f \
+              \( -name 'submux-runtime_*' -o -name 'mihomo-*' -o -name 'Mihomo-*' \) \
+              -print0 | sort -z
+          )
+          install -m 0644 dist/linux/sbom/SBOM.spdx.json publish/SBOM-linux.spdx.json
+          install -m 0644 dist/windows/sbom/SBOM.spdx.json publish/SBOM-windows.spdx.json
+          install -m 0644 dist/darwin/sbom/SBOM.spdx.json publish/SBOM-darwin.spdx.json
+          install -m 0644 dist/root.json publish/root.json
+          install -m 0644 dist/timestamp.json publish/timestamp.json
+          install -m 0644 dist/snapshot.json publish/snapshot.json
+          install -m 0644 dist/targets.json publish/targets.json
+          install -m 0644 dist/offline-verification-bundle.zip \
+            publish/offline-verification-bundle.zip
+          install -m 0644 docs/runtime-support.json publish/runtime-support.json
+          install -m 0644 LICENSE publish/Submux-LICENSE
+          (
+            cd dist/repository
+            tar --sort=name \
+              --mtime="@$(git -C "$GITHUB_WORKSPACE" show -s --format=%ct HEAD)" \
+              --owner=0 --group=0 --numeric-owner -cf - .
+          ) | gzip -n -9 > "publish/tuf-repository-${GITHUB_REF_NAME}.tar.gz"
+          (
+            cd publish
+            find . -type f ! -name SHA256SUMS -print0 |
+              sort -z |
+              xargs -0 sha256sum > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+          go run ./cmd/submux-release-check scan \
+            --dir "$(pwd)/publish" --policy release/runtime-release-policy.json
+          if jq -e 'any(.entries[]; .status == "preview")' docs/runtime-support.json >/dev/null; then
+            echo 'value=preview' >> "$GITHUB_OUTPUT"
+          else
+            echo 'value=stable' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Generate truthful release notes
+        run: |
+          {
+            echo "# Submux Runtime ${GITHUB_REF_NAME}"
+            echo
+            echo "Support channel: **${{ steps.channel.outputs.value }}**."
+            echo
+            echo "The machine-readable evidence matrix is included in the source at docs/runtime-support.json."
+            echo "Windows MSI files are unsigned and may show Unknown Publisher."
+            echo "macOS PKG files are unsigned and unnotarized."
+            echo "No platform without complete native evidence is described as stable."
+            echo
+            echo "Verified paths: package build and checksum; signed TUF online/offline parity;"
+            echo "install/upgrade/repair/rollback/uninstall only where the support matrix cites native evidence."
+            echo
+            echo "Verify downloads with \`sha256sum -c SHA256SUMS\` and GitHub Artifact Attestations."
+            echo "The TUF repository archive matches the repository published from the \`tuf\` branch."
+            echo
+            echo "Mihomo ${MIHOMO_VERSION} provenance, GPLv3 license and matching source archive are included."
+          } > RELEASE-NOTES.md
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: publish/*
+      - name: Prepare draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.channel.outputs.value }}
+        run: |
+          set -euo pipefail
+          existing=$(
+            gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null ||
+              true
+          )
+          args=(--title "Submux Runtime ${GITHUB_REF_NAME}" --notes-file RELEASE-NOTES.md)
+          if [ "$CHANNEL" = preview ]; then
+            args+=(--prerelease --latest=false)
+          else
+            args+=(--prerelease=false --latest)
+          fi
+          if [ "$existing" = false ]; then
+            echo "release is already public; refusing to mutate immutable assets" >&2
+            exit 1
+          elif [ "$existing" = true ]; then
+            gh release upload "$GITHUB_REF_NAME" publish/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --draft "${args[@]}"
+          else
+            gh release create "$GITHUB_REF_NAME" publish/* \
+              --draft --verify-tag "${args[@]}"
+          fi
+      - name: Publish the online TUF repository branch
+        run: |
+          set -euo pipefail
+          branch_root="$RUNNER_TEMP/submux-tuf-branch"
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          if git fetch origin refs/heads/tuf:refs/remotes/origin/tuf; then
+            git worktree add --detach "$branch_root" origin/tuf
+            (
+              cd "$branch_root"
+              git switch -C tuf origin/tuf
+            )
+          else
+            git worktree add --detach "$branch_root"
+            (
+              cd "$branch_root"
+              git switch --orphan tuf
+            )
+          fi
+          (
+            cd "$branch_root"
+            git rm -r --ignore-unmatch .
+            cp -a "$GITHUB_WORKSPACE/dist/repository/." .
+            test -f metadata/root.json
+            test -f metadata/timestamp.json
+            test -f metadata/snapshot.json
+            test -f metadata/targets.json
+            test -n "$(find targets -type f -print -quit)"
+            git add -A
+            git commit -m "publish Runtime TUF ${GITHUB_REF_NAME}"
+            git push origin HEAD:refs/heads/tuf
+          )
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false

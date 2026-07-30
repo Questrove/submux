@@ -17,6 +17,9 @@ gui_amd64=
 gui_arm64=
 mihomo_amd64=
 mihomo_arm64=
+mihomo_provenance=
+mihomo_source=
+mihomo_license=
 tuf_dir=
 sbom=
 license=
@@ -34,6 +37,9 @@ while (($# > 0)); do
     --gui-arm64) gui_arm64=${2:-}; shift 2 ;;
     --mihomo-amd64) mihomo_amd64=${2:-}; shift 2 ;;
     --mihomo-arm64) mihomo_arm64=${2:-}; shift 2 ;;
+    --mihomo-provenance) mihomo_provenance=${2:-}; shift 2 ;;
+    --mihomo-source) mihomo_source=${2:-}; shift 2 ;;
+    --mihomo-license) mihomo_license=${2:-}; shift 2 ;;
     --tuf) tuf_dir=${2:-}; shift 2 ;;
     --sbom) sbom=${2:-}; shift 2 ;;
     --license) license=${2:-}; shift 2 ;;
@@ -65,6 +71,9 @@ done
 if [[ $kind == offline ]]; then
   require_regular "Mihomo amd64" "$mihomo_amd64"
   require_regular "Mihomo arm64" "$mihomo_arm64"
+  require_regular "Mihomo provenance" "$mihomo_provenance"
+  require_regular "Mihomo source" "$mihomo_source"
+  require_regular "Mihomo license" "$mihomo_license"
   [[ -n $tuf_dir && -d $tuf_dir && ! -L $tuf_dir ]] || fail "--tuf must be a real directory"
   if find "$tuf_dir" -type l -o \( ! -type d ! -type f \) | grep -q .; then
     fail "--tuf contains a link or non-regular entry"
@@ -73,8 +82,8 @@ if [[ $kind == offline ]]; then
     require_regular "TUF $metadata" "$tuf_dir/$metadata"
     plutil -lint "$tuf_dir/$metadata" >/dev/null
   done
-elif [[ -n $mihomo_amd64 || -n $mihomo_arm64 || -n $tuf_dir ]]; then
-  fail "online PKG files must not contain Mihomo or offline TUF metadata"
+elif [[ -n $mihomo_amd64 || -n $mihomo_arm64 || -n $mihomo_provenance || -n $mihomo_source || -n $mihomo_license || -n $tuf_dir ]]; then
+  fail "online PKG files must not contain Mihomo, its source/provenance, or offline TUF metadata"
 fi
 
 for tool in lipo pkgbuild productbuild plutil shasum; do
@@ -145,9 +154,12 @@ if [[ $kind == offline ]]; then
   offline="$root/Library/PrivilegedHelperTools/SubmuxRuntimeOffline"
   install -d "$offline/tuf"
   lipo -create "$mihomo_amd64" "$mihomo_arm64" -output "$offline/mihomo"
-  cp -a "$tuf_dir/." "$offline/tuf/"
-  find "$offline/tuf" -type d -exec chmod 0755 {} +
-  find "$offline/tuf" -type f -exec chmod 0644 {} +
+  install -m 0644 "$mihomo_provenance" "$offline/mihomo-provenance.json"
+  install -m 0644 "$mihomo_source" "$offline/mihomo-source.tar.gz"
+  install -m 0644 "$mihomo_license" "$offline/Mihomo-GPL-3.0.txt"
+  for metadata in root.json timestamp.json snapshot.json targets.json; do
+    install -m 0644 "$tuf_dir/$metadata" "$offline/tuf/$metadata"
+  done
 fi
 
 manifest="$root/Library/PrivilegedHelperTools/ARTIFACT-MANIFEST.sha256"

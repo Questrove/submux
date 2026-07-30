@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "repository": "MetaCubeX/mihomo",
+  "version": "v1.19.29",
+  "tag": "v1.19.29",
+  "commit": "e26714a181ac0e2fa803453c0a8e9a9ce94e31cb",
+  "license": "GPL-3.0-only",
+  "license_url": "https://raw.githubusercontent.com/MetaCubeX/mihomo/v1.19.29/LICENSE",
+  "source_archive": {
+    "name": "mihomo-v1.19.29-source.tar.gz",
+    "url": "https://api.github.com/repos/MetaCubeX/mihomo/tarball/v1.19.29",
+    "sha256": "2726c746c661fd5e289758ce8ab67bd782922189bb8a05f7b6212b77e41c4dfd"
+  },
+  "assets": [
+    {
+      "platform": "linux",
+      "arch": "amd64",
+      "name": "mihomo-linux-amd64-compatible-v1.19.29.gz",
+      "sha256": "5612e698e96c8b8ad15abc4c0a4f098eba9234354b4f248cb97f2528e215b094"
+    },
+    {
+      "platform": "linux",
+      "arch": "arm64",
+      "name": "mihomo-linux-arm64-v1.19.29.gz",
+      "sha256": "9a868b5e4e0ad91d9d71e1b41b0cfce78aaba44360c30df74a723f8e3926a86c"
+    },
+    {
+      "platform": "windows",
+      "arch": "amd64",
+      "name": "mihomo-windows-amd64-compatible-v1.19.29.zip",
+      "sha256": "322aaa5957ba9e72afdda9b71cc4329f691d2d45ec39e70bbca3f7bf5aa93d52"
+    },
+    {
+      "platform": "windows",
+      "arch": "arm64",
+      "name": "mihomo-windows-arm64-v1.19.29.zip",
+      "sha256": "f71736f9c2a17abb8909a726c69ac55279d0cb43d1d9f2c85afdbb70a0f326a3"
+    },
+    {
+      "platform": "darwin",
+      "arch": "amd64",
+      "name": "mihomo-darwin-amd64-compatible-v1.19.29.gz",
+      "sha256": "b43980c9bbcf10911f264662a8be4fdf4c95f4567244d6824c3f5365bab0e7d9"
+    },
+    {
+      "platform": "darwin",
+      "arch": "arm64",
+      "name": "mihomo-darwin-arm64-v1.19.29.gz",
+      "sha256": "4dc25df9e899f14161911302a8ee5fc9e202ed9c976fc405bf82c50ff27466ca"
+    }
+  ]
+}

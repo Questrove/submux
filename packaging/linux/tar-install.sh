@@ -16,8 +16,12 @@ tmpfiles_root=/usr/lib/tmpfiles.d
 receipt="$state_root/install-receipt.json"
 
 [ "$(id -u)" -eq 0 ] || fail "machine installation requires root"
-[ -f "$metadata" ] && [ ! -L "$metadata" ] || fail "package metadata is missing"
-[ -d "$payload" ] && [ ! -L "$payload" ] || fail "package payload is missing"
+if [ ! -f "$metadata" ] || [ -L "$metadata" ]; then
+  fail "package metadata is missing"
+fi
+if [ ! -d "$payload" ] || [ -L "$payload" ]; then
+  fail "package payload is missing"
+fi
 
 metadata_value() {
   key=$1
@@ -33,15 +37,22 @@ package_kind=$(metadata_value KIND)
 
 verify_payload() {
   manifest="$payload/usr/lib/submux-runtime/ARTIFACT-MANIFEST.sha256"
-  [ -f "$manifest" ] && [ ! -L "$manifest" ] || fail "artifact manifest is missing"
+  if [ ! -f "$manifest" ] || [ -L "$manifest" ]; then
+    fail "artifact manifest is missing"
+  fi
   (
     cd "$payload"
     sha256sum --strict --check "usr/lib/submux-runtime/ARTIFACT-MANIFEST.sha256"
   ) || fail "artifact manifest verification failed"
   [ "$(readlink "$payload/usr/bin/submux-runtime")" = ../lib/submux-runtime/submux-runtime ] ||
     fail "Runtime CLI link is invalid"
-  [ "$(readlink "$payload/usr/bin/submux-runtime-gui")" = ../lib/submux-runtime/submux-runtime-gui ] ||
-    fail "Runtime GUI link is invalid"
+  if [ -e "$payload/usr/lib/submux-runtime/submux-runtime-gui" ] ||
+     [ -L "$payload/usr/bin/submux-runtime-gui" ]; then
+    if [ ! -f "$payload/usr/lib/submux-runtime/submux-runtime-gui" ] ||
+       [ "$(readlink "$payload/usr/bin/submux-runtime-gui")" != ../lib/submux-runtime/submux-runtime-gui ]; then
+      fail "Runtime GUI payload or link is invalid"
+    fi
+  fi
   unexpected=$(find "$payload" -type l \
     ! -path "$payload/usr/bin/submux-runtime" \
     ! -path "$payload/usr/bin/submux-runtime-gui" -print -quit)

@@ -18,6 +18,9 @@ sbom_file=
 licenses_dir=
 tuf_dir=
 mihomo_binary=
+mihomo_provenance=
+mihomo_source=
+mihomo_license=
 output_dir=
 formats=deb,rpm,tar
 
@@ -33,6 +36,9 @@ while (($# > 0)); do
     --licenses) licenses_dir=${2:-}; shift 2 ;;
     --tuf) tuf_dir=${2:-}; shift 2 ;;
     --mihomo) mihomo_binary=${2:-}; shift 2 ;;
+    --mihomo-provenance) mihomo_provenance=${2:-}; shift 2 ;;
+    --mihomo-source) mihomo_source=${2:-}; shift 2 ;;
+    --mihomo-license) mihomo_license=${2:-}; shift 2 ;;
     --output) output_dir=${2:-}; shift 2 ;;
     --formats) formats=${2:-}; shift 2 ;;
     *) fail "unsupported option $1" ;;
@@ -69,12 +75,15 @@ require_regular "--sbom" "$sbom_file"
 require_tree "--licenses" "$licenses_dir"
 if [[ $package_kind == offline ]]; then
   require_regular "--mihomo" "$mihomo_binary"
+  require_regular "--mihomo-provenance" "$mihomo_provenance"
+  require_regular "--mihomo-source" "$mihomo_source"
+  require_regular "--mihomo-license" "$mihomo_license"
   require_tree "--tuf" "$tuf_dir"
   for metadata in root.json timestamp.json snapshot.json targets.json; do
     require_regular "offline TUF $metadata" "$tuf_dir/$metadata"
   done
-elif [[ -n $mihomo_binary || -n $tuf_dir ]]; then
-  fail "online packages must not contain Mihomo or an offline TUF bundle"
+elif [[ -n $mihomo_binary || -n $mihomo_provenance || -n $mihomo_source || -n $mihomo_license || -n $tuf_dir ]]; then
+  fail "online packages must not contain Mihomo, its source/provenance, or an offline TUF bundle"
 fi
 
 case ",$formats," in
@@ -123,9 +132,12 @@ fi
 if [[ $package_kind == offline ]]; then
   install -d "$root/usr/lib/submux-runtime/offline/tuf"
   install -m 0755 "$mihomo_binary" "$root/usr/lib/submux-runtime/offline/mihomo"
-  cp -a "$tuf_dir/." "$root/usr/lib/submux-runtime/offline/tuf/"
-  find "$root/usr/lib/submux-runtime/offline/tuf" -type d -exec chmod 0755 {} +
-  find "$root/usr/lib/submux-runtime/offline/tuf" -type f -exec chmod 0644 {} +
+  install -m 0644 "$mihomo_provenance" "$root/usr/lib/submux-runtime/offline/mihomo-provenance.json"
+  install -m 0644 "$mihomo_source" "$root/usr/lib/submux-runtime/offline/mihomo-source.tar.gz"
+  install -m 0644 "$mihomo_license" "$root/usr/lib/submux-runtime/offline/Mihomo-GPL-3.0.txt"
+  for metadata in root.json timestamp.json snapshot.json targets.json; do
+    install -m 0644 "$tuf_dir/$metadata" "$root/usr/lib/submux-runtime/offline/tuf/$metadata"
+  done
 fi
 
 {
@@ -259,13 +271,17 @@ build_rpm() {
   command -v rpmbuild >/dev/null || fail "rpmbuild is required for RPM output"
   rpm_arch=x86_64
   [[ $architecture == arm64 ]] && rpm_arch=aarch64
+  rpm_license=MIT
+  [[ $package_kind == offline ]] && rpm_license='MIT AND GPL-3.0-only'
+  rpm_gui_file=
+  [[ -z $gui_binary ]] || rpm_gui_file=/usr/bin/submux-runtime-gui
   spec="$work/submux-runtime.spec"
   cat >"$spec" <<EOF
 Name: submux-runtime
 Version: ${version#v}
 Release: 1
 Summary: Local-only Submux Runtime
-License: GPL-3.0-or-later
+License: $rpm_license
 BuildArch: $rpm_arch
 Requires: systemd, glibc
 
@@ -353,10 +369,11 @@ if [ "\$1" -eq 0 ]; then
   [ -z "\$sockets" ] || residuals="\${residuals}\\nsockets:\$sockets"
   if [ -n "\$residuals" ]; then
     printf 'Submux Runtime uninstall residuals detected:%%b\\n' "\$residuals" >&2
+    exit 1
   else
     echo "No Runtime-owned service, route, DNS, firewall, TUN, or Socket residual was detected."
   fi
-  members=\$(getent group submux-runtime | awk -F: '{ print \$4 }' | tr ',' ' ')
+  members=\$(getent group submux-runtime 2>/dev/null | awk -F: '{ print \$4 }' | tr ',' ' ' || true)
   for member in \$members; do
     [ "\$member" = submux-runtime ] ||
       gpasswd --delete "\$member" submux-runtime >/dev/null 2>&1 || true
@@ -387,7 +404,7 @@ fi
 /usr/lib/systemd/system/submux-runtime-net.service
 /usr/lib/tmpfiles.d/submux-runtime.conf
 /usr/bin/submux-runtime
-/usr/bin/submux-runtime-gui
+$rpm_gui_file
 /usr/sbin/submux-runtime-authorize-user
 /usr/sbin/submux-runtime-uninstall
 EOF

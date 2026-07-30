@@ -3,6 +3,8 @@
 `build.sh` produces DEB, RPM, and tar.zst packages for systemd/glibc hosts.
 `--gui` is optional for server packages; when supplied it must be the real
 Runtime GUI executable for the target architecture.
+Offline packages additionally require the fixed Mihomo executable, its signed
+provenance JSON, GPLv3 text, matching source archive, and complete TUF metadata.
 The server form authorizes only root by default. A desktop installation must
 name the user explicitly:
 

@@ -1,0 +1,127 @@
+{
+  "schema": 1,
+  "forbidden_tokens": [
+    "submux-agent",
+    "SubmuxAgent",
+    "submux_agent",
+    "bootstrap-agent",
+    "runtime-enrollment",
+    "-----BEGIN PRIVATE KEY-----",
+    "-----BEGIN OPENSSH PRIVATE KEY-----"
+  ],
+  "secret_prefixes": [
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "AKIA"
+  ],
+  "budget_required_patterns": [
+    "submux-*",
+    "*.exe",
+    "*.zip",
+    "*.gz",
+    "*.zst",
+    "*.deb",
+    "*.rpm",
+    "*.msi",
+    "*.pkg"
+  ],
+  "budgets": [
+    {
+      "pattern": "submux-linux-*",
+      "max_bytes": 20971520
+    },
+    {
+      "pattern": "submux-windows-*",
+      "max_bytes": 20971520
+    },
+    {
+      "pattern": "submux-darwin-*",
+      "max_bytes": 20971520
+    },
+    {
+      "pattern": "submux-runtime-linux-*",
+      "max_bytes": 20971520,
+      "approved_max_bytes": 26214400,
+      "approval": "Issue #25 preview exception: Runtime binaries are awaiting size optimization before stable support"
+    },
+    {
+      "pattern": "submux-runtime-windows-*",
+      "max_bytes": 20971520,
+      "approved_max_bytes": 26214400,
+      "approval": "Issue #25 preview exception: Runtime binaries are awaiting size optimization before stable support"
+    },
+    {
+      "pattern": "submux-runtime-darwin-*",
+      "max_bytes": 20971520,
+      "approved_max_bytes": 26214400,
+      "approval": "Issue #25 preview exception: Runtime binaries are awaiting size optimization before stable support"
+    },
+    {
+      "pattern": "submux-runtime-gui-*",
+      "max_bytes": 31457280,
+      "approved_max_bytes": 52428800,
+      "approval": "Issue #25 preview exception: Tauri preview binaries are awaiting size optimization"
+    },
+    {
+      "pattern": "submux-runtime-net-*",
+      "max_bytes": 3145728,
+      "approved_max_bytes": 12582912,
+      "approval": "Issue #25 preview exception: Go helper optimization remains required before stable support"
+    },
+    {
+      "pattern": "submux-runtime-v*.zip",
+      "max_bytes": 41943040,
+      "approved_max_bytes": 83886080,
+      "approval": "Issue #25 preview exception: product update archives contain three platform components"
+    },
+    {
+      "pattern": "submux-runtime_*_online*.*",
+      "max_bytes": 15728640,
+      "approved_max_bytes": 52428800,
+      "approval": "Issue #25 preview exception: unsigned preview installers are not size-optimized"
+    },
+    {
+      "pattern": "submux-runtime_*_offline*.*",
+      "max_bytes": 41943040,
+      "approved_max_bytes": 104857600,
+      "approval": "Issue #25 preview exception: complete offline installers include fixed Mihomo and TUF material"
+    },
+    {
+      "pattern": "*.submux-runtime-v*.zip",
+      "max_bytes": 41943040,
+      "approved_max_bytes": 83886080,
+      "approval": "Issue #25 preview exception: consistent-snapshot product targets retain the product archive"
+    },
+    {
+      "pattern": "mihomo-*.gz",
+      "max_bytes": 33554432
+    },
+    {
+      "pattern": "mihomo-*.zip",
+      "max_bytes": 33554432
+    },
+    {
+      "pattern": "*.mihomo-*.gz",
+      "max_bytes": 33554432
+    },
+    {
+      "pattern": "*.mihomo-*.zip",
+      "max_bytes": 33554432
+    },
+    {
+      "pattern": "offline-verification-bundle.zip",
+      "max_bytes": 167772160,
+      "approved_max_bytes": 536870912,
+      "approval": "Issue #25 preview exception: one bundle carries all signed product and Mihomo targets; split bundles before stable support"
+    },
+    {
+      "pattern": "tuf-repository-v*.tar.gz",
+      "max_bytes": 167772160,
+      "approved_max_bytes": 536870912,
+      "approval": "Issue #25 preview exception: the portable online repository archive carries every signed target"
+    }
+  ]
+}

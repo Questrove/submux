@@ -9,7 +9,9 @@ separate amd64 and arm64 inputs. The package installs:
 - a normal `/Applications/Submux Runtime.app` GUI;
 - owner-only Runtime and privileged state directories;
 - SHA-256 evidence, SBOM, notices, and, for offline packages, fixed Mihomo and
-  complete TUF metadata.
+  complete TUF metadata;
+- for offline packages, the exact Mihomo provenance, GPLv3 text, and matching
+  source archive.
 
 The server form authorizes only root. A desktop administrator explicitly runs
 `submux-runtime-authorize-user --confirm USER`; it adds only that account to

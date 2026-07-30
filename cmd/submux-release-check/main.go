@@ -14,14 +14,38 @@ func main() {
 }
 
 func run(arguments []string, stdout, stderr io.Writer) int {
-	if len(arguments) == 0 || arguments[0] != "matrix" {
-		fmt.Fprintln(stderr, "usage: submux-release-check matrix --file PATH")
+	if len(arguments) == 0 {
+		printUsage(stderr)
 		return 2
 	}
+	switch arguments[0] {
+	case "matrix":
+		return runMatrix(arguments[1:], stdout, stderr)
+	case "scan":
+		return runScan(arguments[1:], stdout, stderr)
+	case "mihomo":
+		return runMihomo(arguments[1:], stdout, stderr)
+	case "tuf-parity":
+		return runTUFParity(arguments[1:], stdout, stderr)
+	default:
+		printUsage(stderr)
+		return 2
+	}
+}
+
+func printUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "usage:")
+	fmt.Fprintln(writer, "  submux-release-check matrix --file PATH")
+	fmt.Fprintln(writer, "  submux-release-check scan --dir ABS --policy PATH")
+	fmt.Fprintln(writer, "  submux-release-check mihomo --file PATH [--assets-dir ABS]")
+	fmt.Fprintln(writer, "  submux-release-check tuf-parity --root ABS --bundle ABS --repository ABS --platform PLATFORM --arch ARCH --version VERSION --kind mihomo|product")
+}
+
+func runMatrix(arguments []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("matrix", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	name := flags.String("file", "", "runtime support matrix JSON")
-	if err := flags.Parse(arguments[1:]); err != nil {
+	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 || *name == "" {

@@ -52,10 +52,12 @@ type generatedKey struct {
 }
 
 type privateManifest struct {
-	Schema       int            `json:"schema"`
-	CreatedAt    time.Time      `json:"created_at"`
-	RootExpires  time.Time      `json:"root_expires"`
-	RootSHA256   string         `json:"root_sha256"`
+	Schema      int       `json:"schema"`
+	CreatedAt   time.Time `json:"created_at"`
+	RootExpires time.Time `json:"root_expires"`
+	RootSHA256  string    `json:"root_sha256"`
+	// PublicRoot records where the bootstrap ceremony wrote its public output.
+	// RootSHA256, not this host-specific audit hint, binds a later publication.
 	PublicRoot   string         `json:"public_root"`
 	RolePolicies []roleManifest `json:"roles"`
 }
@@ -75,9 +77,19 @@ func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }
 
-func run(_ context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "bootstrap-root" {
-		fmt.Fprintln(stderr, "usage: submux-tuf bootstrap-root --private-dir ABS --public-root ABS --confirm-new-root")
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		printUsage(stderr)
+		return 2
+	}
+	if args[0] == "publish" {
+		return runPublish(ctx, args[1:], stdout, stderr)
+	}
+	if args[0] == "prepare-manifest" {
+		return runPrepareManifest(args[1:], stdout, stderr)
+	}
+	if args[0] != "bootstrap-root" {
+		printUsage(stderr)
 		return 2
 	}
 	flags := flag.NewFlagSet("bootstrap-root", flag.ContinueOnError)
@@ -105,6 +117,13 @@ func run(_ context.Context, args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "private signing keys: %s\n", result.PrivateDir)
 	fmt.Fprintf(stdout, "public root metadata: %s\n", result.PublicRoot)
 	return 0
+}
+
+func printUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "usage:")
+	fmt.Fprintln(writer, "  submux-tuf bootstrap-root --private-dir ABS --public-root ABS --confirm-new-root")
+	fmt.Fprintln(writer, "  submux-tuf prepare-manifest --descriptors-dir ABS --product-dir ABS --mihomo-provenance PATH --mihomo-assets-dir ABS --output ABS --metadata-version N")
+	fmt.Fprintln(writer, "  submux-tuf publish --private-dir ABS --root ABS --targets-manifest ABS --output-dir ABS --confirm-publish")
 }
 
 type bootstrapResult struct {

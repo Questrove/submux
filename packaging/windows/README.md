@@ -19,6 +19,11 @@ downgrade must use both `-AllowDowngrade` and `-DatabaseCompatible`.
 Same-version replacement uses Windows Installer Repair; those fixed identities
 prevent a second machine instance.
 
+`wix msi validate` reports ICE61 for `NEWERPRODUCTFOUND`. This warning is
+expected: the row must be removable so an explicitly authorized downgrade can
+replace the newer product. The launch condition blocks that path unless both
+downgrade properties above are present.
+
 `Uninstall-SubmuxRuntime.ps1` stops the main Runtime first so its shutdown can
 restore direct networking, then stops the privileged helper and invokes MSI
 uninstall. State under `%ProgramData%\SubmuxRuntime` is retained by default;
@@ -28,8 +33,10 @@ interfaces, and does not purge retained state in that case.
 
 Build with WiX v6 plus `WixToolset.Util.wixext`. Online MSI files omit Mihomo.
 Offline MSI files contain a fixed Mihomo executable and complete
-root/timestamp/snapshot/targets metadata. Both include the SBOM, license
-notice, artifact manifest, Runtime, network helper, and GUI.
+root/timestamp/snapshot/targets metadata. They also contain Mihomo provenance,
+GPLv3 text, and the matching source archive. Both package kinds include the
+SBOM, Submux license notice, artifact manifest, Runtime, network helper, and
+GUI.
 
 Until paid Authenticode signing is configured, these MSI files are deliberately
 unsigned and display `Unknown Publisher`. Windows arm64 remains preview until

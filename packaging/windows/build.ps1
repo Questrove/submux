@@ -10,6 +10,9 @@ param(
     [Parameter(Mandatory = $true)][string]$License,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$Mihomo,
+    [string]$MihomoProvenance,
+    [string]$MihomoSource,
+    [string]$MihomoLicense,
     [string]$TufDirectory,
     [string]$Wix = 'wix'
 )
@@ -84,7 +87,11 @@ if ((Get-Item -LiteralPath $sbomPath).Length -eq 0 -or
 
 if ($Kind -eq 'offline') {
     $mihomoPath = Resolve-RegularFile 'Mihomo' $Mihomo
+    $mihomoProvenancePath = Resolve-RegularFile 'MihomoProvenance' $MihomoProvenance
+    $mihomoSourcePath = Resolve-RegularFile 'MihomoSource' $MihomoSource
+    $mihomoLicensePath = Resolve-RegularFile 'MihomoLicense' $MihomoLicense
     Assert-PeArchitecture 'Mihomo' $mihomoPath $Architecture
+    [void](Get-Content -Raw -LiteralPath $mihomoProvenancePath | ConvertFrom-Json)
     $tufPath = Resolve-RealDirectory 'TufDirectory' $TufDirectory
     $tufFiles = @{}
     foreach ($name in @('root.json', 'timestamp.json', 'snapshot.json', 'targets.json')) {
@@ -94,8 +101,12 @@ if ($Kind -eq 'offline') {
             throw "TUF $name must contain signed metadata and signatures"
         }
     }
-} elseif (-not [string]::IsNullOrWhiteSpace($Mihomo) -or -not [string]::IsNullOrWhiteSpace($TufDirectory)) {
-    throw 'Online MSI packages must not contain Mihomo or an offline TUF bundle'
+} elseif (-not [string]::IsNullOrWhiteSpace($Mihomo) -or
+          -not [string]::IsNullOrWhiteSpace($MihomoProvenance) -or
+          -not [string]::IsNullOrWhiteSpace($MihomoSource) -or
+          -not [string]::IsNullOrWhiteSpace($MihomoLicense) -or
+          -not [string]::IsNullOrWhiteSpace($TufDirectory)) {
+    throw 'Online MSI packages must not contain Mihomo, its source/provenance, or an offline TUF bundle'
 }
 
 $outputPath = [IO.Path]::GetFullPath($OutputDirectory)
@@ -113,6 +124,9 @@ try {
     }
     if ($Kind -eq 'offline') {
         $manifestInputs['offline/mihomo.exe'] = $mihomoPath
+        $manifestInputs['offline/mihomo-provenance.json'] = $mihomoProvenancePath
+        $manifestInputs['offline/mihomo-source.tar.gz'] = $mihomoSourcePath
+        $manifestInputs['offline/Mihomo-GPL-3.0.txt'] = $mihomoLicensePath
         foreach ($name in $tufFiles.Keys) {
             $manifestInputs["offline/tuf/$name"] = $tufFiles[$name]
         }
@@ -140,6 +154,9 @@ try {
     if ($Kind -eq 'offline') {
         $definitions += @(
             '-d', "MihomoPath=$mihomoPath",
+            '-d', "MihomoProvenancePath=$mihomoProvenancePath",
+            '-d', "MihomoSourcePath=$mihomoSourcePath",
+            '-d', "MihomoLicensePath=$mihomoLicensePath",
             '-d', "TufRootPath=$($tufFiles['root.json'])",
             '-d', "TufTimestampPath=$($tufFiles['timestamp.json'])",
             '-d', "TufSnapshotPath=$($tufFiles['snapshot.json'])",

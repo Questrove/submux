@@ -225,6 +225,15 @@
               Source="$(var.MihomoPath)"
               Name="mihomo.exe"
               KeyPath="yes" />
+        <File Id="OfflineMihomoProvenance"
+              Source="$(var.MihomoProvenancePath)"
+              Name="mihomo-provenance.json" />
+        <File Id="OfflineMihomoSource"
+              Source="$(var.MihomoSourcePath)"
+              Name="mihomo-source.tar.gz" />
+        <File Id="OfflineMihomoLicense"
+              Source="$(var.MihomoLicensePath)"
+              Name="Mihomo-GPL-3.0.txt" />
       </Component>
       <Component Id="OfflineTufComponent"
                  Directory="TUFFOLDER"
