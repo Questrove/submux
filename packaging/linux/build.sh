@@ -411,6 +411,7 @@ EOF
   top="$work/rpmbuild"
   mkdir -p "$top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
   rpmbuild -bb "$spec" \
+    --target "$rpm_arch" \
     --define "_topdir $top" \
     --define "_payload $root"
   rpm_file=$(find "$top/RPMS" -type f -name '*.rpm' -print -quit)

@@ -96,6 +96,21 @@ jobs:
             --output "$RUNNER_TEMP/runtime-packages" \
             --formats deb,rpm,tar
           (cd "$RUNNER_TEMP/runtime-packages" && sha256sum -c submux-runtime_0.0.0_amd64_online.sha256)
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -o "$RUNNER_TEMP/runtime-bin/submux-runtime-arm64" ./cmd/submux-runtime
+          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -buildvcs=false \
+            -o "$RUNNER_TEMP/runtime-bin/submux-runtime-net-arm64" ./cmd/submux-runtime-net
+          packaging/linux/build.sh \
+            --version v0.0.0 \
+            --arch arm64 \
+            --kind online \
+            --runtime "$RUNNER_TEMP/runtime-bin/submux-runtime-arm64" \
+            --runtime-net "$RUNNER_TEMP/runtime-bin/submux-runtime-net-arm64" \
+            --sbom packaging/testdata/minimal.spdx.json \
+            --licenses packaging/testdata/licenses \
+            --output "$RUNNER_TEMP/runtime-packages" \
+            --formats rpm
+          (cd "$RUNNER_TEMP/runtime-packages" && sha256sum -c submux-runtime_0.0.0_arm64_online.sha256)
 
       - name: Exercise Linux package state machine
         run: |
