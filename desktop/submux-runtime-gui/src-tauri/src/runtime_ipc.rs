@@ -1,8 +1,13 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,6 +18,8 @@ const MAX_IMPORT_BYTES: usize = 8 << 20;
 const MAX_SOURCE_DRAFT_BYTES: usize = 512 << 10;
 const MAX_MANAGED_RESOURCE_BYTES: usize = 4 << 20;
 const MAX_ADVANCED_OVERRIDE_BYTES: usize = 1 << 20;
+const MAX_BACKUP_BYTES: usize = 300 << 20;
+const RUNTIME_BACKUP_CONTENT_TYPE: &str = "application/vnd.submux.runtime-backup+zip";
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 300_000;
 
 #[cfg(target_os = "windows")]
@@ -50,6 +57,7 @@ pub struct Handshake {
 
 struct IpcResponse {
     status: u16,
+    headers: BTreeMap<String, String>,
     body: Vec<u8>,
 }
 
@@ -705,6 +713,135 @@ impl RuntimeBridge {
         )
     }
 
+    pub fn preview_backup(&self, include_secrets: bool) -> Result<Value, BridgeError> {
+        let body = serde_json::to_vec(&json!({
+            "include_secrets": include_secrets,
+        }))
+        .map_err(BridgeError::internal)?;
+        self.call_json(
+            "POST",
+            "/v1/backups/preview",
+            Some("application/json"),
+            &[],
+            &body,
+            None,
+        )
+    }
+
+    pub fn export_backup(
+        &self,
+        path: &str,
+        include_secrets: bool,
+        confirm_plaintext: bool,
+    ) -> Result<Value, BridgeError> {
+        if !confirm_plaintext {
+            return Err(BridgeError::request(
+                "Plaintext Runtime backup export requires explicit confirmation",
+            ));
+        }
+        self.ensure_compatible()?;
+        let body = serde_json::to_vec(&json!({
+            "include_secrets": include_secrets,
+            "confirm_plaintext": true,
+        }))
+        .map_err(BridgeError::internal)?;
+        let request_id = new_request_id();
+        let response = self.request(
+            "POST",
+            "/v1/backups/export",
+            Some("application/json"),
+            &[],
+            &body,
+            &request_id,
+            MAX_BACKUP_BYTES,
+        )?;
+        if !(200..300).contains(&response.status) {
+            return Err(response_error(&response));
+        }
+        let content_type = response
+            .headers
+            .get("content-type")
+            .map(|value| value.split(';').next().unwrap_or_default().trim())
+            .unwrap_or_default();
+        if !content_type.eq_ignore_ascii_case(RUNTIME_BACKUP_CONTENT_TYPE) {
+            return Err(BridgeError::service(
+                "Runtime returned an invalid backup content type",
+            ));
+        }
+        let size = required_header(&response, "x-submux-content-size")?
+            .parse::<usize>()
+            .map_err(|_| BridgeError::service("Runtime backup size metadata is invalid"))?;
+        if size == 0 || size > MAX_BACKUP_BYTES || size != response.body.len() {
+            return Err(BridgeError::service(
+                "Runtime backup body does not match its size metadata",
+            ));
+        }
+        let digest = required_header(&response, "x-submux-content-sha256")?.to_lowercase();
+        if digest.len() != 64 || hex::encode(Sha256::digest(&response.body)) != digest {
+            return Err(BridgeError::service(
+                "Runtime backup body does not match its SHA-256 metadata",
+            ));
+        }
+        let restorable = required_header(&response, "x-submux-backup-restorable")?
+            .parse::<bool>()
+            .map_err(|_| BridgeError::service("Runtime backup metadata is invalid"))?;
+        let secrets = required_header(&response, "x-submux-backup-include-secrets")?
+            .parse::<bool>()
+            .map_err(|_| BridgeError::service("Runtime backup metadata is invalid"))?;
+        if secrets != include_secrets || restorable != include_secrets {
+            return Err(BridgeError::service(
+                "Runtime backup selection metadata is inconsistent",
+            ));
+        }
+        let created_at = required_header(&response, "x-submux-backup-created-at")?.to_string();
+        let output = write_new_backup(path, &response.body)?;
+        Ok(json!({
+            "output_path": output,
+            "size": size,
+            "sha256": digest,
+            "created_at": created_at,
+            "restorable": restorable,
+            "include_secrets": secrets,
+        }))
+    }
+
+    pub fn preview_backup_restore(&self, path: &str) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        let body = read_backup(path)?;
+        let imported = self.upload_content(
+            RUNTIME_BACKUP_CONTENT_TYPE,
+            &body,
+            MAX_BACKUP_BYTES,
+            "Runtime backup",
+        )?;
+        let content_id = imported
+            .get("content_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| BridgeError::service("Runtime backup upload response is invalid"))?;
+        let request = serde_json::to_vec(&json!({ "content_id": content_id }))
+            .map_err(BridgeError::internal)?;
+        self.call_json(
+            "POST",
+            "/v1/backups/restore/preview",
+            Some("application/json"),
+            &[],
+            &request,
+            None,
+        )
+    }
+
+    pub fn restore_backup(&self, content_id: &str, confirm: bool) -> Result<Value, BridgeError> {
+        if !confirm {
+            return Err(BridgeError::request(
+                "Runtime backup restore requires explicit confirmation",
+            ));
+        }
+        self.execute_action_with_params(
+            "backup.restore",
+            json!({ "content_id": content_id, "confirm": true }),
+        )
+    }
+
     fn ensure_compatible(&self) -> Result<Value, BridgeError> {
         let handshake = self.handshake()?;
         if !handshake.compatible {
@@ -728,33 +865,24 @@ impl RuntimeBridge {
         let request_id = fixed_request_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(new_request_id);
-        let response = self.request(method, path, content_type, headers, body, &request_id)?;
+        let response = self.request(
+            method,
+            path,
+            content_type,
+            headers,
+            body,
+            &request_id,
+            MAX_RESPONSE_BYTES,
+        )?;
+        if !(200..300).contains(&response.status) {
+            return Err(response_error(&response));
+        }
         let value: Value = serde_json::from_slice(&response.body).map_err(|error| BridgeError {
             code: "service_unavailable".to_string(),
             message: format!("Runtime returned invalid JSON: {error}"),
             retryable: true,
             restart_required: false,
         })?;
-        if !(200..300).contains(&response.status) {
-            let code = value
-                .pointer("/error/code")
-                .and_then(Value::as_str)
-                .unwrap_or("service_unavailable");
-            let message = value
-                .pointer("/error/message")
-                .and_then(Value::as_str)
-                .unwrap_or("Runtime request failed");
-            let retryable = value
-                .pointer("/error/retryable")
-                .and_then(Value::as_bool)
-                .unwrap_or(response.status >= 500);
-            return Err(BridgeError {
-                code: code.to_string(),
-                message: message.to_string(),
-                retryable,
-                restart_required: code == "protocol_unsupported",
-            });
-        }
         Ok(value)
     }
 
@@ -766,6 +894,7 @@ impl RuntimeBridge {
         headers: &[(&str, &str)],
         body: &[u8],
         request_id: &str,
+        maximum_response_bytes: usize,
     ) -> Result<IpcResponse, BridgeError> {
         let mut stream = connect(&self.endpoint).map_err(BridgeError::transport)?;
         let mut request = format!(
@@ -793,8 +922,8 @@ impl RuntimeBridge {
             .and_then(|_| stream.flush())
             .map_err(BridgeError::transport)?;
 
-        let raw = read_limited_response(&mut stream)?;
-        parse_http_response(&raw)
+        let raw = read_limited_response(&mut stream, maximum_response_bytes)?;
+        parse_http_response(&raw, maximum_response_bytes)
     }
 }
 
@@ -856,6 +985,39 @@ impl BridgeError {
     }
 }
 
+fn response_error(response: &IpcResponse) -> BridgeError {
+    let value: Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| json!({}));
+    let code = value
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or("service_unavailable");
+    let message = value
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("Runtime request failed");
+    let retryable = value
+        .pointer("/error/retryable")
+        .and_then(Value::as_bool)
+        .unwrap_or(response.status >= 500);
+    BridgeError {
+        code: code.to_string(),
+        message: message.to_string(),
+        retryable,
+        restart_required: code == "protocol_unsupported",
+    }
+}
+
+fn required_header<'a>(
+    response: &'a IpcResponse,
+    name: &str,
+) -> Result<&'a str, BridgeError> {
+    response
+        .headers
+        .get(name)
+        .map(String::as_str)
+        .ok_or_else(|| BridgeError::service("Runtime backup response metadata is incomplete"))
+}
+
 #[cfg(unix)]
 fn connect(endpoint: &str) -> std::io::Result<Box<dyn ReadWrite>> {
     use std::os::unix::net::UnixStream;
@@ -882,8 +1044,11 @@ fn connect(endpoint: &str) -> std::io::Result<Box<dyn ReadWrite>> {
     }
 }
 
-fn read_limited_response(stream: &mut Box<dyn ReadWrite>) -> Result<Vec<u8>, BridgeError> {
-    let limit = MAX_RESPONSE_BYTES + 64 * 1024;
+fn read_limited_response(
+    stream: &mut Box<dyn ReadWrite>,
+    maximum_body_bytes: usize,
+) -> Result<Vec<u8>, BridgeError> {
+    let limit = maximum_body_bytes + 64 * 1024;
     let mut raw = Vec::new();
     let mut buffer = [0_u8; 16 * 1024];
     loop {
@@ -906,7 +1071,10 @@ fn read_limited_response(stream: &mut Box<dyn ReadWrite>) -> Result<Vec<u8>, Bri
     Ok(raw)
 }
 
-fn parse_http_response(raw: &[u8]) -> Result<IpcResponse, BridgeError> {
+fn parse_http_response(
+    raw: &[u8],
+    maximum_body_bytes: usize,
+) -> Result<IpcResponse, BridgeError> {
     let header_end = raw
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -921,6 +1089,7 @@ fn parse_http_response(raw: &[u8]) -> Result<IpcResponse, BridgeError> {
         .ok_or_else(|| BridgeError::service("Runtime returned an invalid HTTP status"))?;
     let mut chunked = false;
     let mut content_length = None;
+    let mut response_headers = BTreeMap::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             return Err(BridgeError::service(
@@ -933,29 +1102,44 @@ fn parse_http_response(raw: &[u8]) -> Result<IpcResponse, BridgeError> {
             chunked = true;
         }
         if name.eq_ignore_ascii_case("content-length") {
-            content_length = value.trim().parse::<usize>().ok();
+            content_length = Some(value.trim().parse::<usize>().map_err(|_| {
+                BridgeError::service("Runtime returned an invalid Content-Length header")
+            })?);
+        }
+        let normalized = name.to_ascii_lowercase();
+        if response_headers
+            .insert(normalized, value.trim().to_string())
+            .is_some()
+        {
+            return Err(BridgeError::service(
+                "Runtime returned duplicate HTTP headers",
+            ));
         }
     }
     let body = &raw[header_end + 4..];
     let body = if chunked {
-        decode_chunked(body)?
+        decode_chunked(body, maximum_body_bytes)?
     } else if let Some(length) = content_length {
-        if length > body.len() || length > MAX_RESPONSE_BYTES {
+        if length > body.len() || length > maximum_body_bytes {
             return Err(BridgeError::service("Runtime response length is invalid"));
         }
         body[..length].to_vec()
     } else {
         body.to_vec()
     };
-    if body.len() > MAX_RESPONSE_BYTES {
+    if body.len() > maximum_body_bytes {
         return Err(BridgeError::service(
             "Runtime response exceeds the hard size limit",
         ));
     }
-    Ok(IpcResponse { status, body })
+    Ok(IpcResponse {
+        status,
+        headers: response_headers,
+        body,
+    })
 }
 
-fn decode_chunked(mut raw: &[u8]) -> Result<Vec<u8>, BridgeError> {
+fn decode_chunked(mut raw: &[u8], maximum_body_bytes: usize) -> Result<Vec<u8>, BridgeError> {
     let mut decoded = Vec::new();
     loop {
         let line_end = raw
@@ -971,7 +1155,7 @@ fn decode_chunked(mut raw: &[u8]) -> Result<Vec<u8>, BridgeError> {
         if size == 0 {
             return Ok(decoded);
         }
-        if size > raw.len().saturating_sub(2) || decoded.len() + size > MAX_RESPONSE_BYTES {
+        if size > raw.len().saturating_sub(2) || decoded.len() + size > maximum_body_bytes {
             return Err(BridgeError::service(
                 "Runtime chunked response exceeds its limit",
             ));
@@ -981,6 +1165,185 @@ fn decode_chunked(mut raw: &[u8]) -> Result<Vec<u8>, BridgeError> {
             return Err(BridgeError::service("Runtime chunk terminator is invalid"));
         }
         raw = &raw[size + 2..];
+    }
+}
+
+fn read_backup(name: &str) -> Result<Vec<u8>, BridgeError> {
+    let path = absolute_backup_path(name)?;
+    validate_unlinked_parent(&path)?;
+    let expected = std::fs::symlink_metadata(&path)
+        .map_err(|error| BridgeError::request(&format!("Could not inspect backup file: {error}")))?;
+    if metadata_is_linked(&expected)
+        || !expected.is_file()
+        || expected.len() == 0
+        || expected.len() > MAX_BACKUP_BYTES as u64
+    {
+        return Err(BridgeError::request(
+            "Backup must be a bounded regular non-linked file",
+        ));
+    }
+    let mut file = File::open(&path)
+        .map_err(|error| BridgeError::request(&format!("Could not open backup file: {error}")))?;
+    let opened = file
+        .metadata()
+        .map_err(|error| BridgeError::request(&format!("Could not inspect backup file: {error}")))?;
+    if !opened.is_file() || opened.len() != expected.len() {
+        return Err(BridgeError::request(
+            "Backup file changed while it was being opened",
+        ));
+    }
+    let mut body = Vec::with_capacity(opened.len() as usize);
+    Read::take(&mut file, (MAX_BACKUP_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(|error| BridgeError::request(&format!("Could not read backup file: {error}")))?;
+    if body.len() != opened.len() as usize || body.len() > MAX_BACKUP_BYTES {
+        return Err(BridgeError::request(
+            "Backup file changed while it was being read",
+        ));
+    }
+    Ok(body)
+}
+
+fn write_new_backup(name: &str, body: &[u8]) -> Result<String, BridgeError> {
+    if body.is_empty() || body.len() > MAX_BACKUP_BYTES {
+        return Err(BridgeError::request(
+            "Backup archive size is outside the allowed range",
+        ));
+    }
+    let path = absolute_backup_path(name)?;
+    validate_unlinked_parent(&path)?;
+    let mut file = open_new_owner_file(&path)?;
+    let result = file
+        .write_all(body)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| BridgeError::request(&format!("Could not save backup file: {error}")));
+    if let Err(error) = result {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn absolute_backup_path(name: &str) -> Result<PathBuf, BridgeError> {
+    if name.trim().is_empty() || name.contains('\0') {
+        return Err(BridgeError::request("Backup file path is invalid"));
+    }
+    let path = PathBuf::from(name);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        std::env::current_dir()
+            .map(|directory| directory.join(path))
+            .map_err(|error| {
+                BridgeError::request(&format!("Could not resolve backup file path: {error}"))
+            })
+    }
+}
+
+fn validate_unlinked_parent(path: &Path) -> Result<(), BridgeError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| BridgeError::request("Backup file has no parent directory"))?;
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        current.push(component.as_os_str());
+        if current.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&current).map_err(|error| {
+            BridgeError::request(&format!("Could not inspect backup path: {error}"))
+        })?;
+        if metadata_is_linked(&metadata) {
+            return Err(BridgeError::request(
+                "Backup path must not contain symbolic or reparse links",
+            ));
+        }
+    }
+    let metadata = std::fs::metadata(parent).map_err(|error| {
+        BridgeError::request(&format!("Could not inspect backup directory: {error}"))
+    })?;
+    if !metadata.is_dir() {
+        return Err(BridgeError::request(
+            "Backup directory must already exist",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn metadata_is_linked(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
+#[cfg(target_os = "windows")]
+fn metadata_is_linked(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(unix)]
+fn open_new_owner_file(path: &Path) -> Result<File, BridgeError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| {
+            BridgeError::request(&format!("Could not create new backup file: {error}"))
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn open_new_owner_file(path: &Path) -> Result<File, BridgeError> {
+    let file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            BridgeError::request(&format!("Could not create new backup file: {error}"))
+        })?;
+    let username = match (
+        std::env::var("USERDOMAIN").ok(),
+        std::env::var("USERNAME").ok(),
+    ) {
+        (Some(domain), Some(user)) if !domain.is_empty() && !user.is_empty() => {
+            format!("{domain}\\{user}")
+        }
+        (_, Some(user)) if !user.is_empty() => user,
+        _ => {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(BridgeError::request(
+                "Could not resolve the current Windows user for backup ACL",
+            ));
+        }
+    };
+    let grant = format!("{username}:F");
+    let output = Command::new("icacls.exe")
+        .arg(path)
+        .args(["/inheritance:r", "/grant:r"])
+        .arg(grant)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => Ok(file),
+        Ok(output) => {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            Err(BridgeError::request(&format!(
+                "Could not restrict backup ACL: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+        Err(error) => {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            Err(BridgeError::request(&format!(
+                "Could not restrict backup ACL: {error}"
+            )))
+        }
     }
 }
 
@@ -1189,7 +1552,8 @@ mod tests {
     #[test]
     fn parses_content_length_response() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}";
-        let response = parse_http_response(raw).expect("response should parse");
+        let response =
+            parse_http_response(raw, MAX_RESPONSE_BYTES).expect("response should parse");
         assert_eq!(response.status, 200);
         assert_eq!(response.body, b"{\"ok\":true}");
     }
@@ -1197,7 +1561,8 @@ mod tests {
     #[test]
     fn parses_chunked_response() {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n{\"ok\r\n7\r\n\":true}\r\n0\r\n\r\n";
-        let response = parse_http_response(raw).expect("response should parse");
+        let response =
+            parse_http_response(raw, MAX_RESPONSE_BYTES).expect("response should parse");
         assert_eq!(response.body, b"{\"ok\":true}");
     }
 

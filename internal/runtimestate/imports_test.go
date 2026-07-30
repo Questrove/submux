@@ -1,6 +1,7 @@
 package runtimestate
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -146,6 +147,13 @@ func TestConsumeImportRejectsTamperedContent(t *testing.T) {
 		!strings.Contains(err.Error(), "integrity check failed") {
 		t.Fatalf("tampered import error = %v", err)
 	}
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatalf("repair Runtime import: %v", err)
+	}
+	restored, _, err := store.ConsumeImport(content.ID, peer.Key(), "", now)
+	if err != nil || string(restored) != string(body) {
+		t.Fatalf("failed integrity check consumed import: body=%q err=%v", restored, err)
+	}
 }
 
 func TestConsumeImportIsAtomicAcrossConcurrentCallers(t *testing.T) {
@@ -217,5 +225,66 @@ func TestPeekImportDoesNotConsumeContent(t *testing.T) {
 	consumed, _, err := store.ConsumeImport(content.ID, peer.Key(), "", now)
 	if err != nil || string(consumed) != string(body) {
 		t.Fatalf("consume previewed Runtime import: body=%q err=%v", consumed, err)
+	}
+}
+
+func TestBackupImportHasDedicatedBoundWithoutWideningConfigurationImports(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	peer := runtimeapi.PeerIdentity{Platform: "test", UID: 1000}
+	body := bytes.Repeat([]byte{'b'}, MaxImportBytes+1)
+	digest := sha256.Sum256(body)
+	now := time.Now().UTC()
+	if _, err := store.UploadImport(
+		peer,
+		"application/x-yaml",
+		int64(len(body)),
+		hex.EncodeToString(digest[:]),
+		body,
+		now,
+	); err == nil {
+		t.Fatal("oversized configuration import was accepted")
+	}
+	content, err := store.UploadImport(
+		peer,
+		runtimeapi.RuntimeBackupContentType,
+		int64(len(body)),
+		hex.EncodeToString(digest[:]),
+		body,
+		now,
+	)
+	if err != nil {
+		t.Fatalf("backup import within its dedicated bound was rejected: %v", err)
+	}
+	restored, _, err := store.ConsumeImport(content.ID, peer.Key(), "", now)
+	if err != nil || !bytes.Equal(restored, body) {
+		t.Fatalf("consume backup import: size=%d err=%v", len(restored), err)
+	}
+}
+
+func TestOpenRemovesOrphanedImportFiles(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	orphanID := "content_" + strings.Repeat("a", 32)
+	orphan := filepath.Join(root, "imports", orphanID+".content")
+	if err := os.WriteFile(orphan, []byte("orphan"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("orphaned Runtime import survived restart cleanup: %v", err)
 	}
 }

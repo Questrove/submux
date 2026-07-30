@@ -49,12 +49,19 @@ type MihomoUpdateOperator interface {
 	PreviewMihomoUpdate(context.Context, runtimeapi.PeerIdentity, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
 }
 
+type BackupOperator interface {
+	PreviewBackup(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.BackupPreviewRequest) (runtimeapi.BackupPreview, error)
+	ExportBackup(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.BackupExportRequest) (runtimeapi.BackupArchive, error)
+	PreviewBackupRestore(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.BackupRestorePreviewRequest) (runtimeapi.BackupRestorePreview, error)
+}
+
 type Server struct {
 	observer       Observer
 	eventObserver  EventObserver
 	operator       Operator
 	network        NetworkPreviewer
 	updates        MihomoUpdateOperator
+	backups        BackupOperator
 	authorizer     Authorizer
 	runtimeVersion string
 }
@@ -76,6 +83,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	operator, _ := observer.(Operator)
 	network, _ := observer.(NetworkPreviewer)
 	updates, _ := observer.(MihomoUpdateOperator)
+	backups, _ := observer.(BackupOperator)
 	eventObserver, _ := observer.(EventObserver)
 	runtimeVersion := ""
 	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
@@ -87,6 +95,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		operator:       operator,
 		network:        network,
 		updates:        updates,
+		backups:        backups,
 		authorizer:     authorizer,
 		runtimeVersion: runtimeVersion,
 	}, nil
@@ -146,6 +155,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/network/preview", s.handleNetworkPreview)
 	mux.HandleFunc("/v1/mihomo/update-bundles", s.handleMihomoUpdateBundle)
 	mux.HandleFunc("/v1/mihomo/updates/preview", s.handleMihomoUpdatePreview)
+	mux.HandleFunc("/v1/backups/preview", s.handleBackupPreview)
+	mux.HandleFunc("/v1/backups/export", s.handleBackupExport)
+	mux.HandleFunc("/v1/backups/restore/preview", s.handleBackupRestorePreview)
 	mux.HandleFunc("/v1/operations", s.handleCreateOperation)
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
 	mux.HandleFunc("/v1/proxy/verify", s.handleProxyVerification)
@@ -156,6 +168,150 @@ func (s *Server) Handler() http.Handler {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
 	return mux
+}
+
+func (s *Server) handleBackupPreview(writer http.ResponseWriter, request *http.Request) {
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime backup preview only accepts POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime backup preview does not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.backups == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime backup service is unavailable", true)
+		return
+	}
+	var previewRequest runtimeapi.BackupPreviewRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &previewRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	preview, err := s.backups.PreviewBackup(
+		request.Context(), peer, clientType, clientVersion, requestID, previewRequest,
+	)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, preview)
+}
+
+func (s *Server) handleBackupExport(writer http.ResponseWriter, request *http.Request) {
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime backup export only accepts POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime backup export does not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.backups == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime backup service is unavailable", true)
+		return
+	}
+	if !s.validateWriteCompatibility(writer, request, clientVersion) {
+		return
+	}
+	var exportRequest runtimeapi.BackupExportRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &exportRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	archive, err := s.backups.ExportBackup(
+		request.Context(), peer, clientType, clientVersion, requestID, exportRequest,
+	)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	if archive.Size != int64(len(archive.Body)) ||
+		archive.Size <= 0 ||
+		archive.Size > runtimeapi.RuntimeBackupMaxBytes ||
+		len(archive.SHA256) != sha256.Size*2 ||
+		!validBackupFileName(archive.FileName) {
+		s.writeError(writer, request, http.StatusInternalServerError, runtimeapi.ErrorInternal, "Runtime backup service returned invalid archive metadata", false)
+		return
+	}
+	digest := sha256.Sum256(archive.Body)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), archive.SHA256) {
+		s.writeError(writer, request, http.StatusInternalServerError, runtimeapi.ErrorInternal, "Runtime backup service returned an archive with invalid integrity metadata", false)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Type", runtimeapi.RuntimeBackupContentType)
+	writer.Header().Set("Content-Disposition", `attachment; filename="`+archive.FileName+`"`)
+	writer.Header().Set(HeaderRequestID, requestID)
+	writer.Header().Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+	writer.Header().Set(HeaderContentSize, strconv.FormatInt(archive.Size, 10))
+	writer.Header().Set(HeaderContentSHA256, strings.ToLower(archive.SHA256))
+	writer.Header().Set(HeaderBackupCreatedAt, archive.CreatedAt.UTC().Format(time.RFC3339Nano))
+	writer.Header().Set(HeaderBackupRestorable, strconv.FormatBool(archive.Restorable))
+	writer.Header().Set(HeaderBackupSecrets, strconv.FormatBool(archive.IncludeSecrets))
+	writer.WriteHeader(http.StatusOK)
+	_, _ = writer.Write(archive.Body)
+}
+
+func (s *Server) handleBackupRestorePreview(writer http.ResponseWriter, request *http.Request) {
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime backup restore preview only accepts POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime backup restore preview does not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.backups == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime backup restore preview is unavailable", true)
+		return
+	}
+	var previewRequest runtimeapi.BackupRestorePreviewRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &previewRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	if !validContentID(previewRequest.ContentID) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime backup restore preview request is invalid", false)
+		return
+	}
+	preview, err := s.backups.PreviewBackupRestore(
+		request.Context(), peer, clientType, clientVersion, requestID, previewRequest,
+	)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, preview)
 }
 
 func (s *Server) handleMihomoUpdateBundle(writer http.ResponseWriter, request *http.Request) {
@@ -444,8 +600,16 @@ func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request)
 	if !s.validateWriteCompatibility(writer, request, clientVersion) {
 		return
 	}
+	contentType := request.Header.Get("Content-Type")
+	maxBytes := int64(runtimestate.MaxImportBytes)
+	if strings.EqualFold(
+		strings.TrimSpace(strings.Split(contentType, ";")[0]),
+		runtimeapi.RuntimeBackupContentType,
+	) {
+		maxBytes = runtimeapi.RuntimeBackupMaxBytes
+	}
 	size, err := strconv.ParseInt(request.Header.Get(HeaderContentSize), 10, 64)
-	if err != nil || size <= 0 || size > runtimestate.MaxImportBytes {
+	if err != nil || size <= 0 || size > maxBytes {
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime import size is missing or invalid", false)
 		return
 	}
@@ -455,13 +619,12 @@ func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request)
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime import SHA-256 is missing or invalid", false)
 		return
 	}
-	contentType := request.Header.Get("Content-Type")
-	body, err := io.ReadAll(io.LimitReader(request.Body, runtimestate.MaxImportBytes+1))
+	body, err := io.ReadAll(io.LimitReader(request.Body, maxBytes+1))
 	if err != nil {
 		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime import body could not be read", false)
 		return
 	}
-	if len(body) > runtimestate.MaxImportBytes {
+	if int64(len(body)) > maxBytes {
 		s.writeError(writer, request, http.StatusRequestEntityTooLarge, runtimeapi.ErrorRequestTooLarge, "Runtime import exceeds the hard size limit", false)
 		return
 	}
@@ -1000,6 +1163,14 @@ func requestHasBody(request *http.Request) bool {
 	return request.ContentLength > 0 || len(request.TransferEncoding) > 0
 }
 
+func validBackupFileName(name string) bool {
+	return name != "" &&
+		len(name) <= 200 &&
+		name == strings.TrimSpace(name) &&
+		!strings.ContainsAny(name, `/\"`+"\r\n\t") &&
+		strings.HasSuffix(strings.ToLower(name), ".zip")
+}
+
 func validAction(action runtimeapi.Action) bool {
 	if action.Kind != runtimeapi.ActionUpdateMihomo && action.Params.Trust != "" {
 		return false
@@ -1067,6 +1238,17 @@ func validAction(action runtimeapi.Action) bool {
 			action.Params.PlanID == "" &&
 			action.Params.Trust == "" &&
 			action.Params.ContentID == "" &&
+			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
+	case runtimeapi.ActionRestoreBackup:
+		return validContentID(action.Params.ContentID) &&
+			action.Params.Confirm &&
+			action.Params.PlanID == "" &&
+			action.Params.Trust == "" &&
 			action.Params.SourceID == "" &&
 			action.Params.SourceName == "" &&
 			action.Params.Route == "" &&

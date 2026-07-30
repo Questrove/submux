@@ -201,8 +201,10 @@ func (s *Store) SubmitOperation(
 func actionConsumesImport(kind string) bool {
 	return kind == runtimeapi.ActionApplyImportedConfig ||
 		kind == runtimeapi.ActionAddRemoteSource ||
+		kind == runtimeapi.ActionAddImportedSource ||
 		kind == runtimeapi.ActionAddManagedResource ||
-		kind == runtimeapi.ActionSetAdvancedOverride
+		kind == runtimeapi.ActionSetAdvancedOverride ||
+		kind == runtimeapi.ActionRestoreBackup
 }
 
 func (s *Store) GetOperation(id string) (runtimeapi.Operation, error) {
@@ -397,6 +399,13 @@ func (s *Store) CompleteOperation(
 					return err
 				}
 				if err := metadata.Put(runModeKey, []byte("explicit")); err != nil {
+					return err
+				}
+			case runtimeapi.ActionRestoreBackup:
+				if err := recordExplicitMihomoStop(metadata); err != nil {
+					return err
+				}
+				if err := metadata.Put(runModeKey, []byte(runtimeapi.RunModeUnconfigured)); err != nil {
 					return err
 				}
 			case runtimeapi.ActionEnableTUN,

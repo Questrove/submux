@@ -1,6 +1,6 @@
 # Submux Runtime 本机 IPC
 
-本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、事件流、一次性内容上传、分层候选配置预览、托管资源、本机高级覆盖、三类来源的添加、刷新、切换与删除、持久化运行操作、审计、秘密读取、诊断包和 Tauri GUI 桥接。
+本文定义 GUI、TUI、CLI 与 Submux Runtime 之间的唯一管理接口。当前已经实现 Unix Socket、Windows Named Pipe、对端身份校验、Snapshot、事件流、一次性内容上传、分层候选配置预览、托管资源、本机高级覆盖、三类来源的添加、刷新、切换与删除、持久化运行操作、审计、秘密读取、便携备份与整体恢复、诊断包和 Tauri GUI 桥接。
 
 ## 传输
 
@@ -73,6 +73,7 @@ Snapshot 至少包含：
 - 托管资源的类型、摘要和总量，以及本机高级覆盖的摘要；
 - 当前或排队中的运行操作；
 - 产品与核心更新状态；
+- 最近一次整体恢复和机器设置待确认状态；
 - 最新事件游标。
 
 普通 Snapshot 不包含完整来源地址、凭据、配置正文、Mihomo secret 或可直接调用的特权进程信息。
@@ -146,7 +147,8 @@ Action 使用固定 `kind` 和严格参数结构，不能承载 Shell、argv、�
 本机配置层当前使用以下 Action：
 
 - `resource.add` 只接受资源内容的 `content_id`、固定 `resource_kind` 和安全 `resource_name`；
-- `override.set` 只接受 YAML 的 `content_id`。
+- `override.set` 只接受 YAML 的 `content_id`；
+- `backup.restore` 只接受备份的 `content_id` 和 `confirm: true`。
 
 添加和刷新只保存通过校验的不可变来源版本，不切换运行配置，也不启动 Mihomo。`source.apply` 应用当前来源的最近有效版本；Mihomo 原先停止时仍保持停止，原先运行时必须完成健康检查后才提交。
 
@@ -248,6 +250,22 @@ POST /v1/diagnostics/create
 ```
 
 默认内容包括脱敏后的 Snapshot、运行操作、事件和审计。`include_raw_config`、`include_full_logs`、`include_network_info` 分别选择原始配置、完整日志和本机网络信息；选择任一敏感项时，生成请求还必须设置 `confirm_sensitive`。客户端先调用预览接口显示文件名、大小和敏感标记，再调用生成接口。Runtime 只把 ZIP 写入本机状态目录下的固定诊断目录，返回文件名、大小和 SHA-256，不接受上传目标，也没有上传接口。
+
+### 便携备份与整体恢复
+
+备份和恢复使用以下接口：
+
+```http
+POST /v1/backups/preview
+POST /v1/backups/export
+POST /v1/backups/restore/preview
+POST /v1/imports
+POST /v1/operations
+```
+
+预览请求用 `include_secrets` 选择完整明文备份或脱敏清单。脱敏清单不含来源地址、凭据、配置正文、私钥资源或最近可用配置，因此不能恢复。导出还必须设置 `confirm_plaintext: true`；响应使用 `application/vnd.submux.runtime-backup+zip` 字节流，携带大小、SHA-256、创建时间和是否可恢复等元数据，并设置 `Cache-Control: no-store`。客户端负责把字节写入仅当前所有者可访问的新文件，已有文件不能覆盖；输出路径不会进入 IPC。
+
+恢复前，客户端用备份媒体类型把字节上传到 `/v1/imports`，再把返回的 `content_id` 交给恢复预览。预览显示来源、托管资源、高级覆盖、近期配置和需要重新确认的机器设置。执行时创建 `backup.restore` Operation，并要求 `confirm: true`。Runtime 先在固定备份目录创建当前完整状态的 owner-only 自动备份，再整体替换可迁移状态和近期配置目录；不合并来源、资源或原配置目录。备份中的 `current` 在重新构建安全的本机候选时转为 `previous-good`，备份中的原 `previous-good` 保留在历史目录。Mihomo 和网络接管先停止，监听、TUN、网关和网络权限保持待确认，不能跨机器自动启用。恢复后的候选配置校验失败时，Runtime 重新应用替换前的可迁移状态和配置目录，并保留自动备份供人工恢复。
 
 ## 秘密读取
 

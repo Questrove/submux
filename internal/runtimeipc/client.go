@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -313,7 +314,15 @@ func (c *Client) UploadImport(
 	request.Header.Set("Content-Type", contentType)
 	request.Header.Set(HeaderContentSize, strconv.FormatInt(int64(len(body)), 10))
 	request.Header.Set(HeaderContentSHA256, hex.EncodeToString(digest[:]))
-	response, err := c.do(request)
+	var response *http.Response
+	if strings.EqualFold(
+		strings.TrimSpace(strings.Split(contentType, ";")[0]),
+		runtimeapi.RuntimeBackupContentType,
+	) {
+		response, err = c.doLong(request)
+	} else {
+		response, err = c.do(request)
+	}
 	if err != nil {
 		return content, err
 	}
@@ -395,6 +404,96 @@ func (c *Client) PreviewMihomoUpdate(
 		return preview, invalidResponseError("Mihomo update preview response", err)
 	}
 	return preview, nil
+}
+
+func (c *Client) PreviewBackup(
+	ctx context.Context,
+	request runtimeapi.BackupPreviewRequest,
+) (runtimeapi.BackupPreview, error) {
+	var response runtimeapi.BackupPreview
+	err := c.postJSON(ctx, "/v1/backups/preview", request, http.StatusOK, &response)
+	return response, err
+}
+
+func (c *Client) ExportBackup(
+	ctx context.Context,
+	requestValue runtimeapi.BackupExportRequest,
+) (runtimeapi.BackupArchive, error) {
+	var archive runtimeapi.BackupArchive
+	body, err := json.Marshal(requestValue)
+	if err != nil {
+		return archive, err
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return archive, err
+	}
+	request, err := c.newRequest(ctx, http.MethodPost, "/v1/backups/export", bytes.NewReader(body), requestID)
+	if err != nil {
+		return archive, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.doLong(request)
+	if err != nil {
+		return archive, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return archive, decodeClientError(response)
+	}
+	if !strings.EqualFold(
+		strings.TrimSpace(strings.Split(response.Header.Get("Content-Type"), ";")[0]),
+		runtimeapi.RuntimeBackupContentType,
+	) {
+		return archive, invalidResponseError("backup archive", errors.New("content type is invalid"))
+	}
+	archive.Size, err = strconv.ParseInt(response.Header.Get(HeaderContentSize), 10, 64)
+	if err != nil || archive.Size <= 0 || archive.Size > runtimeapi.RuntimeBackupMaxBytes {
+		return archive, invalidResponseError("backup archive", errors.New("size metadata is invalid"))
+	}
+	archive.SHA256 = strings.ToLower(response.Header.Get(HeaderContentSHA256))
+	decodedDigest, err := hex.DecodeString(archive.SHA256)
+	if err != nil || len(decodedDigest) != sha256.Size {
+		return archive, invalidResponseError("backup archive", errors.New("SHA-256 metadata is invalid"))
+	}
+	archive.CreatedAt, err = time.Parse(time.RFC3339Nano, response.Header.Get(HeaderBackupCreatedAt))
+	if err != nil {
+		return archive, invalidResponseError("backup archive", errors.New("creation time metadata is invalid"))
+	}
+	archive.Restorable, err = strconv.ParseBool(response.Header.Get(HeaderBackupRestorable))
+	if err != nil {
+		return archive, invalidResponseError("backup archive", errors.New("restorable metadata is invalid"))
+	}
+	archive.IncludeSecrets, err = strconv.ParseBool(response.Header.Get(HeaderBackupSecrets))
+	if err != nil {
+		return archive, invalidResponseError("backup archive", errors.New("secret-selection metadata is invalid"))
+	}
+	disposition, parameters, err := mime.ParseMediaType(response.Header.Get("Content-Disposition"))
+	if err != nil || !strings.EqualFold(disposition, "attachment") || !validBackupFileName(parameters["filename"]) {
+		return archive, invalidResponseError("backup archive", errors.New("file name metadata is invalid"))
+	}
+	archive.FileName = parameters["filename"]
+	archive.Body, err = io.ReadAll(io.LimitReader(response.Body, runtimeapi.RuntimeBackupMaxBytes+1))
+	if err != nil {
+		return archive, invalidResponseError("backup archive", err)
+	}
+	if int64(len(archive.Body)) != archive.Size {
+		return archive, invalidResponseError("backup archive", errors.New("body size does not match its metadata"))
+	}
+	digest := sha256.Sum256(archive.Body)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), archive.SHA256) {
+		return archive, invalidResponseError("backup archive", errors.New("body SHA-256 does not match its metadata"))
+	}
+	return archive, nil
+}
+
+func (c *Client) PreviewBackupRestore(
+	ctx context.Context,
+	request runtimeapi.BackupRestorePreviewRequest,
+) (runtimeapi.BackupRestorePreview, error) {
+	var response runtimeapi.BackupRestorePreview
+	err := c.postJSONLong(ctx, "/v1/backups/restore/preview", request, http.StatusOK, &response)
+	return response, err
 }
 
 func (c *Client) GetAdvancedOverride(ctx context.Context, reveal bool) (runtimeapi.AdvancedOverrideDocument, error) {
@@ -719,6 +818,40 @@ func (c *Client) postJSON(
 	}
 	request.Header.Set("Content-Type", "application/json")
 	response, err := c.do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != successStatus {
+		return decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, destination); err != nil {
+		return invalidResponseError("Runtime response", err)
+	}
+	return nil
+}
+
+func (c *Client) postJSONLong(
+	ctx context.Context,
+	path string,
+	value any,
+	successStatus int,
+	destination any,
+) error {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return err
+	}
+	request, err := c.newRequest(ctx, http.MethodPost, path, bytes.NewReader(body), requestID)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.doLong(request)
 	if err != nil {
 		return err
 	}

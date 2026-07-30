@@ -3,6 +3,8 @@ package runtimetui
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +32,10 @@ type fakeClient struct {
 	networkRequests    []runtimeapi.NetworkPreviewRequest
 	networkPreview     runtimeapi.NetworkPreview
 	updatePreview      runtimeapi.MihomoUpdatePlan
+	backupPreviews     int
+	backupExports      int
+	backupInspections  int
+	lastBackupExport   runtimeapi.BackupExportRequest
 }
 
 func (f *fakeClient) Observe(context.Context) (runtimeapi.Snapshot, error) {
@@ -183,6 +189,176 @@ func (f *fakeClient) PreviewMihomoUpdate(
 		}
 	}
 	return preview, nil
+}
+
+func (f *fakeClient) PreviewBackup(
+	_ context.Context,
+	request runtimeapi.BackupPreviewRequest,
+) (runtimeapi.BackupPreview, error) {
+	f.backupPreviews++
+	return runtimeapi.BackupPreview{
+		FormatVersion:  1,
+		Restorable:     request.IncludeSecrets,
+		IncludeSecrets: request.IncludeSecrets,
+		Items: []runtimeapi.BackupItem{{
+			Name:      "configuration_sources",
+			Included:  true,
+			Sensitive: request.IncludeSecrets,
+			Count:     1,
+			Size:      20,
+		}},
+		Warning: "完整明文备份警告",
+	}, nil
+}
+
+func (f *fakeClient) ExportBackup(
+	_ context.Context,
+	request runtimeapi.BackupExportRequest,
+) (runtimeapi.BackupArchive, error) {
+	f.backupExports++
+	f.lastBackupExport = request
+	if !request.ConfirmPlaintext {
+		return runtimeapi.BackupArchive{}, errors.New("backup export was not confirmed")
+	}
+	return runtimeapi.BackupArchive{
+		FileName:       "submux-runtime-backup.zip",
+		Size:           int64(len("backup archive")),
+		SHA256:         strings.Repeat("b", 64),
+		Restorable:     request.IncludeSecrets,
+		IncludeSecrets: request.IncludeSecrets,
+		Body:           []byte("backup archive"),
+	}, nil
+}
+
+func (f *fakeClient) PreviewBackupRestore(
+	_ context.Context,
+	request runtimeapi.BackupRestorePreviewRequest,
+) (runtimeapi.BackupRestorePreview, error) {
+	f.backupInspections++
+	return runtimeapi.BackupRestorePreview{
+		ContentID:                request.ContentID,
+		Restorable:               true,
+		SourceCount:              1,
+		ManagedResourceCount:     2,
+		RecentConfigurationCount: 1,
+		PendingSettings:          []string{"listeners", "tun", "gateway"},
+		Warning:                  "整体替换警告",
+	}, nil
+}
+
+func TestModelCreatesAndRestoresBackupWithExplicitConfirmation(t *testing.T) {
+	client := &fakeClient{snapshot: runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        17,
+	}}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+
+	updated, command := model.Update(keyPress('B'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("backup preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if client.backupPreviews != 1 || model.sensitiveConfirm != "backup-export-full" {
+		t.Fatalf("backup preview state = calls %d confirmation %q", client.backupPreviews, model.sensitiveConfirm)
+	}
+
+	updated, command = model.Update(keyPress('B'))
+	model = updated.(Model)
+	if command == nil || !model.editing || model.editorMode != editorModeBackupExport {
+		t.Fatal("confirmed backup export did not open the output editor")
+	}
+	output := filepath.Join(t.TempDir(), "runtime-backup.zip")
+	model.editor.SetValue(output)
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("backup export did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	body, err := os.ReadFile(output)
+	if err != nil || string(body) != "backup archive" || client.backupExports != 1 {
+		t.Fatalf("backup export result body=%q calls=%d err=%v", body, client.backupExports, err)
+	}
+	if !client.lastBackupExport.IncludeSecrets || !client.lastBackupExport.ConfirmPlaintext {
+		t.Fatalf("full backup export request = %#v", client.lastBackupExport)
+	}
+
+	updated, command = model.Update(keyPress('L'))
+	model = updated.(Model)
+	if command == nil || !model.editing || model.editorMode != editorModeBackupRestore {
+		t.Fatal("backup restore did not open the input editor")
+	}
+	model.editor.SetValue(output)
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("backup restore preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if client.backupInspections != 1 ||
+		client.uploadedType != runtimeapi.RuntimeBackupContentType ||
+		model.backupRestore.ContentID == "" ||
+		model.sensitiveConfirm != "backup-restore:"+model.backupRestore.ContentID {
+		t.Fatalf("restore preview was not retained: %#v", model.backupRestore)
+	}
+
+	updated, command = model.Update(keyPress('L'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("confirmed backup restore did not execute")
+	}
+	_, _ = model.Update(command())
+	action := client.actions[len(client.actions)-1]
+	if action.Kind != runtimeapi.ActionRestoreBackup ||
+		!action.Params.Confirm ||
+		action.Params.ContentID == "" {
+		t.Fatalf("unexpected backup restore action: %#v", action)
+	}
+}
+
+func TestModelCanCreateRedactedBackupInventory(t *testing.T) {
+	client := &fakeClient{snapshot: runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        17,
+	}}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+
+	updated, command := model.Update(keyPress('b'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("redacted backup preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if model.sensitiveConfirm != "backup-export-redacted" || model.backupPreview.IncludeSecrets {
+		t.Fatalf("redacted preview state = %#v / %q", model.backupPreview, model.sensitiveConfirm)
+	}
+
+	updated, command = model.Update(keyPress('b'))
+	model = updated.(Model)
+	if command == nil || !model.editing {
+		t.Fatal("redacted backup confirmation did not open the output editor")
+	}
+	output := filepath.Join(t.TempDir(), "runtime-backup-redacted.zip")
+	model.editor.SetValue(output)
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("redacted backup export did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if client.lastBackupExport.IncludeSecrets || !client.lastBackupExport.ConfirmPlaintext {
+		t.Fatalf("redacted backup export request = %#v", client.lastBackupExport)
+	}
 }
 
 func TestModelMihomoUpdateAndRollbackRequireTwoStepConfirmation(t *testing.T) {

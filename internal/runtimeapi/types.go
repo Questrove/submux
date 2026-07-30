@@ -5,7 +5,10 @@ import (
 	"time"
 )
 
-const ProtocolVersion = 1
+const (
+	ProtocolVersion       = 1
+	RuntimeBackupMaxBytes = 300 << 20
+)
 
 type PeerIdentity struct {
 	Platform  string
@@ -37,6 +40,7 @@ type Snapshot struct {
 	AdvancedOverride  OverrideStatus  `json:"advanced_override"`
 	Operations        OperationStatus `json:"operations"`
 	Updates           UpdateStatus    `json:"updates"`
+	Backups           BackupStatus    `json:"backups"`
 	LatestEventCursor uint64          `json:"latest_event_cursor"`
 	ObservedAt        time.Time       `json:"observed_at"`
 }
@@ -256,6 +260,9 @@ type OperationResult struct {
 	CoreVersion            string         `json:"core_version,omitempty"`
 	PreviousCoreVersion    string         `json:"previous_core_version,omitempty"`
 	Trust                  string         `json:"trust,omitempty"`
+	BackupSHA256           string         `json:"backup_sha256,omitempty"`
+	AutomaticBackupFile    string         `json:"automatic_backup_file,omitempty"`
+	MachineSettingsPending bool           `json:"machine_settings_pending,omitempty"`
 }
 
 type OperationResponse struct {
@@ -304,6 +311,67 @@ type DiagnosticsResult struct {
 	Size      int64     `json:"size"`
 	SHA256    string    `json:"sha256"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+type BackupStatus struct {
+	MachineSettingsPending bool       `json:"machine_settings_pending"`
+	LastRestoredAt         *time.Time `json:"last_restored_at,omitempty"`
+	SourceInstallationID   string     `json:"source_installation_id,omitempty"`
+}
+
+type BackupPreviewRequest struct {
+	IncludeSecrets bool `json:"include_secrets,omitempty"`
+}
+
+type BackupExportRequest struct {
+	IncludeSecrets   bool `json:"include_secrets,omitempty"`
+	ConfirmPlaintext bool `json:"confirm_plaintext"`
+}
+
+type BackupItem struct {
+	Name      string `json:"name"`
+	Included  bool   `json:"included"`
+	Sensitive bool   `json:"sensitive"`
+	Count     int    `json:"count,omitempty"`
+	Size      int64  `json:"size,omitempty"`
+}
+
+type BackupPreview struct {
+	FormatVersion  int          `json:"format_version"`
+	Restorable     bool         `json:"restorable"`
+	IncludeSecrets bool         `json:"include_secrets"`
+	Items          []BackupItem `json:"items"`
+	Excluded       []string     `json:"excluded"`
+	Warning        string       `json:"warning"`
+}
+
+type BackupArchive struct {
+	FileName       string    `json:"file_name"`
+	Size           int64     `json:"size"`
+	SHA256         string    `json:"sha256"`
+	CreatedAt      time.Time `json:"created_at"`
+	Restorable     bool      `json:"restorable"`
+	IncludeSecrets bool      `json:"include_secrets"`
+	Body           []byte    `json:"-"`
+}
+
+type BackupRestorePreviewRequest struct {
+	ContentID string `json:"content_id"`
+}
+
+type BackupRestorePreview struct {
+	ContentID                string            `json:"content_id"`
+	FormatVersion            int               `json:"format_version"`
+	CreatedAt                time.Time         `json:"created_at"`
+	SourceInstallationID     string            `json:"source_installation_id"`
+	Restorable               bool              `json:"restorable"`
+	SourceCount              int               `json:"source_count"`
+	ManagedResourceCount     int               `json:"managed_resource_count"`
+	HasAdvancedOverride      bool              `json:"has_advanced_override"`
+	RecentConfigurationCount int               `json:"recent_configuration_count"`
+	MachineSettings          map[string]string `json:"machine_settings"`
+	PendingSettings          []string          `json:"pending_settings"`
+	Warning                  string            `json:"warning"`
 }
 
 type Event struct {
@@ -408,6 +476,7 @@ const (
 	ActionDisableGateway      = "network.disable_gateway"
 	ActionUpdateMihomo        = "mihomo.update"
 	ActionRollbackMihomo      = "mihomo.rollback"
+	ActionRestoreBackup       = "backup.restore"
 
 	OperationQueued         = "queued"
 	OperationRunning        = "running"
@@ -447,6 +516,7 @@ const (
 	MihomoUpdateTrustTUF           = "tuf"
 	MihomoUpdateTrustUpstreamOnly  = "upstream_only"
 	MihomoUpdateBundleContentType  = "application/vnd.submux.mihomo-update-bundle+zip"
+	RuntimeBackupContentType       = "application/vnd.submux.runtime-backup+zip"
 
 	ManagedResourceContentType = "application/vnd.submux.managed-resource"
 

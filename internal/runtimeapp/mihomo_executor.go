@@ -14,12 +14,14 @@ import (
 
 	"submux/internal/mihomo"
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimebackup"
 	"submux/internal/runtimecore"
 	"submux/internal/runtimenet"
 	"submux/internal/runtimeprocess"
 	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
 	"submux/internal/runtimeupdate"
+	"submux/internal/safepath"
 )
 
 type MihomoExecutor struct {
@@ -35,6 +37,7 @@ type MihomoExecutor struct {
 	Network         FailOpenController
 	TUN             TUNController
 	Updates         *runtimeupdate.Manager
+	Backups         *runtimebackup.Service
 	Now             func() time.Time
 
 	lifecycleMu sync.Mutex
@@ -162,6 +165,8 @@ func (e *MihomoExecutor) Execute(
 			return nil, errors.New("Mihomo update manager is unavailable")
 		}
 		return e.Updates.Rollback(ctx, operation, runtimeupdate.Reporter(report))
+	case runtimeapi.ActionRestoreBackup:
+		return e.restoreBackup(ctx, operation, report)
 	case runtimeapi.ActionAddManagedResource:
 		return e.addManagedResource(operation, report)
 	case runtimeapi.ActionSetAdvancedOverride:
@@ -180,6 +185,142 @@ func (e *MihomoExecutor) Execute(
 	default:
 		return nil, fmt.Errorf("unsupported Runtime action %q", operation.Action.Kind)
 	}
+}
+
+func (e *MihomoExecutor) restoreBackup(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if e.Backups == nil {
+		return nil, errors.New("Runtime backup restore service is unavailable")
+	}
+	if !operation.Action.Params.Confirm {
+		return nil, errors.New("Runtime backup restore requires explicit confirmation")
+	}
+	if err := report("reading_backup", 5, true); err != nil {
+		return nil, err
+	}
+	body, content, err := e.State.ConsumeImport(
+		operation.Action.Params.ContentID,
+		operation.CallerIdentity,
+		operation.ID,
+		e.now(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if content.ContentType != runtimeapi.RuntimeBackupContentType {
+		return nil, errors.New("uploaded content is not a Runtime backup archive")
+	}
+	stopResult, err := e.stop(ctx, operation, func(stage string, progress int, cancellable bool) error {
+		return report(stage, 10+progress/4, cancellable)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("stop Mihomo and release Runtime network ownership before restore: %w", err)
+	}
+	if err := report("replacing_portable_state", 40, false); err != nil {
+		return nil, err
+	}
+	var prepared *runtimeapi.OperationResult
+	restored, err := e.Backups.Restore(
+		ctx,
+		body,
+		operation.ID,
+		func(ctx context.Context, _ runtimestate.PortableState) error {
+			current, currentErr := e.State.CurrentSource()
+			if errors.Is(currentErr, runtimestate.ErrSourceNotFound) {
+				return clearPreparedConfiguration(e.ConfigRoot)
+			}
+			if currentErr != nil {
+				return currentErr
+			}
+			raw, _, readErr := e.State.ReadSourceRevision(current)
+			if readErr != nil {
+				return readErr
+			}
+			override, _, overrideErr := e.State.AdvancedOverride()
+			if overrideErr != nil {
+				return overrideErr
+			}
+			detailed, buildErr := e.buildDetailedCandidateForNetwork(raw, override, nil)
+			if buildErr != nil {
+				return buildErr
+			}
+			prepared, buildErr = e.deployCandidate(
+				ctx,
+				operation.ID+"_restored",
+				current.RawSHA256,
+				raw,
+				detailed.YAML,
+				current.ID,
+				func(stage string, progress int, cancellable bool) error {
+					return report(stage, 55+progress*35/100, cancellable)
+				},
+			)
+			return buildErr
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+	result := &runtimeapi.OperationResult{
+		Verified:               true,
+		RunMode:                runtimeapi.RunModeUnconfigured,
+		Network:                stopResult.Network,
+		BackupSHA256:           restored.BackupSHA256,
+		AutomaticBackupFile:    restored.AutomaticBackupFile,
+		MachineSettingsPending: restored.MachineSettingsPending,
+	}
+	if prepared != nil {
+		result.ConfigRevision = prepared.ConfigRevision
+		result.CandidateSHA256 = prepared.CandidateSHA256
+		result.ProxyKind = prepared.ProxyKind
+		result.ProxyAddresses = append([]string(nil), prepared.ProxyAddresses...)
+		result.SourceID = prepared.SourceID
+	}
+	return result, nil
+}
+
+func clearPreparedConfiguration(root string) error {
+	if root == "" || !filepath.IsAbs(root) {
+		return errors.New("Runtime configuration root must be a fixed absolute path")
+	}
+	root = filepath.Clean(root)
+	linked, err := safepath.ContainsLinkInExistingPath(root)
+	if err != nil {
+		return err
+	}
+	if linked {
+		return errors.New("Runtime configuration root must not contain symbolic or reparse links")
+	}
+	for _, name := range []string{"current", "previous-good", "staging", "failed"} {
+		target := filepath.Join(root, name)
+		if filepath.Dir(target) != root {
+			return errors.New("Runtime configuration cleanup escaped its root")
+		}
+		info, err := os.Lstat(target)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("Runtime prepared configuration contains an unmanaged entry")
+		}
+		linked, err := safepath.ContainsLink(target)
+		if err != nil {
+			return err
+		}
+		if linked {
+			return errors.New("Runtime prepared configuration must not contain linked entries")
+		}
+		if err := os.RemoveAll(target); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *MihomoExecutor) Verify(ctx context.Context) (runtimeapi.ProxyVerification, error) {

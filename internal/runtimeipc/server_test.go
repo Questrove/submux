@@ -52,6 +52,40 @@ type updateObserver struct {
 	preview func(runtimeapi.PeerIdentity, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
 }
 
+type backupObserver struct {
+	operatorObserver
+	preview        func(runtimeapi.PeerIdentity, runtimeapi.BackupPreviewRequest) (runtimeapi.BackupPreview, error)
+	export         func(runtimeapi.PeerIdentity, runtimeapi.BackupExportRequest) (runtimeapi.BackupArchive, error)
+	restorePreview func(runtimeapi.PeerIdentity, runtimeapi.BackupRestorePreviewRequest) (runtimeapi.BackupRestorePreview, error)
+}
+
+func (observer backupObserver) PreviewBackup(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	_, _, _ string,
+	request runtimeapi.BackupPreviewRequest,
+) (runtimeapi.BackupPreview, error) {
+	return observer.preview(peer, request)
+}
+
+func (observer backupObserver) ExportBackup(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	_, _, _ string,
+	request runtimeapi.BackupExportRequest,
+) (runtimeapi.BackupArchive, error) {
+	return observer.export(peer, request)
+}
+
+func (observer backupObserver) PreviewBackupRestore(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	_, _, _ string,
+	request runtimeapi.BackupRestorePreviewRequest,
+) (runtimeapi.BackupRestorePreview, error) {
+	return observer.restorePreview(peer, request)
+}
+
 func (observer updateObserver) UploadMihomoUpdateBundle(
 	_ context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -748,6 +782,88 @@ func TestMihomoUpdateBundleAndPreviewUseAuthorizedLocalIPC(t *testing.T) {
 	}
 }
 
+func TestBackupPreviewExportAndRestorePreviewUseAuthorizedLocalIPC(t *testing.T) {
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	archiveBody := []byte("bounded-backup-archive")
+	digest := sha256.Sum256(archiveBody)
+	contentID := "content_0123456789abcdef0123456789abcdef"
+	previewCalls := 0
+	exportCalls := 0
+	restorePreviewCalls := 0
+	service := backupObserver{
+		operatorObserver: operatorObserver{observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{ProtocolVersion: runtimeapi.ProtocolVersion}, nil
+		}},
+		preview: func(gotPeer runtimeapi.PeerIdentity, request runtimeapi.BackupPreviewRequest) (runtimeapi.BackupPreview, error) {
+			previewCalls++
+			if gotPeer.Key() != peer.Key() || !request.IncludeSecrets {
+				t.Fatalf("unexpected backup preview peer=%#v request=%#v", gotPeer, request)
+			}
+			return runtimeapi.BackupPreview{FormatVersion: 1, Restorable: true, IncludeSecrets: true}, nil
+		},
+		export: func(gotPeer runtimeapi.PeerIdentity, request runtimeapi.BackupExportRequest) (runtimeapi.BackupArchive, error) {
+			exportCalls++
+			if gotPeer.Key() != peer.Key() || !request.IncludeSecrets || !request.ConfirmPlaintext {
+				t.Fatalf("unexpected backup export peer=%#v request=%#v", gotPeer, request)
+			}
+			return runtimeapi.BackupArchive{
+				FileName:       "submux-runtime-backup.zip",
+				Size:           int64(len(archiveBody)),
+				SHA256:         hex.EncodeToString(digest[:]),
+				CreatedAt:      time.Date(2026, 7, 30, 1, 2, 3, 0, time.UTC),
+				Restorable:     true,
+				IncludeSecrets: true,
+				Body:           archiveBody,
+			}, nil
+		},
+		restorePreview: func(gotPeer runtimeapi.PeerIdentity, request runtimeapi.BackupRestorePreviewRequest) (runtimeapi.BackupRestorePreview, error) {
+			restorePreviewCalls++
+			if gotPeer.Key() != peer.Key() || request.ContentID != contentID {
+				t.Fatalf("unexpected restore preview peer=%#v request=%#v", gotPeer, request)
+			}
+			return runtimeapi.BackupRestorePreview{
+				ContentID:       request.ContentID,
+				Restorable:      true,
+				PendingSettings: []string{"listeners", "tun", "gateway"},
+			}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(path, requestID, body string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set(HeaderRequestID, requestID)
+		request.Header.Set(HeaderProtocolVersion, "1")
+		request.Header.Set(HeaderClientType, "gui")
+		request.Header.Set(HeaderClientVersion, "test")
+		request = withPeerContext(request, peer, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	recorder := serve("/v1/backups/preview", "request-backup-preview", `{"include_secrets":true}`)
+	if recorder.Code != http.StatusOK || previewCalls != 1 ||
+		recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("backup preview status=%d calls=%d headers=%v body=%s", recorder.Code, previewCalls, recorder.Header(), recorder.Body.String())
+	}
+	recorder = serve("/v1/backups/export", "request-backup-export", `{"include_secrets":true,"confirm_plaintext":true}`)
+	if recorder.Code != http.StatusOK || exportCalls != 1 ||
+		!bytes.Equal(recorder.Body.Bytes(), archiveBody) ||
+		recorder.Header().Get("Content-Type") != runtimeapi.RuntimeBackupContentType ||
+		recorder.Header().Get(HeaderContentSHA256) != hex.EncodeToString(digest[:]) ||
+		recorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("backup export status=%d calls=%d headers=%v body=%q", recorder.Code, exportCalls, recorder.Header(), recorder.Body.Bytes())
+	}
+	recorder = serve("/v1/backups/restore/preview", "request-backup-restore", `{"content_id":"`+contentID+`"}`)
+	if recorder.Code != http.StatusOK || restorePreviewCalls != 1 ||
+		!strings.Contains(recorder.Body.String(), contentID) {
+		t.Fatalf("restore preview status=%d calls=%d body=%s", recorder.Code, restorePreviewCalls, recorder.Body.String())
+	}
+}
+
 func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 	sourceID := "src_0123456789abcdef0123456789abcdef"
 	for _, action := range []runtimeapi.Action{
@@ -823,6 +939,13 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 			},
 		},
 		{
+			Kind: runtimeapi.ActionRestoreBackup,
+			Params: runtimeapi.ActionParams{
+				ContentID: "content_0123456789abcdef0123456789abcdef",
+				Confirm:   true,
+			},
+		},
+		{
 			Kind:   runtimeapi.ActionRollbackMihomo,
 			Params: runtimeapi.ActionParams{Confirm: true},
 		},
@@ -832,6 +955,12 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 		}
 	}
 	for _, action := range []runtimeapi.Action{
+		{
+			Kind: runtimeapi.ActionRestoreBackup,
+			Params: runtimeapi.ActionParams{
+				ContentID: "content_0123456789abcdef0123456789abcdef",
+			},
+		},
 		{
 			Kind: runtimeapi.ActionAddRemoteSource,
 			Params: runtimeapi.ActionParams{

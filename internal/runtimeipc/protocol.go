@@ -9,12 +9,15 @@ import (
 )
 
 const (
-	HeaderRequestID       = "X-Submux-Request-ID"
-	HeaderProtocolVersion = "X-Submux-Protocol-Version"
-	HeaderClientType      = "X-Submux-Client-Type"
-	HeaderClientVersion   = "X-Submux-Client-Version"
-	HeaderContentSize     = "X-Submux-Content-Size"
-	HeaderContentSHA256   = "X-Submux-Content-SHA256"
+	HeaderRequestID        = "X-Submux-Request-ID"
+	HeaderProtocolVersion  = "X-Submux-Protocol-Version"
+	HeaderClientType       = "X-Submux-Client-Type"
+	HeaderClientVersion    = "X-Submux-Client-Version"
+	HeaderContentSize      = "X-Submux-Content-Size"
+	HeaderContentSHA256    = "X-Submux-Content-SHA256"
+	HeaderBackupCreatedAt  = "X-Submux-Backup-Created-At"
+	HeaderBackupRestorable = "X-Submux-Backup-Restorable"
+	HeaderBackupSecrets    = "X-Submux-Backup-Include-Secrets"
 
 	MaxRequestBytes  = 1 << 20
 	MaxResponseBytes = 12 << 20

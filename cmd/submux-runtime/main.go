@@ -24,6 +24,8 @@ import (
 	"submux/internal/mihomo"
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimeapp"
+	"submux/internal/runtimebackup"
+	"submux/internal/runtimebackupfile"
 	"submux/internal/runtimecore"
 	"submux/internal/runtimediag"
 	"submux/internal/runtimeinstance"
@@ -99,7 +101,10 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "diagnostics" {
 		return runDiagnostics(arguments[1:], stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|mihomo|network|source|resource|override|diagnostics|version|--version-json]")
+	if arguments[0] == "backup" {
+		return runBackup(arguments[1:], stdout, stderr)
+	}
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|mihomo|network|source|resource|override|diagnostics|backup|version|--version-json]")
 	return 2
 }
 
@@ -174,6 +179,11 @@ func runServe(arguments []string, stderr io.Writer) int {
 		return 1
 	}
 	defer state.Close()
+	configRoot := filepath.Join(*stateRoot, "config")
+	if err := runtimebackup.RecoverConfigurationReplacement(configRoot); err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
+		return 1
+	}
 	var network *runtimenet.Connector
 	if (runtime.GOOS == "linux" || runtime.GOOS == "windows" || runtime.GOOS == "darwin") &&
 		*networkEndpoint != "" {
@@ -227,7 +237,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 		return 1
 	}
 	process := &runtimeprocess.Process{
-		ConfigPath: filepath.Join(*stateRoot, "config", "current", "config.yaml"),
+		ConfigPath: filepath.Join(configRoot, "current", "config.yaml"),
 		DataDir:    filepath.Join(*stateRoot, "mihomo-data"),
 		Stdout:     mihomoStdout,
 		Stderr:     mihomoStderr,
@@ -276,11 +286,16 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Core:              core,
 		CandidateVerifier: candidateVerifier,
 	}
+	backupManager := &runtimebackup.Service{
+		State:      state,
+		Root:       filepath.Join(*stateRoot, "backups"),
+		ConfigRoot: configRoot,
+	}
 	executor := &runtimeapp.MihomoExecutor{
 		State:           state,
 		Core:            core,
 		Process:         process,
-		ConfigRoot:      filepath.Join(*stateRoot, "config"),
+		ConfigRoot:      configRoot,
 		ControlEndpoint: defaults.ControlEndpoint,
 		ProxyPort:       *proxyPort,
 		Platform:        runtime.GOOS,
@@ -288,6 +303,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Network:         network,
 		TUN:             network,
 		Updates:         updateManager,
+		Backups:         backupManager,
 	}
 	executor.Sources = &runtimesource.Manager{
 		State: state,
@@ -306,6 +322,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Recovery: supervisor,
 		Network:  network,
 		Updates:  updateManager,
+		Backups:  backupManager,
 		Diagnostics: &runtimediag.Service{
 			State:          state,
 			StateRoot:      *stateRoot,
@@ -1819,6 +1836,181 @@ func runDiagnostics(arguments []string, stdout io.Writer, stderr io.Writer) int 
 		fmt.Fprintf(stdout, "Diagnostics: %s (%d bytes, sha256:%s)\n", result.FileName, result.Size, result.SHA256)
 	}
 	return 0
+}
+
+func runBackup(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime backup [preview|export|inspect|restore] [options]")
+		return 2
+	}
+	command := arguments[0]
+	if command != "preview" && command != "export" && command != "inspect" && command != "restore" {
+		fmt.Fprintln(stderr, "usage: submux-runtime backup [preview|export|inspect|restore] [options]")
+		return 2
+	}
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("backup "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	includeSecrets := flags.Bool("include-secrets", false, "include secrets and produce a restorable plaintext backup")
+	confirmPlaintext := flags.Bool("confirm-plaintext", false, "confirm writing an unencrypted plaintext backup")
+	confirmRestore := flags.Bool("confirm", false, "confirm replacing portable Runtime state")
+	wait := flags.Bool("wait", true, "wait for the restore operation to finish")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return 2
+	}
+
+	switch command {
+	case "preview":
+		if flags.NArg() != 0 || *confirmPlaintext || *confirmRestore || !*wait {
+			fmt.Fprintln(stderr, "backup preview accepts only --include-secrets, --endpoint and --json")
+			return 2
+		}
+	case "export":
+		if flags.NArg() != 1 || !*confirmPlaintext || *confirmRestore || !*wait {
+			fmt.Fprintln(stderr, "backup export requires --confirm-plaintext and exactly one new output file")
+			return 2
+		}
+	case "inspect":
+		if flags.NArg() != 1 || *includeSecrets || *confirmPlaintext || *confirmRestore || !*wait {
+			fmt.Fprintln(stderr, "backup inspect accepts exactly one backup file")
+			return 2
+		}
+	case "restore":
+		if flags.NArg() != 1 || *includeSecrets || *confirmPlaintext || !*confirmRestore {
+			fmt.Fprintln(stderr, "backup restore requires --confirm and exactly one backup file")
+			return 2
+		}
+	}
+
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	ctx := context.Background()
+
+	if command == "preview" {
+		preview, err := client.PreviewBackup(ctx, runtimeapi.BackupPreviewRequest{
+			IncludeSecrets: *includeSecrets,
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		return writeBackupPreview(stdout, *jsonOutput, preview)
+	}
+
+	if command == "export" {
+		preview, err := client.PreviewBackup(ctx, runtimeapi.BackupPreviewRequest{
+			IncludeSecrets: *includeSecrets,
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		fmt.Fprintln(stderr, preview.Warning)
+		archive, err := client.ExportBackup(ctx, runtimeapi.BackupExportRequest{
+			IncludeSecrets:   *includeSecrets,
+			ConfirmPlaintext: *confirmPlaintext,
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		output, err := runtimebackupfile.WriteNew(flags.Arg(0), archive.Body, runtimeapi.RuntimeBackupMaxBytes)
+		if err != nil {
+			writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+			return 1
+		}
+		archive.Body = nil
+		if *jsonOutput {
+			_ = json.NewEncoder(stdout).Encode(archive)
+		} else {
+			fmt.Fprintf(stdout, "Backup: %s (%d bytes, sha256:%s)\n", output, archive.Size, archive.SHA256)
+			if !archive.Restorable {
+				fmt.Fprintln(stdout, "This is a redacted inventory and cannot be restored.")
+			}
+		}
+		return 0
+	}
+
+	body, err := runtimebackupfile.Read(flags.Arg(0), runtimeapi.RuntimeBackupMaxBytes)
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+		return 1
+	}
+	content, err := client.UploadImport(ctx, runtimeapi.RuntimeBackupContentType, body)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	preview, err := client.PreviewBackupRestore(ctx, runtimeapi.BackupRestorePreviewRequest{ContentID: content.ID})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if command == "inspect" {
+		if *jsonOutput {
+			_ = json.NewEncoder(stdout).Encode(preview)
+		} else {
+			writeBackupRestorePreview(stdout, preview)
+		}
+		return 0
+	}
+	writeBackupRestorePreview(stderr, preview)
+	snapshot, err := client.Observe(ctx)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	operation, err := client.Execute(ctx, runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action: runtimeapi.Action{
+			Kind: runtimeapi.ActionRestoreBackup,
+			Params: runtimeapi.ActionParams{
+				ContentID: content.ID,
+				Confirm:   true,
+			},
+		},
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(ctx, operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func writeBackupPreview(writer io.Writer, asJSON bool, preview runtimeapi.BackupPreview) int {
+	if asJSON {
+		_ = json.NewEncoder(writer).Encode(preview)
+		return 0
+	}
+	for _, item := range preview.Items {
+		included := "excluded"
+		if item.Included {
+			included = "included"
+		}
+		fmt.Fprintf(writer, "%s\t%s\t%d items\t%d bytes\n", item.Name, included, item.Count, item.Size)
+	}
+	fmt.Fprintln(writer, preview.Warning)
+	return 0
+}
+
+func writeBackupRestorePreview(writer io.Writer, preview runtimeapi.BackupRestorePreview) {
+	fmt.Fprintf(
+		writer,
+		"Backup created %s; %d sources, %d managed resources, %d recent configurations\n",
+		preview.CreatedAt.Format(time.RFC3339),
+		preview.SourceCount,
+		preview.ManagedResourceCount,
+		preview.RecentConfigurationCount,
+	)
+	if len(preview.PendingSettings) > 0 {
+		fmt.Fprintf(writer, "Pending local confirmation: %s\n", strings.Join(preview.PendingSettings, ", "))
+	}
+	fmt.Fprintln(writer, preview.Warning)
 }
 
 func submitSourceAction(

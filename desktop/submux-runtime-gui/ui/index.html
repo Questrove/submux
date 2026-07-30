@@ -41,6 +41,40 @@
       <section class="panel">
         <div class="panel-heading">
           <div>
+            <p class="eyebrow">PORTABLE STATE</p>
+            <h2>完整备份与恢复</h2>
+          </div>
+          <span id="backup-state" class="badge">尚未预览</span>
+        </div>
+        <p class="notice">
+          备份是未加密的明文文件。完整备份包含来源地址、凭据、配置正文和私钥资源，只能保存到受信任位置。
+          输出文件会限制为当前所有者访问，已有文件不会被覆盖。
+        </p>
+        <label><input id="backup-include-secrets" type="checkbox" checked /> 包含秘密内容并生成可恢复备份</label>
+        <label>
+          新输出文件（路径只由 GUI 读取，不发送给 Runtime）
+          <input id="backup-output-path" value="submux-runtime-backup.zip" />
+        </label>
+        <div class="actions">
+          <button id="preview-backup" class="secondary">预览备份内容</button>
+          <button id="export-backup">确认并创建明文备份</button>
+        </div>
+        <pre id="backup-preview">尚未预览备份内容。</pre>
+        <hr />
+        <label>
+          待恢复备份文件（路径只由 GUI 读取，不发送给 Runtime）
+          <input id="backup-restore-path" placeholder="输入 .zip 备份文件路径" />
+        </label>
+        <div class="actions">
+          <button id="preview-backup-restore" class="secondary">上传并检查恢复内容</button>
+          <button id="restore-backup" class="danger" disabled>确认整体替换</button>
+        </div>
+        <pre id="backup-restore-preview">尚未检查恢复文件。</pre>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
             <p class="eyebrow">MIHOMO CORE</p>
             <h2>官方核心更新与回滚</h2>
           </div>

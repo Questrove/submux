@@ -18,6 +18,8 @@ const state = {
   activeNetworkMode: "",
   mihomoUpdatePlan: null,
   previousMihomoVersion: "",
+  backupRestoreContentId: "",
+  backupRestorePath: "",
 };
 
 const elements = {
@@ -117,6 +119,16 @@ const elements = {
   previewDiagnostics: document.querySelector("#preview-diagnostics"),
   createDiagnostics: document.querySelector("#create-diagnostics"),
   diagnosticsPreview: document.querySelector("#diagnostics-preview"),
+  backupState: document.querySelector("#backup-state"),
+  backupIncludeSecrets: document.querySelector("#backup-include-secrets"),
+  backupOutputPath: document.querySelector("#backup-output-path"),
+  previewBackup: document.querySelector("#preview-backup"),
+  exportBackup: document.querySelector("#export-backup"),
+  backupPreview: document.querySelector("#backup-preview"),
+  backupRestorePath: document.querySelector("#backup-restore-path"),
+  previewBackupRestore: document.querySelector("#preview-backup-restore"),
+  restoreBackup: document.querySelector("#restore-backup"),
+  backupRestorePreview: document.querySelector("#backup-restore-preview"),
 };
 
 const writeButtons = [
@@ -143,6 +155,10 @@ const writeButtons = [
   elements.saveAdvancedOverride,
   elements.previewAdvancedOverride,
   elements.createDiagnostics,
+  elements.previewBackup,
+  elements.exportBackup,
+  elements.previewBackupRestore,
+  elements.restoreBackup,
 ];
 
 function setBusy(busy, message = "") {
@@ -156,6 +172,8 @@ function setBusy(busy, message = "") {
     busy || !state.compatible || !state.mihomoUpdatePlan;
   elements.rollbackMihomo.disabled =
     busy || !state.compatible || !state.previousMihomoVersion;
+  elements.restoreBackup.disabled =
+    busy || !state.compatible || !state.backupRestoreContentId;
   for (const button of [
     elements.refreshSource,
     elements.refreshSourceDirect,
@@ -888,6 +906,128 @@ async function revealSelectedSourceURL() {
   }
 }
 
+function renderBackupPreview(preview) {
+  elements.backupState.textContent = preview.restorable ? "可恢复明文备份" : "仅脱敏清单";
+  elements.backupPreview.textContent = [
+    ...(preview.items || [])
+      .filter((item) => item.included)
+      .map((item) => `${item.name}\t${item.count || 0} 项\t${item.size || 0} 字节\t${item.sensitive ? "敏感" : "已脱敏"}`),
+    "",
+    preview.warning || "",
+    "",
+    `不包含：${(preview.excluded || []).join("、")}`,
+  ].join("\n");
+}
+
+async function previewBackup() {
+  setBusy(true, "正在预览备份内容…");
+  try {
+    const preview = await invoke("runtime_preview_backup", {
+      includeSecrets: elements.backupIncludeSecrets.checked,
+    });
+    renderBackupPreview(preview);
+    setMessage(preview.warning);
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function exportBackup() {
+  const path = elements.backupOutputPath.value.trim();
+  if (!path) {
+    setMessage("请输入尚不存在的备份输出文件。", true);
+    return;
+  }
+  setBusy(true, "正在预览备份内容…");
+  try {
+    const preview = await invoke("runtime_preview_backup", {
+      includeSecrets: elements.backupIncludeSecrets.checked,
+    });
+    renderBackupPreview(preview);
+    if (!window.confirm(`${preview.warning}\n\n确认创建未加密的 owner-only 新文件吗？`)) {
+      setMessage("已预览备份内容，未创建文件。");
+      return;
+    }
+    setBusy(true, "正在通过本机 IPC 导出并保存备份…");
+    const result = await invoke("runtime_export_backup", {
+      path,
+      includeSecrets: elements.backupIncludeSecrets.checked,
+      confirmPlaintext: true,
+    });
+    elements.backupState.textContent = result.restorable ? "完整备份已保存" : "脱敏清单已保存";
+    elements.backupPreview.textContent =
+      `${result.output_path}\n${result.size} 字节\nSHA-256 ${result.sha256}\n创建时间 ${result.created_at}`;
+    setMessage(
+      result.restorable
+        ? "完整明文备份已保存；请继续限制其复制和传输范围。"
+        : "脱敏清单已保存；它不包含秘密内容，不能用于恢复。",
+    );
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function previewBackupRestore() {
+  const path = elements.backupRestorePath.value.trim();
+  if (!path) {
+    setMessage("请输入待恢复的备份文件。", true);
+    return;
+  }
+  state.backupRestoreContentId = "";
+  state.backupRestorePath = "";
+  setBusy(true, "正在读取、上传并检查备份…");
+  try {
+    const preview = await invoke("runtime_preview_backup_restore", { path });
+    state.backupRestoreContentId = preview.content_id;
+    state.backupRestorePath = path;
+    elements.backupRestorePreview.textContent = [
+      `创建时间：${preview.created_at}`,
+      `来源：${preview.source_count} 个`,
+      `托管资源：${preview.managed_resource_count} 个`,
+      `近期配置：${preview.recent_configuration_count} 份`,
+      `待重新确认：${(preview.pending_settings || []).join("、")}`,
+      "",
+      preview.warning || "",
+    ].join("\n");
+    setMessage("恢复内容已检查；执行前仍需明确确认整体替换。");
+  } catch (error) {
+    elements.backupRestorePreview.textContent = "恢复文件检查失败。";
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function restoreBackup() {
+  if (!state.backupRestoreContentId ||
+      state.backupRestorePath !== elements.backupRestorePath.value.trim()) {
+    setMessage("恢复文件已经变化，请重新上传并检查。", true);
+    return;
+  }
+  const warning =
+    "恢复会先自动备份当前状态，再整体替换来源、凭据、高级覆盖和托管资源。Mihomo 将保持停止；监听、TUN、网关和网络权限不会跨机器自动启用。";
+  if (!window.confirm(`${warning}\n\n确认继续吗？`)) return;
+  setBusy(true, "正在提交已确认的整体恢复操作…");
+  try {
+    const operation = await invoke("runtime_restore_backup", {
+      contentId: state.backupRestoreContentId,
+      confirm: true,
+    });
+    renderOperation(operation);
+    state.backupRestoreContentId = "";
+    state.backupRestorePath = "";
+    setMessage("整体恢复已经进入 Runtime 队列；完成后请检查自动备份和待确认的本机设置。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function previewDiagnostics() {
   const options = diagnosticsOptions();
   setBusy(true, "正在预览诊断包内容…");
@@ -1207,5 +1347,15 @@ elements.previewAdvancedOverride.addEventListener("click", previewAdvancedOverri
 elements.saveAdvancedOverride.addEventListener("click", saveAdvancedOverride);
 elements.previewDiagnostics.addEventListener("click", previewDiagnostics);
 elements.createDiagnostics.addEventListener("click", createDiagnostics);
+elements.previewBackup.addEventListener("click", previewBackup);
+elements.exportBackup.addEventListener("click", exportBackup);
+elements.previewBackupRestore.addEventListener("click", previewBackupRestore);
+elements.restoreBackup.addEventListener("click", restoreBackup);
+elements.backupRestorePath.addEventListener("input", () => {
+  state.backupRestoreContentId = "";
+  state.backupRestorePath = "";
+  elements.backupRestorePreview.textContent = "恢复文件已变化，请重新上传并检查。";
+  setBusy(state.busy);
+});
 
 handshake();

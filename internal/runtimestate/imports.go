@@ -14,6 +14,7 @@ import (
 
 	"go.etcd.io/bbolt"
 
+	"submux/internal/owneracl"
 	"submux/internal/runtimeapi"
 	"submux/internal/safepath"
 )
@@ -57,7 +58,8 @@ func (s *Store) UploadImport(
 	if expectedSize < 0 || expectedSize != int64(len(body)) {
 		return runtimeapi.ImportContent{}, errors.New("Runtime import size does not match its metadata")
 	}
-	if len(body) == 0 || len(body) > MaxImportBytes {
+	maxBytes := maxImportBytes(contentType)
+	if len(body) == 0 || len(body) > maxBytes {
 		return runtimeapi.ImportContent{}, errors.New("Runtime import size is outside the allowed range")
 	}
 	digest := sha256.Sum256(body)
@@ -106,23 +108,17 @@ func (s *Store) ConsumeImport(contentID, caller, operationID string, now time.Ti
 		return nil, runtimeapi.ImportContent{}, errors.New("Runtime state is not open")
 	}
 	var claimed importRecord
-	err := s.db.Update(func(transaction *bbolt.Tx) error {
-		imports := transaction.Bucket(importsBucket)
-		current, err := readImport(imports, contentID)
+	if err := s.db.View(func(transaction *bbolt.Tx) error {
+		current, err := readImport(transaction.Bucket(importsBucket), contentID)
 		if err != nil {
 			return err
 		}
 		if err := validateImportForCaller(current, caller, operationID, now); err != nil {
 			return err
 		}
-		current.Consumed = true
-		if err := putJSON(imports, []byte(contentID), current); err != nil {
-			return err
-		}
 		claimed = current
 		return nil
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, runtimeapi.ImportContent{}, err
 	}
 	path, err := s.importPath(contentID)
@@ -131,6 +127,23 @@ func (s *Store) ConsumeImport(contentID, caller, operationID string, now time.Ti
 	}
 	body, err := readVerifiedImport(path, claimed.Content)
 	if err != nil {
+		return nil, runtimeapi.ImportContent{}, err
+	}
+	if err := s.db.Update(func(transaction *bbolt.Tx) error {
+		imports := transaction.Bucket(importsBucket)
+		current, err := readImport(imports, contentID)
+		if err != nil {
+			return err
+		}
+		if err := validateImportForCaller(current, caller, operationID, now); err != nil {
+			return err
+		}
+		if current.Content != claimed.Content || current.Caller != claimed.Caller {
+			return errors.New("Runtime import record changed while its content was being verified")
+		}
+		current.Consumed = true
+		return putJSON(imports, []byte(contentID), current)
+	}); err != nil {
 		return nil, runtimeapi.ImportContent{}, err
 	}
 	return body, claimed.Content, nil
@@ -265,22 +278,22 @@ func (s *Store) safeImportRoot() (string, error) {
 	if err := os.Chmod(root, 0700); err != nil {
 		return "", err
 	}
+	if err := owneracl.RestrictDirectory(root); err != nil {
+		return "", fmt.Errorf("restrict Runtime import root permissions: %w", err)
+	}
 	return root, nil
 }
 
 func (s *Store) importPath(contentID string) (string, error) {
-	suffix, ok := strings.CutPrefix(contentID, "content_")
-	if !ok || len(suffix) != 32 {
-		return "", errors.New("Runtime import content ID is invalid")
-	}
-	if _, err := hex.DecodeString(suffix); err != nil {
-		return "", errors.New("Runtime import content ID is invalid")
+	fileName, err := importFileName(contentID)
+	if err != nil {
+		return "", err
 	}
 	root, err := s.safeImportRoot()
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(root, contentID+".content")
+	path := filepath.Join(root, fileName)
 	if filepath.Dir(path) != root {
 		return "", errors.New("Runtime import path escaped the import root")
 	}
@@ -327,17 +340,93 @@ func allowedImportContentType(contentType string) bool {
 		"application/x-yaml",
 		"text/yaml",
 		runtimeapi.SourceDraftContentType,
-		runtimeapi.ManagedResourceContentType:
+		runtimeapi.ManagedResourceContentType,
+		runtimeapi.RuntimeBackupContentType:
 		return true
 	default:
 		return false
 	}
 }
 
+func maxImportBytes(contentType string) int {
+	if strings.EqualFold(
+		strings.TrimSpace(strings.Split(contentType, ";")[0]),
+		runtimeapi.RuntimeBackupContentType,
+	) {
+		return runtimeapi.RuntimeBackupMaxBytes
+	}
+	return MaxImportBytes
+}
+
+func (s *Store) removeOrphanImportFiles() error {
+	if s == nil || s.db == nil {
+		return errors.New("Runtime state is not open")
+	}
+	root, err := s.safeImportRoot()
+	if err != nil {
+		return err
+	}
+	live := make(map[string]struct{})
+	if err := s.db.View(func(transaction *bbolt.Tx) error {
+		imports := transaction.Bucket(importsBucket)
+		if imports == nil {
+			return errors.New("Runtime import state is unavailable")
+		}
+		return imports.ForEach(func(key, _ []byte) error {
+			contentID := string(key)
+			if _, err := importFileName(contentID); err != nil {
+				return errors.New("Runtime import record has an invalid content ID")
+			}
+			live[contentID] = struct{}{}
+			return nil
+		})
+	}); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		contentID, ok := strings.CutSuffix(entry.Name(), ".content")
+		if !ok {
+			continue
+		}
+		if _, err := importFileName(contentID); err != nil {
+			continue
+		}
+		if _, exists := live[contentID]; exists {
+			continue
+		}
+		target := filepath.Join(root, entry.Name())
+		info, err := os.Lstat(target)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("Runtime import root contains an unmanaged orphan entry")
+		}
+		if err := os.Remove(target); err != nil {
+			return fmt.Errorf("remove orphaned Runtime imported content: %w", err)
+		}
+	}
+	return nil
+}
+
 func writeImmutableImport(path string, body []byte) error {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return err
+	}
+	if err := owneracl.RestrictFile(path); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("restrict Runtime imported content permissions: %w", err)
+	}
+	if err := file.Chmod(0600); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("restrict Runtime imported content mode: %w", err)
 	}
 	if _, err := file.Write(body); err != nil {
 		_ = file.Close()
@@ -354,6 +443,17 @@ func writeImmutableImport(path string, body []byte) error {
 		return err
 	}
 	return nil
+}
+
+func importFileName(contentID string) (string, error) {
+	suffix, ok := strings.CutPrefix(contentID, "content_")
+	if !ok || len(suffix) != 32 {
+		return "", errors.New("Runtime import content ID is invalid")
+	}
+	if _, err := hex.DecodeString(suffix); err != nil {
+		return "", errors.New("Runtime import content ID is invalid")
+	}
+	return contentID + ".content", nil
 }
 
 func readVerifiedImport(path string, content runtimeapi.ImportContent) ([]byte, error) {
@@ -383,7 +483,8 @@ func readVerifiedImport(path string, content runtimeapi.ImportContent) ([]byte, 
 	if !os.SameFile(info, openedInfo) {
 		return nil, errors.New("Runtime imported content changed while it was being opened")
 	}
-	body, err := io.ReadAll(io.LimitReader(file, MaxImportBytes+1))
+	maxBytes := maxImportBytes(content.ContentType)
+	body, err := io.ReadAll(io.LimitReader(file, int64(maxBytes)+1))
 	if err != nil {
 		return nil, fmt.Errorf("read Runtime imported content: %w", err)
 	}

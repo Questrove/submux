@@ -14,6 +14,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"submux/internal/runtimeapi"
+	"submux/internal/runtimebackupfile"
 	"submux/internal/runtimeprivacy"
 )
 
@@ -41,6 +42,12 @@ type MihomoUpdateClient interface {
 	PreviewMihomoUpdate(context.Context, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
 }
 
+type BackupClient interface {
+	PreviewBackup(context.Context, runtimeapi.BackupPreviewRequest) (runtimeapi.BackupPreview, error)
+	ExportBackup(context.Context, runtimeapi.BackupExportRequest) (runtimeapi.BackupArchive, error)
+	PreviewBackupRestore(context.Context, runtimeapi.BackupRestorePreviewRequest) (runtimeapi.BackupRestorePreview, error)
+}
+
 type Model struct {
 	ctx               context.Context
 	client            Client
@@ -64,6 +71,10 @@ type Model struct {
 	revealedURL       string
 	diagnostics       runtimeapi.DiagnosticsPreview
 	diagnosticsFile   runtimeapi.DiagnosticsResult
+	backupPreview     runtimeapi.BackupPreview
+	backupRestore     runtimeapi.BackupRestorePreview
+	backupArchive     runtimeapi.BackupArchive
+	backupFile        string
 }
 
 const (
@@ -73,6 +84,8 @@ const (
 	editorModeResource       = "resource"
 	editorModeOverride       = "override"
 	editorModeNetwork        = "network"
+	editorModeBackupExport   = "backup_export"
+	editorModeBackupRestore  = "backup_restore"
 )
 
 type resourceDraft struct {
@@ -129,6 +142,19 @@ type networkPreviewMsg struct {
 
 type mihomoUpdateMsg struct {
 	preview runtimeapi.MihomoUpdatePlan
+}
+
+type backupPreviewMsg struct {
+	preview runtimeapi.BackupPreview
+}
+
+type backupExportMsg struct {
+	archive runtimeapi.BackupArchive
+	path    string
+}
+
+type backupRestorePreviewMsg struct {
+	preview runtimeapi.BackupRestorePreview
 }
 
 type errMsg struct {
@@ -280,6 +306,38 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.sensitiveConfirm = ""
 		m.status = fmt.Sprintf("Mihomo %s 更新计划已验证；再按 U 查看确认提示", message.preview.Version)
+	case backupPreviewMsg:
+		m.backupPreview = message.preview
+		m.busy = false
+		m.err = nil
+		if message.preview.IncludeSecrets {
+			m.sensitiveConfirm = "backup-export-full"
+			m.status = message.preview.Warning + " 再按一次 B 选择新输出文件。"
+		} else {
+			m.sensitiveConfirm = "backup-export-redacted"
+			m.status = message.preview.Warning + " 再按一次 b 选择新输出文件。"
+		}
+	case backupExportMsg:
+		m.backupArchive = message.archive
+		m.backupFile = message.path
+		m.busy = false
+		m.editing = false
+		m.editor.Blur()
+		m.err = nil
+		m.sensitiveConfirm = ""
+		kind := "脱敏清单"
+		if message.archive.IncludeSecrets {
+			kind = "完整明文备份"
+		}
+		m.status = fmt.Sprintf("%s已保存：%s", kind, message.path)
+	case backupRestorePreviewMsg:
+		m.backupRestore = message.preview
+		m.busy = false
+		m.editing = false
+		m.editor.Blur()
+		m.err = nil
+		m.sensitiveConfirm = "backup-restore:" + message.preview.ContentID
+		m.status = message.preview.Warning + " 再按一次 L 明确确认恢复。"
 	case errMsg:
 		m.busy = false
 		m.err = message.err
@@ -305,6 +363,36 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.busy = true
+				if m.editorMode == editorModeBackupExport {
+					client, ok := m.client.(BackupClient)
+					if !ok {
+						m.busy = false
+						m.err = errors.New("当前 TUI 客户端不支持备份导出")
+						m.status = m.err.Error()
+						return m, nil
+					}
+					kind := "脱敏清单"
+					if m.backupPreview.IncludeSecrets {
+						kind = "完整明文备份"
+					}
+					m.status = "正在生成并保存" + kind + "…"
+					return m, m.exportBackupCmd(
+						client,
+						strings.TrimSpace(string(body)),
+						m.backupPreview.IncludeSecrets,
+					)
+				}
+				if m.editorMode == editorModeBackupRestore {
+					client, ok := m.client.(BackupClient)
+					if !ok {
+						m.busy = false
+						m.err = errors.New("当前 TUI 客户端不支持备份恢复")
+						m.status = m.err.Error()
+						return m, nil
+					}
+					m.status = "正在读取、上传并检查备份…"
+					return m, m.previewBackupRestoreCmd(client, strings.TrimSpace(string(body)))
+				}
 				if m.editorMode == editorModeNetwork {
 					var request runtimeapi.NetworkPreviewRequest
 					if err := json.Unmarshal(body, &request); err != nil {
@@ -649,6 +737,59 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				Kind:   runtimeapi.ActionRollbackMihomo,
 				Params: runtimeapi.ActionParams{Confirm: true},
 			})
+		case "b", "B":
+			client, ok := m.client.(BackupClient)
+			if !ok {
+				m.err = errors.New("当前 TUI 客户端不支持备份导出")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			includeSecrets := key.String() == "B"
+			confirmation := "backup-export-redacted"
+			description := "不含秘密、不可恢复的脱敏清单"
+			if includeSecrets {
+				confirmation = "backup-export-full"
+				description = "包含秘密内容的完整明文备份"
+			}
+			if m.sensitiveConfirm != confirmation {
+				m.busy = true
+				m.backupPreview = runtimeapi.BackupPreview{}
+				m.status = "正在预览" + description + "…"
+				return m, m.previewBackupCmd(client, includeSecrets)
+			}
+			m.editing = true
+			m.editorMode = editorModeBackupExport
+			m.err = nil
+			m.editor.SetValue("submux-runtime-backup.zip")
+			m.status = "输入尚不存在的输出文件后按 Ctrl+S 创建，Esc 取消"
+			return m, m.editor.Focus()
+		case "L":
+			confirmation := "backup-restore:" + m.backupRestore.ContentID
+			if m.backupRestore.ContentID != "" && m.sensitiveConfirm == confirmation {
+				m.sensitiveConfirm = ""
+				m.busy = true
+				m.status = "正在提交已确认的整体恢复操作…"
+				return m, m.executeCmd(runtimeapi.Action{
+					Kind: runtimeapi.ActionRestoreBackup,
+					Params: runtimeapi.ActionParams{
+						ContentID: m.backupRestore.ContentID,
+						Confirm:   true,
+					},
+				})
+			}
+			if _, ok := m.client.(BackupClient); !ok {
+				m.err = errors.New("当前 TUI 客户端不支持备份恢复")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.backupRestore = runtimeapi.BackupRestorePreview{}
+			m.sensitiveConfirm = ""
+			m.editing = true
+			m.editorMode = editorModeBackupRestore
+			m.err = nil
+			m.editor.SetValue("")
+			m.status = "输入备份文件后按 Ctrl+S 检查，Esc 取消；文件路径不会发送给 Runtime"
+			return m, m.editor.Focus()
 		case "y":
 			sourceID := m.selectedSource()
 			if sourceID == "" {
@@ -783,6 +924,15 @@ func (m Model) View() tea.View {
 				editorTitle = "Submux Runtime · Linux 网关设置"
 			}
 			editorHelp = "Ctrl+S 生成真实网络预览 · Esc 取消；IPv6 必须明确选择 proxy、direct 或 block"
+		} else if m.editorMode == editorModeBackupExport {
+			editorTitle = "Submux Runtime · 创建脱敏备份清单"
+			if m.backupPreview.IncludeSecrets {
+				editorTitle = "Submux Runtime · 创建完整明文备份"
+			}
+			editorHelp = "Ctrl+S 创建 owner-only 新文件 · Esc 取消；不会覆盖已有文件，路径不会发送给 Runtime"
+		} else if m.editorMode == editorModeBackupRestore {
+			editorTitle = "Submux Runtime · 检查整体恢复备份"
+			editorHelp = "Ctrl+S 读取并检查 · Esc 取消；文件内容经本机 IPC 上传，路径不会发送给 Runtime"
 		}
 		content := strings.Join([]string{
 			titleStyle.Render(editorTitle),
@@ -946,6 +1096,41 @@ func (m Model) View() tea.View {
 		if m.mihomoUpdate.Warning != "" {
 			lines = append(lines, warnStyle.Render(m.mihomoUpdate.Warning))
 		}
+		if len(m.backupPreview.Items) > 0 {
+			title := "脱敏备份清单预览"
+			if m.backupPreview.IncludeSecrets {
+				title = "完整备份预览"
+			}
+			lines = append(lines, "", labelStyle.Render(title))
+			for _, item := range m.backupPreview.Items {
+				if item.Included {
+					lines = append(lines, fmt.Sprintf("%s · %d 项 · %d 字节", item.Name, item.Count, item.Size))
+				}
+			}
+			lines = append(lines, warnStyle.Render(m.backupPreview.Warning))
+		}
+		if m.backupFile != "" {
+			lines = append(lines, "", okStyle.Render(fmt.Sprintf(
+				"备份已保存：%s · %d 字节 · %s",
+				m.backupFile,
+				m.backupArchive.Size,
+				shortDigest(m.backupArchive.SHA256),
+			)))
+		}
+		if m.backupRestore.ContentID != "" {
+			lines = append(lines,
+				"",
+				labelStyle.Render("整体恢复预览"),
+				fmt.Sprintf(
+					"%d 个来源 · %d 个托管资源 · %d 份近期配置",
+					m.backupRestore.SourceCount,
+					m.backupRestore.ManagedResourceCount,
+					m.backupRestore.RecentConfigurationCount,
+				),
+				warnStyle.Render("待重新确认："+strings.Join(m.backupRestore.PendingSettings, "、")),
+				warnStyle.Render(m.backupRestore.Warning),
+			)
+		}
 	}
 	if m.revealedURL != "" {
 		lines = append(lines, "", warnStyle.Render("来源原始地址："+m.revealedURL))
@@ -1019,7 +1204,7 @@ func (m Model) View() tea.View {
 		renderStatus(m.status, m.err, m.busy),
 		"",
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
-		mutedStyle.Render("U 检查/确认安装 Mihomo 更新 · R 确认回滚 Mihomo · Ctrl+T 编辑/预览普通 TUN · Ctrl+L 编辑/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		mutedStyle.Render("b 预览/创建脱敏清单 · B 预览/创建完整备份 · L 检查/确认整体恢复 · U 检查/确认安装 Mihomo 更新 · R 确认回滚 Mihomo · Ctrl+T 编辑/预览普通 TUN · Ctrl+L 编辑/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -1043,6 +1228,56 @@ func (m Model) previewMihomoUpdateCmd(client MihomoUpdateClient) tea.Cmd {
 			return errMsg{err: err}
 		}
 		return mihomoUpdateMsg{preview: preview}
+	}
+}
+
+func (m Model) previewBackupCmd(client BackupClient, includeSecrets bool) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewBackup(m.ctx, runtimeapi.BackupPreviewRequest{
+			IncludeSecrets: includeSecrets,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return backupPreviewMsg{preview: preview}
+	}
+}
+
+func (m Model) exportBackupCmd(client BackupClient, path string, includeSecrets bool) tea.Cmd {
+	return func() tea.Msg {
+		archive, err := client.ExportBackup(m.ctx, runtimeapi.BackupExportRequest{
+			IncludeSecrets:   includeSecrets,
+			ConfirmPlaintext: true,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		output, err := runtimebackupfile.WriteNew(path, archive.Body, runtimeapi.RuntimeBackupMaxBytes)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		archive.Body = nil
+		return backupExportMsg{archive: archive, path: output}
+	}
+}
+
+func (m Model) previewBackupRestoreCmd(client BackupClient, path string) tea.Cmd {
+	return func() tea.Msg {
+		body, err := runtimebackupfile.Read(path, runtimeapi.RuntimeBackupMaxBytes)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		content, err := m.client.UploadImport(m.ctx, runtimeapi.RuntimeBackupContentType, body)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		preview, err := client.PreviewBackupRestore(m.ctx, runtimeapi.BackupRestorePreviewRequest{
+			ContentID: content.ID,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return backupRestorePreviewMsg{preview: preview}
 	}
 }
 

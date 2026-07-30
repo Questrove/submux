@@ -66,6 +66,10 @@ func Open(root string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	if err := store.removeOrphanImportFiles(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return store, nil
 }
 
@@ -118,6 +122,10 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 		if err != nil {
 			return err
 		}
+		backups, err := portableRestoreSummary(metadata)
+		if err != nil {
+			return err
+		}
 		snapshot = runtimeapi.Snapshot{
 			ProtocolVersion: runtimeapi.ProtocolVersion,
 			Revision:        revision,
@@ -132,6 +140,7 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 			AdvancedOverride:  override,
 			Operations:        operations,
 			Updates:           runtimeapi.UpdateStatus{},
+			Backups:           backups,
 			LatestEventCursor: eventCursor,
 			ObservedAt:        observedAt.UTC(),
 		}

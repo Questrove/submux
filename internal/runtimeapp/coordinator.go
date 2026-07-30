@@ -53,6 +53,12 @@ type MihomoUpdateService interface {
 	Status() (runtimeapi.UpdateStatus, error)
 }
 
+type BackupService interface {
+	Preview(bool) (runtimeapi.BackupPreview, error)
+	Export(runtimeapi.BackupExportRequest) (runtimeapi.BackupArchive, error)
+	Inspect([]byte, string) (runtimeapi.BackupRestorePreview, error)
+}
+
 type PublicError struct {
 	Code      string
 	Message   string
@@ -93,6 +99,7 @@ type Coordinator struct {
 	Diagnostics   DiagnosticsService
 	Network       NetworkService
 	Updates       MihomoUpdateService
+	Backups       BackupService
 	Version       string
 	Now           func() time.Time
 	QueueCapacity int
@@ -201,6 +208,103 @@ func (c *Coordinator) PreviewMihomoUpdate(
 		return runtimeapi.MihomoUpdatePlan{}, errors.New("Mihomo update preview service is unavailable")
 	}
 	return c.Updates.Preview(ctx, peer, request)
+}
+
+func (c *Coordinator) PreviewBackup(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.BackupPreviewRequest,
+) (runtimeapi.BackupPreview, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.BackupPreview{}, err
+	}
+	if c == nil || c.State == nil || c.Backups == nil {
+		return runtimeapi.BackupPreview{}, errors.New("Runtime backup service is unavailable")
+	}
+	preview, err := c.Backups.Preview(request.IncludeSecrets)
+	if auditErr := c.auditRead(
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		"backup.preview",
+		"",
+		err,
+	); auditErr != nil {
+		return runtimeapi.BackupPreview{}, auditErr
+	}
+	return preview, err
+}
+
+func (c *Coordinator) ExportBackup(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.BackupExportRequest,
+) (runtimeapi.BackupArchive, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.BackupArchive{}, err
+	}
+	if c == nil || c.State == nil || c.Backups == nil {
+		return runtimeapi.BackupArchive{}, errors.New("Runtime backup service is unavailable")
+	}
+	archive, err := c.Backups.Export(request)
+	if auditErr := c.auditRead(
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		"backup.export_plaintext",
+		archive.SHA256,
+		err,
+	); auditErr != nil {
+		return runtimeapi.BackupArchive{}, auditErr
+	}
+	return archive, err
+}
+
+func (c *Coordinator) PreviewBackupRestore(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.BackupRestorePreviewRequest,
+) (runtimeapi.BackupRestorePreview, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.BackupRestorePreview{}, err
+	}
+	if c == nil || c.State == nil || c.Backups == nil {
+		return runtimeapi.BackupRestorePreview{}, errors.New("Runtime backup service is unavailable")
+	}
+	if !validContentID(request.ContentID) {
+		return runtimeapi.BackupRestorePreview{}, errors.New("backup restore preview requires a valid content_id")
+	}
+	body, content, err := c.State.PeekImport(request.ContentID, peer.Key(), c.now())
+	if err == nil && content.ContentType != runtimeapi.RuntimeBackupContentType {
+		err = errors.New("uploaded content is not a Runtime backup archive")
+	}
+	var preview runtimeapi.BackupRestorePreview
+	if err == nil {
+		preview, err = c.Backups.Inspect(body, request.ContentID)
+	}
+	if auditErr := c.auditRead(
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		"backup.restore.preview",
+		request.ContentID,
+		err,
+	); auditErr != nil {
+		return runtimeapi.BackupRestorePreview{}, auditErr
+	}
+	return preview, err
 }
 
 func (c *Coordinator) Execute(
@@ -503,6 +607,39 @@ func (c *Coordinator) CreateDiagnostics(
 	return result, err
 }
 
+func (c *Coordinator) auditRead(
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	action string,
+	objectID string,
+	err error,
+) error {
+	result := "succeeded"
+	var auditError *runtimeapi.ProtocolError
+	if err != nil {
+		result = "failed"
+		auditError = &runtimeapi.ProtocolError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: runtimeprivacy.RedactError(err),
+		}
+	}
+	_, auditErr := c.State.RecordAudit(runtimeapi.AuditRecord{
+		RequestID:     requestID,
+		Actor:         peer.Key(),
+		ClientType:    clientType,
+		ClientVersion: clientVersion,
+		Action:        action,
+		ObjectID:      objectID,
+		Stage:         "completed",
+		Result:        result,
+		At:            c.now(),
+		Error:         auditError,
+	})
+	return auditErr
+}
+
 func (c *Coordinator) VerifyProxy(ctx context.Context) (runtimeapi.ProxyVerification, error) {
 	if c == nil || c.Executor == nil {
 		return runtimeapi.ProxyVerification{}, errors.New("Runtime proxy verifier is unavailable")
@@ -774,6 +911,19 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.ResourceName != "" {
 			return errors.New("mihomo.rollback requires only explicit confirmation")
 		}
+	case runtimeapi.ActionRestoreBackup:
+		if !validContentID(action.Params.ContentID) ||
+			!action.Params.Confirm ||
+			action.Params.PlanID != "" ||
+			action.Params.Trust != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("backup.restore requires content_id and explicit confirmation")
+		}
 	case runtimeapi.ActionAddRemoteSource:
 		if !validContentID(action.Params.ContentID) ||
 			action.Params.SourceID != "" ||
@@ -949,6 +1099,8 @@ func publicExecutionMessage(kind string) string {
 		return "Runtime could not install the confirmed Mihomo core update"
 	case runtimeapi.ActionRollbackMihomo:
 		return "Runtime could not roll back the Mihomo core"
+	case runtimeapi.ActionRestoreBackup:
+		return "Runtime could not restore the confirmed portable backup"
 	case runtimeapi.ActionAddRemoteSource:
 		return "Runtime could not add the remote configuration source"
 	case runtimeapi.ActionAddImportedSource:

@@ -293,6 +293,41 @@ fn runtime_create_diagnostics(
     )
 }
 
+#[tauri::command]
+fn runtime_preview_backup(
+    bridge: State<'_, RuntimeBridge>,
+    include_secrets: bool,
+) -> Result<Value, BridgeError> {
+    bridge.preview_backup(include_secrets)
+}
+
+#[tauri::command]
+fn runtime_export_backup(
+    bridge: State<'_, RuntimeBridge>,
+    path: String,
+    include_secrets: bool,
+    confirm_plaintext: bool,
+) -> Result<Value, BridgeError> {
+    bridge.export_backup(&path, include_secrets, confirm_plaintext)
+}
+
+#[tauri::command]
+fn runtime_preview_backup_restore(
+    bridge: State<'_, RuntimeBridge>,
+    path: String,
+) -> Result<Value, BridgeError> {
+    bridge.preview_backup_restore(&path)
+}
+
+#[tauri::command]
+fn runtime_restore_backup(
+    bridge: State<'_, RuntimeBridge>,
+    content_id: String,
+    confirm: bool,
+) -> Result<Value, BridgeError> {
+    bridge.restore_backup(&content_id, confirm)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -330,7 +365,11 @@ pub fn run() {
             runtime_verify_proxy,
             runtime_reveal_source_url,
             runtime_preview_diagnostics,
-            runtime_create_diagnostics
+            runtime_create_diagnostics,
+            runtime_preview_backup,
+            runtime_export_backup,
+            runtime_preview_backup_restore,
+            runtime_restore_backup
         ])
         .run(tauri::generate_context!())
         .expect("could not run Submux Runtime GUI");
