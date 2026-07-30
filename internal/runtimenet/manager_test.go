@@ -24,6 +24,66 @@ type fakeSystem struct {
 	cleanupErr error
 }
 
+type fakeCoreSystem struct {
+	*fakeSystem
+
+	coreStage PrivilegedCoreStage
+	coreState string
+}
+
+func (system *fakeCoreSystem) StageCore(
+	_ context.Context,
+	stage PrivilegedCoreStage,
+) (PrivilegedCoreStatus, error) {
+	system.coreStage = stage
+	system.coreState = "staged"
+	return system.coreStatus(), nil
+}
+
+func (system *fakeCoreSystem) StartCore(
+	_ context.Context,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	if objectID != PrivilegedCoreObjectMihomo || system.coreState != "staged" {
+		return PrivilegedCoreStatus{}, errors.New("core is not staged")
+	}
+	system.coreState = "running"
+	return system.coreStatus(), nil
+}
+
+func (system *fakeCoreSystem) StopCore(
+	_ context.Context,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	if objectID != PrivilegedCoreObjectMihomo {
+		return PrivilegedCoreStatus{}, errors.New("core object is invalid")
+	}
+	system.coreState = "stopped"
+	return system.coreStatus(), nil
+}
+
+func (system *fakeCoreSystem) ObserveCore(
+	_ context.Context,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	if objectID != PrivilegedCoreObjectMihomo {
+		return PrivilegedCoreStatus{}, errors.New("core object is invalid")
+	}
+	return system.coreStatus(), nil
+}
+
+func (system *fakeCoreSystem) coreStatus() PrivilegedCoreStatus {
+	return PrivilegedCoreStatus{
+		ObjectID:     PrivilegedCoreObjectMihomo,
+		State:        system.coreState,
+		CoreSHA256:   system.coreStage.CoreSHA256,
+		ConfigSHA256: system.coreStage.ConfigSHA256,
+		DataObjectID: system.coreStage.DataObjectID,
+		ObservedAt:   time.Now().UTC(),
+		PreviewOnly:  true,
+	}
+}
+
 func (system *fakeSystem) Discover(context.Context, runtimeapi.TUNSettings) (Discovery, error) {
 	system.mu.Lock()
 	defer system.mu.Unlock()
@@ -181,6 +241,72 @@ func TestManagerPreviewPrepareCommitRenewReleaseAndReplayProtection(t *testing.T
 	result, err := manager.Result(reconnected.ID, operationID, OperationCommit)
 	if err != nil || result.Sequence != 2 || result.OwnershipID != prepared.OwnershipID {
 		t.Fatalf("query committed Runtime network result=%#v err=%v", result, err)
+	}
+}
+
+func TestManagerPrivilegedCoreOperationsAreAuthenticatedAndDurable(t *testing.T) {
+	now := time.Date(2026, 7, 30, 9, 0, 0, 0, time.UTC)
+	system := &fakeCoreSystem{
+		fakeSystem: &fakeSystem{},
+		coreState:  "stopped",
+	}
+	manager, err := OpenManager(filepath.Join(t.TempDir(), "network"), 1001, system)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.Now = func() time.Time { return now }
+	session := openTestSession(t, manager, 1001)
+	stageOperation := "core_stage_0123456789abcdef"
+	stage := PrivilegedCoreStage{
+		ObjectID:     PrivilegedCoreObjectMihomo,
+		CoreSHA256:   strings.Repeat("a", 64),
+		ConfigSHA256: strings.Repeat("b", 64),
+		DataObjectID: "source_abc",
+	}
+	status, err := manager.StageCore(
+		context.Background(),
+		requestMeta(session, stageOperation, 1, now),
+		stage,
+	)
+	if err != nil || status.State != "staged" {
+		t.Fatalf("stage privileged core status=%#v err=%v", status, err)
+	}
+	result, err := manager.Result(session.ID, stageOperation, OperationCoreStage)
+	if err != nil || result.OperationID != stageOperation || len(result.Payload) == 0 {
+		t.Fatalf("durable privileged core result=%#v err=%v", result, err)
+	}
+	startOperation := "core_start_0123456789abcdef"
+	status, err = manager.StartCore(
+		context.Background(),
+		requestMeta(session, startOperation, 2, now),
+		PrivilegedCoreObjectMihomo,
+	)
+	if err != nil || status.State != "running" {
+		t.Fatalf("start privileged core status=%#v err=%v", status, err)
+	}
+	status, err = manager.ObserveCore(
+		context.Background(),
+		session.ID,
+		PrivilegedCoreObjectMihomo,
+	)
+	if err != nil || status.State != "running" {
+		t.Fatalf("observe privileged core status=%#v err=%v", status, err)
+	}
+	stopOperation := "core_stop_0123456789abcdef"
+	status, err = manager.StopCore(
+		context.Background(),
+		requestMeta(session, stopOperation, 3, now),
+		PrivilegedCoreObjectMihomo,
+	)
+	if err != nil || status.State != "stopped" {
+		t.Fatalf("stop privileged core status=%#v err=%v", status, err)
+	}
+	if _, err := manager.StopCore(
+		context.Background(),
+		requestMeta(session, stopOperation, 3, now),
+		PrivilegedCoreObjectMihomo,
+	); err == nil || !strings.Contains(err.Error(), "replayed") {
+		t.Fatalf("replayed privileged core stop error=%v", err)
 	}
 }
 

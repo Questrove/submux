@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.byworld.submux.runtime-net</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Library/PrivilegedHelperTools/submux-runtime-net</string>
+    <string>--runtime-uid</string>
+    <string>__SUBMUX_RUNTIME_UID__</string>
+    <string>--runtime-gid</string>
+    <string>__SUBMUX_RUNTIME_GID__</string>
+  </array>
+  <key>UserName</key>
+  <string>root</string>
+  <key>GroupName</key>
+  <string>wheel</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Umask</key>
+  <integer>63</integer>
+</dict>
+</plist>

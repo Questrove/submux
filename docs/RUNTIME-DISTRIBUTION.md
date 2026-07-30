@@ -48,9 +48,10 @@ Runtime 是机器服务，不依赖桌面登录。每台机器只允许一份 Ru
 - Runtime 账户：`_submux-runtime`
 - 操作员组：`submux-runtime-operators`
 - 状态根：`/Library/Application Support/SubmuxRuntime`
+- 特权状态根：`/Library/Application Support/SubmuxRuntimePrivileged`
 - 管理 Socket：`/var/run/submux-runtime/runtime.sock`
 
-特权网络进程使用独立 root LaunchDaemon。桌面 GUI 是每个获授权用户自己的登录项，不随 Runtime daemon 一同提权。
+特权网络进程使用独立 root LaunchDaemon。特权状态根由 root 拥有并保持 `0700`，不能放在 Runtime 账户可重命名的目录内。安装器把 `/var/run/submux-runtime` 建成 Runtime 服务账户所有、操作员组只读可进入的 `0750` 目录；内部网络和 Mihomo 控制 Socket 使用独立的 root 所有 `/var/run/submux-runtime-privileged`。桌面 GUI 是每个获授权用户自己的登录项，不随 Runtime daemon 一同提权。
 
 所有平台的状态文件默认只允许 Runtime 账户和系统管理员读取。操作员通过 IPC 管理，不因加入操作员组而获得状态目录的直接读取权限。
 

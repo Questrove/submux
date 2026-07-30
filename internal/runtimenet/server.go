@@ -75,6 +75,21 @@ type resultEnvelope struct {
 	Operation   string `json:"operation"`
 }
 
+type coreStageEnvelope struct {
+	Meta  RequestMeta        `json:"meta"`
+	Stage PrivilegedCoreStage `json:"stage"`
+}
+
+type coreMutationEnvelope struct {
+	Meta     RequestMeta `json:"meta"`
+	ObjectID string      `json:"object_id"`
+}
+
+type coreObserveEnvelope struct {
+	SessionID string `json:"session_id"`
+	ObjectID  string `json:"object_id"`
+}
+
 type errorEnvelope struct {
 	Error string `json:"error"`
 }
@@ -140,6 +155,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/renew", s.handleRenew)
 	mux.HandleFunc("/v1/release", s.handleRelease)
 	mux.HandleFunc("/v1/observe", s.handleObserve)
+	mux.HandleFunc("/v1/core/stage", s.handleCoreStage)
+	mux.HandleFunc("/v1/core/start", s.handleCoreStart)
+	mux.HandleFunc("/v1/core/stop", s.handleCoreStop)
+	mux.HandleFunc("/v1/core/observe", s.handleCoreObserve)
 	mux.HandleFunc("/v1/results/query", s.handleResult)
 	mux.HandleFunc("/", func(writer http.ResponseWriter, _ *http.Request) {
 		writeIPCError(writer, http.StatusNotFound, errors.New("unknown privileged Runtime network endpoint"))
@@ -243,6 +262,42 @@ func (s *Server) handleResult(writer http.ResponseWriter, request *http.Request)
 	}
 	result, err := s.manager.Result(envelope.SessionID, envelope.OperationID, envelope.Operation)
 	writeIPCResult(writer, result, err)
+}
+
+func (s *Server) handleCoreStage(writer http.ResponseWriter, request *http.Request) {
+	var envelope coreStageEnvelope
+	if !s.decodeSessionRequest(writer, request, &envelope, func() string { return envelope.Meta.SessionID }) {
+		return
+	}
+	status, err := s.manager.StageCore(request.Context(), envelope.Meta, envelope.Stage)
+	writeIPCResult(writer, status, err)
+}
+
+func (s *Server) handleCoreStart(writer http.ResponseWriter, request *http.Request) {
+	var envelope coreMutationEnvelope
+	if !s.decodeSessionRequest(writer, request, &envelope, func() string { return envelope.Meta.SessionID }) {
+		return
+	}
+	status, err := s.manager.StartCore(request.Context(), envelope.Meta, envelope.ObjectID)
+	writeIPCResult(writer, status, err)
+}
+
+func (s *Server) handleCoreStop(writer http.ResponseWriter, request *http.Request) {
+	var envelope coreMutationEnvelope
+	if !s.decodeSessionRequest(writer, request, &envelope, func() string { return envelope.Meta.SessionID }) {
+		return
+	}
+	status, err := s.manager.StopCore(request.Context(), envelope.Meta, envelope.ObjectID)
+	writeIPCResult(writer, status, err)
+}
+
+func (s *Server) handleCoreObserve(writer http.ResponseWriter, request *http.Request) {
+	var envelope coreObserveEnvelope
+	if !s.decodeSessionRequest(writer, request, &envelope, func() string { return envelope.SessionID }) {
+		return
+	}
+	status, err := s.manager.ObserveCore(request.Context(), envelope.SessionID, envelope.ObjectID)
+	writeIPCResult(writer, status, err)
 }
 
 func (s *Server) decodeSessionRequest(

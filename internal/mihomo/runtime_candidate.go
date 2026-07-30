@@ -91,9 +91,6 @@ func (b ExplicitCandidateBuilder) runtimeSettings() (int, string, error) {
 		return 0, "", fmt.Errorf("unsupported Mihomo Runtime platform %q", platform)
 	}
 	if b.TUN != nil {
-		if platform != "linux" && platform != "windows" {
-			return 0, "", errors.New("pre-created ordinary TUN is only supported on Linux and Windows")
-		}
 		if !validTUNDevice(b.TUN.Device) {
 			return 0, "", errors.New("Mihomo TUN device is invalid")
 		}

@@ -14,6 +14,7 @@ type PeerIdentity struct {
 	PID       uint32
 	SID       string
 	GroupSIDs []string
+	GroupIDs  []uint32
 	Elevated  bool
 }
 

@@ -25,6 +25,10 @@ type Controller interface {
 	Release(context.Context, string, string, string) (runtimeapi.NetworkStatus, error)
 	Observe(context.Context) (runtimeapi.NetworkStatus, error)
 	Result(context.Context, string, string) (CommittedResult, error)
+	StageCore(context.Context, string, PrivilegedCoreStage) (PrivilegedCoreStatus, error)
+	StartCore(context.Context, string, string) (PrivilegedCoreStatus, error)
+	StopCore(context.Context, string, string) (PrivilegedCoreStatus, error)
+	ObserveCore(context.Context, string) (PrivilegedCoreStatus, error)
 	Close() error
 }
 
@@ -60,6 +64,9 @@ func (err *OutcomeUnknownError) Unwrap() error {
 }
 
 func Dial(ctx context.Context, endpoint, runtimeInstanceID string) (*Client, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
 	if !validOpaqueIdentifier(runtimeInstanceID, 32, 128) {
 		return nil, errors.New("Runtime installation ID is invalid")
 	}
@@ -219,6 +226,84 @@ func (c *Client) Result(
 	return result, err
 }
 
+func (c *Client) StageCore(
+	ctx context.Context,
+	operationID string,
+	stage PrivilegedCoreStage,
+) (PrivilegedCoreStatus, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	meta, err := c.nextMetaLocked(ctx, operationID)
+	if err != nil {
+		return PrivilegedCoreStatus{}, err
+	}
+	var status PrivilegedCoreStatus
+	err = c.postMutationLocked(
+		ctx,
+		OperationCoreStage,
+		operationID,
+		"/v1/core/stage",
+		coreStageEnvelope{Meta: meta, Stage: stage},
+		&status,
+	)
+	return status, err
+}
+
+func (c *Client) StartCore(
+	ctx context.Context,
+	operationID string,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	return c.mutateCore(ctx, operationID, OperationCoreStart, "/v1/core/start", objectID)
+}
+
+func (c *Client) StopCore(
+	ctx context.Context,
+	operationID string,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	return c.mutateCore(ctx, operationID, OperationCoreStop, "/v1/core/stop", objectID)
+}
+
+func (c *Client) mutateCore(
+	ctx context.Context,
+	operationID string,
+	operation string,
+	path string,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	meta, err := c.nextMetaLocked(ctx, operationID)
+	if err != nil {
+		return PrivilegedCoreStatus{}, err
+	}
+	var status PrivilegedCoreStatus
+	err = c.postMutationLocked(
+		ctx,
+		operation,
+		operationID,
+		path,
+		coreMutationEnvelope{Meta: meta, ObjectID: objectID},
+		&status,
+	)
+	return status, err
+}
+
+func (c *Client) ObserveCore(
+	ctx context.Context,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var status PrivilegedCoreStatus
+	err := c.postLocked(ctx, "/v1/core/observe", coreObserveEnvelope{
+		SessionID: c.session.ID,
+		ObjectID:  objectID,
+	}, &status)
+	return status, err
+}
+
 func (c *Client) FailOpen(ctx context.Context) error {
 	status, err := c.Observe(ctx)
 	if err != nil {
@@ -242,6 +327,9 @@ func (c *Client) connect(ctx context.Context) error {
 }
 
 func (c *Client) connectLocked(ctx context.Context) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
 	c.stopLeaseLocked()
 	if c.http != nil {
 		if transport, ok := c.http.Transport.(*http.Transport); ok {
@@ -286,6 +374,9 @@ func (c *Client) connectLocked(ctx context.Context) error {
 }
 
 func (c *Client) nextMetaLocked(ctx context.Context, operationID string) (RequestMeta, error) {
+	if err := contextError(ctx); err != nil {
+		return RequestMeta{}, err
+	}
 	if c.http == nil || c.session.ID == "" {
 		return RequestMeta{}, errors.New("privileged Runtime network client is disconnected")
 	}
@@ -343,6 +434,9 @@ func (err *transportError) Unwrap() error {
 }
 
 func (c *Client) postLocked(ctx context.Context, path string, request any, response any) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
 	if c.http == nil {
 		return errors.New("privileged Runtime network client is disconnected")
 	}

@@ -75,3 +75,40 @@ jobs:
           go build -trimpath -buildvcs=false -o submux-arm64.exe ./cmd/submux
           go build -trimpath -buildvcs=false -o submux-runtime-arm64.exe ./cmd/submux-runtime
           go build -trimpath -buildvcs=false -o submux-runtime-net-arm64.exe ./cmd/submux-runtime-net
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet macOS implementation
+        run: go vet ./...
+
+      - name: Test macOS implementation
+        run: go test ./... -count=1
+
+      - name: Validate LaunchDaemon templates
+        run: plutil -lint packaging/macos/*.plist
+
+      - name: Build macOS amd64 preview
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: amd64
+        run: |
+          go build -trimpath -buildvcs=false -o submux-amd64 ./cmd/submux
+          go build -trimpath -buildvcs=false -o submux-runtime-amd64 ./cmd/submux-runtime
+          go build -trimpath -buildvcs=false -o submux-runtime-net-amd64 ./cmd/submux-runtime-net
+
+      - name: Build macOS arm64 preview
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: arm64
+        run: |
+          go build -trimpath -buildvcs=false -o submux-arm64 ./cmd/submux
+          go build -trimpath -buildvcs=false -o submux-runtime-arm64 ./cmd/submux-runtime
+          go build -trimpath -buildvcs=false -o submux-runtime-net-arm64 ./cmd/submux-runtime-net

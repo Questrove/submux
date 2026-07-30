@@ -22,6 +22,7 @@ type Process struct {
 	SafePaths  []string
 	Stdout     io.Writer
 	Stderr     io.Writer
+	Delegate   Delegate
 
 	mu            sync.Mutex
 	cmd           *exec.Cmd
@@ -32,6 +33,21 @@ type Process struct {
 	startedAt     time.Time
 }
 
+type Specification struct {
+	BinaryPath string
+	ConfigPath string
+	DataDir    string
+	SafePaths  []string
+}
+
+type Delegate interface {
+	IsRunning(context.Context) (bool, error)
+	Start(context.Context, Specification) error
+	Stop(context.Context) error
+	ReloadOrRestart(context.Context, Specification) error
+	ExitEvents() <-chan ExitEvent
+}
+
 type ExitEvent struct {
 	RunID       uint64
 	StartedAt   time.Time
@@ -40,9 +56,15 @@ type ExitEvent struct {
 	Intentional bool
 }
 
-func (p *Process) IsRunning(context.Context) (bool, error) {
+func (p *Process) IsRunning(ctx context.Context) (bool, error) {
 	if p == nil {
 		return false, nil
+	}
+	if ctx == nil {
+		return false, errors.New("Mihomo process context is required")
+	}
+	if p.Delegate != nil {
+		return p.Delegate.IsRunning(ctx)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -54,8 +76,18 @@ func (p *Process) Start(ctx context.Context) error {
 	if p == nil {
 		return errors.New("Mihomo process manager is unavailable")
 	}
+	if ctx == nil {
+		return errors.New("Mihomo process context is required")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if p.Delegate != nil {
+		specification, err := p.specification()
+		if err != nil {
+			return err
+		}
+		return p.Delegate.Start(ctx, specification)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -148,6 +180,9 @@ func (p *Process) ExitEvents() <-chan ExitEvent {
 	if p == nil {
 		return nil
 	}
+	if p.Delegate != nil {
+		return p.Delegate.ExitEvents()
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ensureExitChannelLocked()
@@ -175,6 +210,12 @@ func (p *Process) refreshLocked() {
 func (p *Process) Stop(ctx context.Context) error {
 	if p == nil {
 		return nil
+	}
+	if ctx == nil {
+		return errors.New("Mihomo process context is required")
+	}
+	if p.Delegate != nil {
+		return p.Delegate.Stop(ctx)
 	}
 	p.mu.Lock()
 	p.refreshLocked()
@@ -207,10 +248,45 @@ func (p *Process) Stop(ctx context.Context) error {
 }
 
 func (p *Process) ReloadOrRestart(ctx context.Context) error {
+	if p == nil {
+		return errors.New("Mihomo process manager is unavailable")
+	}
+	if ctx == nil {
+		return errors.New("Mihomo process context is required")
+	}
+	if p.Delegate != nil {
+		specification, err := p.specification()
+		if err != nil {
+			return err
+		}
+		return p.Delegate.ReloadOrRestart(ctx, specification)
+	}
 	if err := p.Stop(ctx); err != nil {
 		return err
 	}
 	return p.Start(ctx)
+}
+
+func (p *Process) specification() (Specification, error) {
+	if err := validateManagedExecutable(p.BinaryPath); err != nil {
+		return Specification{}, err
+	}
+	if err := validateManagedConfig(p.ConfigPath); err != nil {
+		return Specification{}, err
+	}
+	dataDir, err := prepareDataDir(p.DataDir)
+	if err != nil {
+		return Specification{}, err
+	}
+	if _, err := mihomoEnvironment(p.SafePaths); err != nil {
+		return Specification{}, err
+	}
+	return Specification{
+		BinaryPath: p.BinaryPath,
+		ConfigPath: p.ConfigPath,
+		DataDir:    dataDir,
+		SafePaths:  append([]string(nil), p.SafePaths...),
+	}, nil
 }
 
 func validateManagedExecutable(path string) error {

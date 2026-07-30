@@ -191,6 +191,101 @@ func (connector *Connector) Result(
 	return client.Result(ctx, operationID, operation)
 }
 
+func (connector *Connector) StageCore(
+	ctx context.Context,
+	operationID string,
+	stage PrivilegedCoreStage,
+) (PrivilegedCoreStatus, error) {
+	return connector.mutateCore(
+		ctx,
+		operationID,
+		OperationCoreStage,
+		func(client *Client) (PrivilegedCoreStatus, error) {
+			return client.StageCore(ctx, operationID, stage)
+		},
+	)
+}
+
+func (connector *Connector) StartCore(
+	ctx context.Context,
+	operationID string,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	return connector.mutateCore(
+		ctx,
+		operationID,
+		OperationCoreStart,
+		func(client *Client) (PrivilegedCoreStatus, error) {
+			return client.StartCore(ctx, operationID, objectID)
+		},
+	)
+}
+
+func (connector *Connector) StopCore(
+	ctx context.Context,
+	operationID string,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	return connector.mutateCore(
+		ctx,
+		operationID,
+		OperationCoreStop,
+		func(client *Client) (PrivilegedCoreStatus, error) {
+			return client.StopCore(ctx, operationID, objectID)
+		},
+	)
+}
+
+func (connector *Connector) mutateCore(
+	ctx context.Context,
+	operationID string,
+	operation string,
+	mutate func(*Client) (PrivilegedCoreStatus, error),
+) (PrivilegedCoreStatus, error) {
+	connector.mu.Lock()
+	defer connector.mu.Unlock()
+	client, err := connector.clientForLocked(ctx)
+	if err != nil {
+		return PrivilegedCoreStatus{}, err
+	}
+	status, err := mutate(client)
+	if err == nil || !reconnectableNetworkError(err) {
+		return status, err
+	}
+	client, reconnectErr := connector.reconnectLocked(ctx)
+	if reconnectErr != nil {
+		return PrivilegedCoreStatus{}, errors.Join(err, reconnectErr)
+	}
+	if resultErr := committedPayload(ctx, client, operationID, operation, &status); resultErr == nil {
+		return status, nil
+	}
+	if rejectedBeforeMutation(err) {
+		return mutate(client)
+	}
+	return PrivilegedCoreStatus{}, err
+}
+
+func (connector *Connector) ObserveCore(
+	ctx context.Context,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	connector.mu.Lock()
+	defer connector.mu.Unlock()
+	client, err := connector.clientForLocked(ctx)
+	if err != nil {
+		return PrivilegedCoreStatus{}, err
+	}
+	status, err := client.ObserveCore(ctx, objectID)
+	if err == nil || !reconnectableNetworkError(err) {
+		return status, err
+	}
+	client, reconnectErr := connector.reconnectLocked(ctx)
+	if reconnectErr != nil {
+		return PrivilegedCoreStatus{}, errors.Join(err, reconnectErr)
+	}
+	return client.ObserveCore(ctx, objectID)
+}
+
 func (connector *Connector) FailOpen(ctx context.Context) error {
 	connector.mu.Lock()
 	defer connector.mu.Unlock()

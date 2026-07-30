@@ -1,6 +1,6 @@
 # Submux Runtime 网络与权限设计
 
-本文定义显式代理、TUN 和 Linux 网关三种运行方式，以及 `submux-runtime-net` 的权限边界。Linux 普通 TUN 已按本文实现。Linux 网关也已实现，并通过 network namespace 的双网卡、单臂和故障恢复测试，但在真实物理网关验收前仍标记为预览功能。Windows 普通 TUN 已实现预览后端；macOS 部分仍是后续实现必须遵守的目标设计。
+本文定义显式代理、TUN 和 Linux 网关三种运行方式，以及 `submux-runtime-net` 的权限边界。Linux 普通 TUN 已按本文实现。Linux 网关也已实现，并通过 network namespace 的双网卡、单臂和故障恢复测试，但在真实物理网关验收前仍标记为预览功能。Windows 和 macOS 普通 TUN 已实现预览后端；它们必须完成对应系统和架构的真实验收后才能移除预览标记。
 
 ## 共同规则
 
@@ -37,7 +37,7 @@ IPv6: [::1]:7890
 - 预览中显示可访问网段和防火墙影响；
 - 不允许无认证监听 `0.0.0.0` 或 `::`。
 
-来源配置和本机高级覆盖不能创建额外监听，也不能修改认证。显式代理不修改默认路由或系统 DNS，因此不需要特权网络进程。
+来源配置和本机高级覆盖不能创建额外监听，也不能修改认证。显式代理不修改默认路由或系统 DNS。Linux 和 Windows 的显式代理因此不需要特权网络进程；macOS 预览实现为了与 TUN 使用同一份官方 Mihomo 和固定执行对象，由 root helper 启动核心，但不会创建 TUN 或修改路由。
 
 ## 普通 TUN
 
@@ -88,11 +88,15 @@ Mihomo 使用 `auto-route: false`，Windows 配置不写入 Linux 专用的 `rou
 
 ### macOS
 
-第一版不开发私有 Mihomo fork，也不开发 Network Extension。`submux-runtime-net` 作为 root LaunchDaemon，可以按固定路径和摘要启动官方 Mihomo，并负责 utun、路由和 DNS 的准备与清理。
+当前预览不开发私有 Mihomo fork，也不开发 Network Extension。低权限 `_submux-runtime` LaunchDaemon 提供管理 Socket、状态和配置；独立的 root `submux-runtime-net` LaunchDaemon 只接受固定的核心、配置和数据对象 ID。管理 Socket 允许 Runtime 身份、root 和 `submux-runtime-operators`，不会因为用户属于 macOS `admin` 组而自动授权。管理目录由 Runtime 服务账户拥有、操作员组只可进入而不可写；内部 Socket 位于独立的 `/var/run/submux-runtime-privileged/runtime-net.sock`，其目录和 Socket 只向 root 与 Runtime 服务组开放。
 
-特权进程不能读取来源 URL、操作员凭据或任意用户文件。它只接收已经生成并验证的配置对象 ID。
+主 Runtime 通过协议发送对象 ID 和 SHA-256，不发送核心路径、配置路径、来源 URL、操作员凭据、argv 或命令。root helper 只从 `/Library/Application Support/SubmuxRuntime` 下的固定对象位置安全打开文件，并逐级拒绝符号链接。核心和配置重新计算摘要后复制到 `/Library/Application Support/SubmuxRuntimePrivileged/core`；该目录及文件只有 root 可写。任何摘要变化、目录替换、链接、过大的对象或非固定数据对象都会使启动失败。
 
-由 root 启动 Mihomo 时采用与 Windows 相同的执行目录边界：候选核心由特权进程重新校验后复制到 root 可写、Runtime 只读的目录，拒绝符号链接和目录替换，再从锁定的已验证对象启动。配置对象只允许 Runtime 服务账户写入的固定暂存区，特权进程按内容 ID 读取，不能接受路径。
+root helper 使用固定参数从摘要命名的只读对象启动官方 Mihomo。macOS 配置不固定 `device`，由 Mihomo 创建一个新的 `utunN`；helper 将启动前后的 utun 集合对比，只有恰好出现一个新接口才继续。Mihomo 的 `auto-route` 和 `auto-redirect` 都关闭，helper 再按已确认的快照添加两条 IPv4 `/1` 路由、按策略添加 IPv6 `/1`、DNS 服务器主机路由和操作员选中的具体路由。选中已有具体路由时先保存完整网关与接口，停用时只在 Runtime 路由仍精确匹配且目的前缀没有被第三方重新占用时恢复原路由。
+
+预览不改写 SystemConfiguration DNS。DNS 劫持通过原 DNS 服务器的精确 utun 主机路由和 Mihomo 的 TCP/UDP 53 接管完成，清理时只删除这些精确路由。IPv6 可以代理、直连并显示泄漏警告，或在运行期间用 blackhole 路由阻断。
+
+root helper 正常停止、租约过期或 Runtime 请求故障放行时，先撤销路由，再停止 Mihomo。helper 被 `SIGKILL`、系统睡眠唤醒、网络切换、并发创建多个 utun 以及卸载中断仍需要真实 macOS 验收；当前状态和所有接口都持续返回 `preview_only`。CI 在 macOS runner 上执行单元测试，并交叉构建 amd64 与 arm64，但这不代替 macOS 13 及以上 Intel 和 Apple Silicon 的 IPv4、IPv6、TCP、UDP、DNS、冲突、崩溃、更新和卸载测试。
 
 ## Mihomo 控制连接
 

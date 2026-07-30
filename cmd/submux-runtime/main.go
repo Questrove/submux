@@ -30,6 +30,7 @@ import (
 	"submux/internal/runtimenet"
 	"submux/internal/runtimepaths"
 	"submux/internal/runtimeprivacy"
+	"submux/internal/runtimeprivileged"
 	"submux/internal/runtimeprocess"
 	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
@@ -168,7 +169,8 @@ func runServe(arguments []string, stderr io.Writer) int {
 	}
 	defer state.Close()
 	var network *runtimenet.Connector
-	if (runtime.GOOS == "linux" || runtime.GOOS == "windows") && *networkEndpoint != "" {
+	if (runtime.GOOS == "linux" || runtime.GOOS == "windows" || runtime.GOOS == "darwin") &&
+		*networkEndpoint != "" {
 		installationID, idErr := state.InstallationID()
 		if idErr != nil {
 			writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, idErr.Error(), true)
@@ -223,6 +225,14 @@ func runServe(arguments []string, stderr io.Writer) int {
 		DataDir:    filepath.Join(*stateRoot, "mihomo-data"),
 		Stdout:     mihomoStdout,
 		Stderr:     mihomoStderr,
+	}
+	if runtime.GOOS == "darwin" && network != nil {
+		delegate, delegateErr := runtimeprivileged.NewDelegate(network, *stateRoot)
+		if delegateErr != nil {
+			writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, delegateErr.Error(), true)
+			return 1
+		}
+		process.Delegate = delegate
 	}
 	core := &runtimecore.Store{
 		Root:       filepath.Join(*stateRoot, "core"),

@@ -9,11 +9,12 @@ import (
 )
 
 const (
-	ProtocolVersion = 2
+	ProtocolVersion = 3
 
 	DefaultPlanTTL      = 5 * time.Minute
 	DefaultLeaseTTL     = 10 * time.Second
 	DefaultRequestLimit = 30 * time.Second
+	DefaultSessionLimit = 1024
 
 	ReleaseOperator       = "operator"
 	ReleaseRuntimeExit    = "runtime_exit"
@@ -22,10 +23,15 @@ const (
 	ReleaseServiceRestart = "service_restart"
 	ReleaseUpdate         = "update"
 
-	OperationPrepare = "prepare_network"
-	OperationCommit  = "commit_network"
-	OperationRenew   = "renew_lease"
-	OperationRelease = "release"
+	OperationPrepare   = "prepare_network"
+	OperationCommit    = "commit_network"
+	OperationRenew     = "renew_lease"
+	OperationRelease   = "release"
+	OperationCoreStage = "core_stage"
+	OperationCoreStart = "core_start"
+	OperationCoreStop  = "core_stop"
+
+	PrivilegedCoreObjectMihomo = "mihomo"
 )
 
 type SessionRequest struct {
@@ -126,4 +132,31 @@ type System interface {
 	ApplyGateway(context.Context, Ownership) ([]runtimeapi.NetworkObject, error)
 	Cleanup(context.Context, Ownership) ([]runtimeapi.NetworkObject, error)
 	Observe(context.Context, *Ownership) (runtimeapi.NetworkStatus, error)
+}
+
+type PrivilegedCoreStage struct {
+	ObjectID     string `json:"object_id"`
+	CoreSHA256   string `json:"core_sha256"`
+	ConfigSHA256 string `json:"config_sha256"`
+	DataObjectID string `json:"data_object_id,omitempty"`
+}
+
+type PrivilegedCoreStatus struct {
+	ObjectID     string    `json:"object_id"`
+	State        string    `json:"state"`
+	PID          int       `json:"pid,omitempty"`
+	CoreSHA256   string    `json:"core_sha256,omitempty"`
+	ConfigSHA256 string    `json:"config_sha256,omitempty"`
+	DataObjectID string    `json:"data_object_id,omitempty"`
+	StartedAt    time.Time `json:"started_at,omitempty"`
+	ObservedAt   time.Time `json:"observed_at"`
+	PreviewOnly  bool      `json:"preview_only,omitempty"`
+	Error        string    `json:"error,omitempty"`
+}
+
+type PrivilegedCoreSystem interface {
+	StageCore(context.Context, PrivilegedCoreStage) (PrivilegedCoreStatus, error)
+	StartCore(context.Context, string) (PrivilegedCoreStatus, error)
+	StopCore(context.Context, string) (PrivilegedCoreStatus, error)
+	ObserveCore(context.Context, string) (PrivilegedCoreStatus, error)
 }

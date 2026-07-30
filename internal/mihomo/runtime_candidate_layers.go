@@ -111,12 +111,14 @@ func (b ExplicitCandidateBuilder) BuildDetailed(
 	if b.TUN != nil {
 		tun = map[string]*yaml.Node{
 			"enable":                scalarNode("true", "!!bool"),
-			"device":                scalarNode(b.TUN.Device, "!!str"),
 			"stack":                 scalarNode("system", "!!str"),
 			"auto-route":            scalarNode("false", "!!bool"),
 			"auto-redirect":         scalarNode("false", "!!bool"),
 			"auto-detect-interface": scalarNode("true", "!!bool"),
 			"strict-route":          scalarNode("true", "!!bool"),
+		}
+		if platform != "darwin" {
+			tun["device"] = scalarNode(b.TUN.Device, "!!str")
 		}
 		if b.TUN.HijackDNS {
 			tun["dns-hijack"] = &yaml.Node{

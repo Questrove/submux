@@ -1,4 +1,4 @@
-//go:build !windows && !darwin
+//go:build darwin
 
 package runtimeipc
 
@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -17,18 +19,25 @@ import (
 	"submux/internal/safepath"
 )
 
+const darwinManagementSocket = "/var/run/submux-runtime/runtime.sock"
+
 type unixListener struct {
 	*net.UnixListener
 	path string
 }
 
 func listenLocal(endpoint string) (LocalListener, error) {
-	absolute, err := validateUnixEndpoint(endpoint, true)
+	absolute, err := validateUnixEndpoint(endpoint, endpoint != darwinManagementSocket)
 	if err != nil {
 		return nil, err
 	}
+	if endpoint == darwinManagementSocket {
+		if err := validateDarwinManagementDirectory(filepath.Dir(absolute)); err != nil {
+			return nil, err
+		}
+	}
 	if info, err := os.Lstat(absolute); err == nil {
-		if info.Mode()&os.ModeSocket == 0 {
+		if info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("Runtime endpoint already exists and is not a Unix Socket")
 		}
 		connection, dialErr := net.DialTimeout("unix", absolute, 250*time.Millisecond)
@@ -53,6 +62,19 @@ func listenLocal(endpoint string) (LocalListener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on Runtime Socket: %w", err)
 	}
+	if endpoint == darwinManagementSocket {
+		gid, err := darwinOperatorGID()
+		if err != nil {
+			_ = listener.Close()
+			_ = os.Remove(absolute)
+			return nil, err
+		}
+		if err := os.Chown(absolute, os.Getuid(), int(gid)); err != nil {
+			_ = listener.Close()
+			_ = os.Remove(absolute)
+			return nil, fmt.Errorf("assign Runtime Socket operator group: %w", err)
+		}
+	}
 	if err := os.Chmod(absolute, 0660); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(absolute)
@@ -61,7 +83,7 @@ func listenLocal(endpoint string) (LocalListener, error) {
 	return &unixListener{UnixListener: listener, path: absolute}, nil
 }
 
-func (l *unixListener) PeerIdentity(connection net.Conn) (runtimeapi.PeerIdentity, error) {
+func (listener *unixListener) PeerIdentity(connection net.Conn) (runtimeapi.PeerIdentity, error) {
 	unixConnection, ok := connection.(*net.UnixConn)
 	if !ok {
 		return runtimeapi.PeerIdentity{}, errors.New("Runtime connection is not a Unix Socket")
@@ -69,12 +91,12 @@ func (l *unixListener) PeerIdentity(connection net.Conn) (runtimeapi.PeerIdentit
 	return platformPeerIdentity(unixConnection)
 }
 
-func (l *unixListener) Close() error {
-	if l == nil || l.UnixListener == nil {
+func (listener *unixListener) Close() error {
+	if listener == nil || listener.UnixListener == nil {
 		return nil
 	}
-	err := l.UnixListener.Close()
-	removeErr := os.Remove(l.path)
+	err := listener.UnixListener.Close()
+	removeErr := os.Remove(listener.path)
 	if errors.Is(removeErr, os.ErrNotExist) {
 		removeErr = nil
 	}
@@ -119,4 +141,35 @@ func validateUnixEndpoint(endpoint string, createParent bool) (string, error) {
 		return "", errors.New("Runtime Socket path must not contain symbolic links")
 	}
 	return absolute, nil
+}
+
+func validateDarwinManagementDirectory(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("inspect macOS Runtime Socket directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode().Perm()&0007 != 0 {
+		return errors.New("macOS Runtime Socket directory permissions are invalid")
+	}
+	gid, err := darwinOperatorGID()
+	if err != nil {
+		return err
+	}
+	stat, ok := info.Sys().(*unix.Stat_t)
+	if !ok || stat.Uid != uint32(os.Getuid()) || stat.Gid != gid {
+		return errors.New("macOS Runtime Socket directory ownership is invalid")
+	}
+	return nil
+}
+
+func darwinOperatorGID() (uint32, error) {
+	group, err := user.LookupGroup(darwinOperatorGroup)
+	if err != nil {
+		return 0, fmt.Errorf("resolve macOS Runtime operator group: %w", err)
+	}
+	value, err := strconv.ParseUint(group.Gid, 10, 32)
+	if err != nil {
+		return 0, errors.New("macOS Runtime operator group GID is invalid")
+	}
+	return uint32(value), nil
 }

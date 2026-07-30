@@ -6,7 +6,8 @@ func platformDefaults() Defaults {
 	return Defaults{
 		StateRoot:       "/Library/Application Support/SubmuxRuntime",
 		Endpoint:        "/var/run/submux-runtime/runtime.sock",
-		LockFile:        "/var/run/submux-runtime/runtime.lock",
-		ControlEndpoint: "/var/run/submux-runtime/mihomo.sock",
+		LockFile:        "/Library/Application Support/SubmuxRuntime/runtime.lock",
+		ControlEndpoint: "/var/run/submux-runtime-privileged/mihomo.sock",
+		NetworkEndpoint: "/var/run/submux-runtime-privileged/runtime-net.sock",
 	}
 }

@@ -138,6 +138,14 @@ func (m *Manager) OpenSession(peerUID uint32, request SessionRequest) (Session, 
 	expiresAt := now.Add(24 * time.Hour)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for id, session := range m.sessions {
+		if !session.ExpiresAt.After(now) {
+			delete(m.sessions, id)
+		}
+	}
+	if len(m.sessions) >= DefaultSessionLimit {
+		return Session{}, errors.New("privileged Runtime network session limit reached")
+	}
 	m.sessions[sessionID] = &sessionState{
 		RuntimeInstanceID: request.RuntimeInstanceID,
 		ClientNonce:       request.ClientNonce,
@@ -516,6 +524,109 @@ func (m *Manager) Result(
 	return CommittedResult{}, errors.New("Runtime network result was not found")
 }
 
+func (m *Manager) StageCore(
+	ctx context.Context,
+	meta RequestMeta,
+	request PrivilegedCoreStage,
+) (PrivilegedCoreStatus, error) {
+	if request.ObjectID != PrivilegedCoreObjectMihomo ||
+		!validHex(request.CoreSHA256, 64) ||
+		!validHex(request.ConfigSHA256, 64) ||
+		request.DataObjectID != "" &&
+			!validOpaqueIdentifier(request.DataObjectID, 3, 96) {
+		return PrivilegedCoreStatus{}, errors.New("privileged Runtime core stage request is invalid")
+	}
+	return m.mutateCore(ctx, meta, OperationCoreStage, func(
+		system PrivilegedCoreSystem,
+	) (PrivilegedCoreStatus, error) {
+		return system.StageCore(ctx, request)
+	})
+}
+
+func (m *Manager) StartCore(
+	ctx context.Context,
+	meta RequestMeta,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	if objectID != PrivilegedCoreObjectMihomo {
+		return PrivilegedCoreStatus{}, errors.New("privileged Runtime core object is invalid")
+	}
+	return m.mutateCore(ctx, meta, OperationCoreStart, func(
+		system PrivilegedCoreSystem,
+	) (PrivilegedCoreStatus, error) {
+		return system.StartCore(ctx, objectID)
+	})
+}
+
+func (m *Manager) StopCore(
+	ctx context.Context,
+	meta RequestMeta,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	if objectID != PrivilegedCoreObjectMihomo {
+		return PrivilegedCoreStatus{}, errors.New("privileged Runtime core object is invalid")
+	}
+	return m.mutateCore(ctx, meta, OperationCoreStop, func(
+		system PrivilegedCoreSystem,
+	) (PrivilegedCoreStatus, error) {
+		return system.StopCore(ctx, objectID)
+	})
+}
+
+func (m *Manager) ObserveCore(
+	ctx context.Context,
+	sessionID string,
+	objectID string,
+) (PrivilegedCoreStatus, error) {
+	if err := contextError(ctx); err != nil {
+		return PrivilegedCoreStatus{}, err
+	}
+	if objectID != PrivilegedCoreObjectMihomo {
+		return PrivilegedCoreStatus{}, errors.New("privileged Runtime core object is invalid")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, err := m.sessionLocked(sessionID); err != nil {
+		return PrivilegedCoreStatus{}, err
+	}
+	system, ok := m.System.(PrivilegedCoreSystem)
+	if !ok {
+		return PrivilegedCoreStatus{}, errors.New("privileged Runtime core service is unavailable")
+	}
+	return system.ObserveCore(ctx, objectID)
+}
+
+func (m *Manager) mutateCore(
+	ctx context.Context,
+	meta RequestMeta,
+	operation string,
+	mutate func(PrivilegedCoreSystem) (PrivilegedCoreStatus, error),
+) (PrivilegedCoreStatus, error) {
+	if err := contextError(ctx); err != nil {
+		return PrivilegedCoreStatus{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session, err := m.validateMutationLocked(meta)
+	if err != nil {
+		return PrivilegedCoreStatus{}, err
+	}
+	system, ok := m.System.(PrivilegedCoreSystem)
+	if !ok {
+		return PrivilegedCoreStatus{}, errors.New("privileged Runtime core service is unavailable")
+	}
+	status, mutationErr := mutate(system)
+	outcome, resultErr := m.newResult(session, meta, operation, "", status, mutationErr)
+	if resultErr != nil {
+		return PrivilegedCoreStatus{}, errors.Join(mutationErr, resultErr)
+	}
+	if persistErr := m.persistLocked(m.ownership, &outcome); persistErr != nil {
+		return PrivilegedCoreStatus{}, errors.Join(mutationErr, persistErr)
+	}
+	session.LastSequence = meta.Sequence
+	return status, mutationErr
+}
+
 func (m *Manager) Observe(ctx context.Context, sessionID string) (runtimeapi.NetworkStatus, error) {
 	if err := contextError(ctx); err != nil {
 		return runtimeapi.NetworkStatus{}, err
@@ -642,6 +753,7 @@ func (m *Manager) validateMutationLocked(meta RequestMeta) (*sessionState, error
 func (m *Manager) sessionLocked(sessionID string) (*sessionState, error) {
 	session := m.sessions[sessionID]
 	if session == nil || !session.ExpiresAt.After(m.now()) {
+		delete(m.sessions, sessionID)
 		return nil, errors.New("Runtime network session is unavailable or expired")
 	}
 	return session, nil
@@ -1021,7 +1133,13 @@ func validReleaseReason(value string) bool {
 
 func validOperation(value string) bool {
 	switch value {
-	case OperationPrepare, OperationCommit, OperationRenew, OperationRelease:
+	case OperationPrepare,
+		OperationCommit,
+		OperationRenew,
+		OperationRelease,
+		OperationCoreStage,
+		OperationCoreStart,
+		OperationCoreStop:
 		return true
 	default:
 		return false
