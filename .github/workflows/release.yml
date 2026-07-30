@@ -21,12 +21,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
-      - name: Scan repository history and working tree for secrets
-        uses: gitleaks/gitleaks-action@v2
+      - name: Scan repository history for secrets
+        run: bash scripts/scan-secrets.sh
       - name: Validate tag, tests, support claims and fixed Mihomo provenance
         run: |
           set -euo pipefail

@@ -1,0 +1,11 @@
+title = "Submux secret scanning configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Ignore the public sessionStorage navigation-state key."
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexes = ['''^submux\.navigation\.v1$''']
+paths = ['''^web/(index\.html|index_test\.go)$''']

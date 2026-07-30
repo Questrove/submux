@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v6
         with:
@@ -31,7 +33,7 @@ jobs:
         run: go run ./cmd/submux-release-check matrix --file docs/runtime-support.json
 
       - name: Secret scan
-        uses: gitleaks/gitleaks-action@v2
+        run: bash scripts/scan-secrets.sh
 
       - name: Linux Runtime network namespaces
         run: |
