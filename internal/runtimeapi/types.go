@@ -8,11 +8,13 @@ import (
 const ProtocolVersion = 1
 
 type PeerIdentity struct {
-	Platform string
-	UID      uint32
-	GID      uint32
-	PID      uint32
-	SID      string
+	Platform  string
+	UID       uint32
+	GID       uint32
+	PID       uint32
+	SID       string
+	GroupSIDs []string
+	Elevated  bool
 }
 
 func (p PeerIdentity) Key() string {

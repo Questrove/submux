@@ -28,15 +28,6 @@ func CurrentUserAuthorizer() (Authorizer, error) {
 		if peer.Platform != current.Platform {
 			return errors.New("Runtime peer platform does not match the host")
 		}
-		if current.Platform == "windows" {
-			if peer.SID != current.SID && peer.SID != "S-1-5-18" {
-				return errors.New("Runtime peer SID is not authorized")
-			}
-			return nil
-		}
-		if peer.UID != current.UID && peer.UID != 0 {
-			return errors.New("Runtime peer UID is not authorized")
-		}
-		return nil
+		return authorizeCurrentPeer(current, peer)
 	}), nil
 }

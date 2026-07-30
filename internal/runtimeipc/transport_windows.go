@@ -15,6 +15,8 @@ import (
 	"submux/internal/runtimeapi"
 )
 
+const windowsRuntimeServiceName = `NT SERVICE\SubmuxRuntime`
+
 type windowsListener struct {
 	net.Listener
 }
@@ -27,7 +29,10 @@ func listenLocal(endpoint string) (LocalListener, error) {
 	if err != nil {
 		return nil, err
 	}
-	descriptor := "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;" + identity.SID + ")"
+	descriptor, err := windowsManagementPipeDescriptor(endpoint, identity)
+	if err != nil {
+		return nil, err
+	}
 	// go-winio's ListenPipe always creates each pipe instance with
 	// FILE_PIPE_REJECT_REMOTE_CLIENTS. The ACL below is the second gate.
 	listener, err := winio.ListenPipe(endpoint, &winio.PipeConfig{
@@ -56,11 +61,11 @@ func (l *windowsListener) PeerIdentity(connection net.Conn) (runtimeapi.PeerIden
 		return runtimeapi.PeerIdentity{}, fmt.Errorf("open Runtime Named Pipe client process: %w", err)
 	}
 	defer windows.CloseHandle(process)
-	sid, err := processSID(process)
+	identity, err := processIdentity(process, pid)
 	if err != nil {
 		return runtimeapi.PeerIdentity{}, err
 	}
-	return runtimeapi.PeerIdentity{Platform: "windows", PID: pid, SID: sid}, nil
+	return identity, nil
 }
 
 func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
@@ -71,28 +76,63 @@ func dialLocal(ctx context.Context, endpoint string) (net.Conn, error) {
 }
 
 func currentIdentity() (runtimeapi.PeerIdentity, error) {
-	sid, err := processSID(windows.CurrentProcess())
-	if err != nil {
-		return runtimeapi.PeerIdentity{}, err
-	}
-	return runtimeapi.PeerIdentity{
-		Platform: "windows",
-		PID:      uint32(windows.GetCurrentProcessId()),
-		SID:      sid,
-	}, nil
+	return processIdentity(windows.CurrentProcess(), uint32(windows.GetCurrentProcessId()))
 }
 
-func processSID(process windows.Handle) (string, error) {
+func processIdentity(process windows.Handle, pid uint32) (runtimeapi.PeerIdentity, error) {
 	var token windows.Token
 	if err := windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
-		return "", fmt.Errorf("open Runtime peer process token: %w", err)
+		return runtimeapi.PeerIdentity{}, fmt.Errorf("open Runtime peer process token: %w", err)
 	}
 	defer token.Close()
 	user, err := token.GetTokenUser()
 	if err != nil {
-		return "", fmt.Errorf("read Runtime peer SID: %w", err)
+		return runtimeapi.PeerIdentity{}, fmt.Errorf("read Runtime peer SID: %w", err)
 	}
-	return user.User.Sid.String(), nil
+	groups, err := token.GetTokenGroups()
+	if err != nil {
+		return runtimeapi.PeerIdentity{}, fmt.Errorf("read Runtime peer groups: %w", err)
+	}
+	groupSIDs := make([]string, 0, groups.GroupCount)
+	for _, group := range groups.AllGroups() {
+		if group.Attributes&windows.SE_GROUP_ENABLED == 0 ||
+			group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY != 0 {
+			continue
+		}
+		groupSIDs = append(groupSIDs, group.Sid.String())
+	}
+	return runtimeapi.PeerIdentity{
+		Platform:  "windows",
+		PID:       pid,
+		SID:       user.User.Sid.String(),
+		GroupSIDs: groupSIDs,
+		Elevated:  token.IsElevated(),
+	}, nil
+}
+
+func windowsManagementPipeDescriptor(
+	endpoint string,
+	identity runtimeapi.PeerIdentity,
+) (string, error) {
+	aces := []string{"(A;;GA;;;SY)", "(A;;GA;;;BA)"}
+	if endpoint == `\\.\pipe\submux-runtime` {
+		serviceSID, _, _, err := windows.LookupSID("", windowsRuntimeServiceName)
+		if err != nil {
+			return "", fmt.Errorf("resolve Submux Runtime service SID: %w", err)
+		}
+		operatorSID, _, _, err := windows.LookupSID("", windowsOperatorGroup)
+		if err != nil {
+			return "", fmt.Errorf("resolve Submux Runtime operator group SID: %w", err)
+		}
+		aces = append(
+			aces,
+			"(A;;GA;;;"+serviceSID.String()+")",
+			"(A;;GA;;;"+operatorSID.String()+")",
+		)
+	} else {
+		aces = append(aces, "(A;;GA;;;"+identity.SID+")")
+	}
+	return "D:P" + strings.Join(aces, ""), nil
 }
 
 func validPipeEndpoint(endpoint string) bool {

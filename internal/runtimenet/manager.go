@@ -258,7 +258,7 @@ func (m *Manager) Preview(
 		Routes:          routes,
 		Conflicts:       append([]runtimeapi.NetworkConflict(nil), discovery.Conflicts...),
 		Warnings:        append([]string(nil), discovery.Warnings...),
-		PreviewOnly:     mode == runtimeapi.RunModeGateway && gatewayPreviewOnly,
+		PreviewOnly:     discovery.PreviewOnly || mode == runtimeapi.RunModeGateway && gatewayPreviewOnly,
 		ExpiresAt:       now.Add(m.planTTL()),
 		ObservedAt:      now,
 	}
@@ -316,6 +316,7 @@ func (m *Manager) Prepare(
 		GatewaySettings:   cloneGatewaySettings(plan.preview.GatewaySettings),
 		Routes:            append([]runtimeapi.NetworkRoute(nil), plan.preview.Routes...),
 		Original:          cloneStringMap(plan.discovery.Original),
+		PreviewOnly:       plan.preview.PreviewOnly,
 		State:             runtimeapi.NetworkStatePrepared,
 		Epoch:             m.epoch,
 		LeaseExpiresAt:    now.Add(m.leaseTTL()),
@@ -679,7 +680,8 @@ func (m *Manager) observeLocked(ctx context.Context) (runtimeapi.NetworkStatus, 
 		expiresAt := m.ownership.LeaseExpiresAt
 		status.LeaseExpiresAt = &expiresAt
 	}
-	status.PreviewOnly = status.Mode == runtimeapi.RunModeGateway && gatewayPreviewOnly
+	status.PreviewOnly = m.ownership != nil && m.ownership.PreviewOnly ||
+		status.Mode == runtimeapi.RunModeGateway && gatewayPreviewOnly
 	return status, err
 }
 

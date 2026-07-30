@@ -42,3 +42,36 @@ jobs:
           bash -n scripts/install.sh
           bash -n scripts/test-installers.sh
           bash scripts/test-installers.sh
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test Windows implementation
+        run: go test ./... -count=1
+
+      - name: Build Windows amd64
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          go build -trimpath -buildvcs=false -o submux.exe ./cmd/submux
+          go build -trimpath -buildvcs=false -o submux-runtime.exe ./cmd/submux-runtime
+          go build -trimpath -buildvcs=false -o submux-runtime-net.exe ./cmd/submux-runtime-net
+
+      - name: Cross-build Windows arm64 preview
+        env:
+          CGO_ENABLED: "0"
+          GOARCH: arm64
+        run: |
+          go build -trimpath -buildvcs=false -o submux-arm64.exe ./cmd/submux
+          go build -trimpath -buildvcs=false -o submux-runtime-arm64.exe ./cmd/submux-runtime
+          go build -trimpath -buildvcs=false -o submux-runtime-net-arm64.exe ./cmd/submux-runtime-net

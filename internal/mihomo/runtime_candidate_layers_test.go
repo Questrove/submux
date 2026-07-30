@@ -220,6 +220,49 @@ rules: [MATCH,DIRECT]
 	}
 }
 
+func TestDetailedCandidateUsesPrecreatedWindowsWintunWithoutLinuxMark(t *testing.T) {
+	builder := ExplicitCandidateBuilder{
+		Port:            7890,
+		ControlEndpoint: `\\.\pipe\submux-runtime-mihomo`,
+		Platform:        "windows",
+		TUN: &TUNCandidateSettings{
+			Device:     "SubmuxRuntime",
+			IPv6Policy: "proxy",
+			HijackDNS:  true,
+		},
+	}
+	result, err := builder.BuildDetailed([]byte(`
+routing-mark: 1
+tun:
+  enable: true
+  auto-route: true
+  device: unsafe0
+proxies: []
+rules: [MATCH,DIRECT]
+`), nil, nil)
+	if err != nil {
+		t.Fatalf("build Windows TUN candidate: %v", err)
+	}
+	var candidate map[string]any
+	if err := yaml.Unmarshal(result.YAML, &candidate); err != nil {
+		t.Fatalf("parse Windows TUN candidate: %v", err)
+	}
+	if _, exists := candidate["routing-mark"]; exists {
+		t.Fatalf("Windows TUN candidate retained Linux routing-mark=%#v", candidate["routing-mark"])
+	}
+	if candidate["external-controller-pipe"] != `\\.\pipe\submux-runtime-mihomo` {
+		t.Fatalf("Windows controller Pipe=%#v", candidate["external-controller-pipe"])
+	}
+	tun, ok := candidate["tun"].(map[string]any)
+	if !ok ||
+		tun["enable"] != true ||
+		tun["device"] != "SubmuxRuntime" ||
+		tun["auto-route"] != false ||
+		tun["auto-redirect"] != false {
+		t.Fatalf("Windows TUN candidate tun=%#v", candidate["tun"])
+	}
+}
+
 func TestValidateManagedResourceRejectsTypeMismatchAndParsesPrivateKeys(t *testing.T) {
 	if err := ValidateManagedResource(
 		ManagedResourceKindProxyProvider,

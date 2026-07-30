@@ -18,5 +18,6 @@ func platformDefaults() Defaults {
 		Endpoint:        `\\.\pipe\submux-runtime`,
 		LockFile:        filepath.Join(stateRoot, "runtime.lock"),
 		ControlEndpoint: `\\.\pipe\submux-runtime-mihomo`,
+		NetworkEndpoint: `\\.\pipe\submux-runtime-net`,
 	}
 }

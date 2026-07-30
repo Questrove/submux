@@ -128,12 +128,14 @@ func (b ExplicitCandidateBuilder) BuildDetailed(
 				},
 			}
 		}
-		tracker.setRuntimeScalar(
-			sourceRoot,
-			"routing-mark",
-			fmt.Sprintf("%d", b.TUN.RoutingMark),
-			"!!int",
-		)
+		if platform == "linux" {
+			tracker.setRuntimeScalar(
+				sourceRoot,
+				"routing-mark",
+				fmt.Sprintf("%d", b.TUN.RoutingMark),
+				"!!int",
+			)
+		}
 	}
 	tracker.setRuntimeField(sourceRoot, "tun", mappingNode(tun))
 	if platform == "windows" {

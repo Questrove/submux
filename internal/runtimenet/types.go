@@ -80,6 +80,7 @@ type Discovery struct {
 	Conflicts     []runtimeapi.NetworkConflict
 	Warnings      []string
 	Original      map[string]string
+	PreviewOnly   bool
 }
 
 type Ownership struct {
@@ -100,6 +101,7 @@ type Ownership struct {
 	Original          map[string]string
 	Objects           []runtimeapi.NetworkObject
 	Residuals         []runtimeapi.NetworkObject
+	PreviewOnly       bool
 	State             string
 	Epoch             string
 	LeaseExpiresAt    time.Time

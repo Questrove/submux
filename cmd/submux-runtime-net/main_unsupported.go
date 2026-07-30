@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package main
 
@@ -25,6 +25,6 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		_ = json.NewEncoder(stdout).Encode(buildinfo.Current())
 		return 0
 	}
-	fmt.Fprintln(stderr, "submux-runtime-net is only available on Linux")
+	fmt.Fprintln(stderr, "submux-runtime-net is only available on Linux and Windows")
 	return 1
 }

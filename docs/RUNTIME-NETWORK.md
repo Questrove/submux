@@ -1,6 +1,6 @@
 # Submux Runtime 网络与权限设计
 
-本文定义显式代理、TUN 和 Linux 网关三种运行方式，以及 `submux-runtime-net` 的权限边界。Linux 普通 TUN 已按本文实现。Linux 网关也已实现，并通过 network namespace 的双网卡、单臂和故障恢复测试，但在真实物理网关验收前仍标记为预览功能。Windows 和 macOS 部分仍是后续实现必须遵守的目标设计。
+本文定义显式代理、TUN 和 Linux 网关三种运行方式，以及 `submux-runtime-net` 的权限边界。Linux 普通 TUN 已按本文实现。Linux 网关也已实现，并通过 network namespace 的双网卡、单臂和故障恢复测试，但在真实物理网关验收前仍标记为预览功能。Windows 普通 TUN 已实现预览后端；macOS 部分仍是后续实现必须遵守的目标设计。
 
 ## 共同规则
 
@@ -74,7 +74,13 @@ IPv6: [::1]:7890
 
 ### Windows
 
-优先方案是由 LocalSystem 特权网络进程创建 Wintun 设备，并将设备 ACL 限制为 Runtime 服务 SID，使 Mihomo 保持低权限。该方案必须通过 Windows amd64 与 arm64 的真实集成测试后才能作为稳定实现。
+当前预览实现使用安装器预置的固定 `SubmuxRuntime` Wintun 设备。安装器必须由 LocalSystem 创建该设备，并将设备 ACL 限制为 Runtime 服务 SID，使 Mihomo 保持低权限；运行期间不接受客户端传入设备名、路径或任意命令。缺少预置设备、设备索引在预览后改变、存在其他全隧道路由，或者残留 Runtime 风格路由时，启用会被拒绝。
+
+LocalSystem `submux-runtime-net` 通过独立的 `\\.\pipe\submux-runtime-net` 与低权限 Runtime 通信。Pipe DACL 只允许 LocalSystem 和 `NT SERVICE\SubmuxRuntime`，并由 `FILE_PIPE_REJECT_REMOTE_CLIENTS` 拒绝远程客户端。它使用 IP Helper API 创建和删除带实例派生 metric 的精确 IPv4/IPv6 路由；IPv6 阻断使用实例命名的 Windows 防火墙规则。清理只处理接口、前缀、下一跳、协议和 metric 全部匹配的对象，不删除预置 Wintun 设备或其他程序的路由。
+
+DNS 劫持不改写 Windows 的系统 DNS 设置。预览通过 `GetAdaptersAddresses` 记录当前活动接口的 DNS 服务器，并为这些地址添加精确的 TUN 主机路由，确保局域网 DNS 不会因为原有具体路由而绕过；Mihomo 同时接管 TCP/UDP 53。由于 DNS 配置本身未被修改，停用时只需删除所有权匹配的主机路由，不存在覆盖用户后续 DNS 修改的问题。
+
+Mihomo 使用 `auto-route: false`，Windows 配置不写入 Linux 专用的 `routing-mark`。启动后 Runtime 会检查控制 Pipe DACL；出现任何未授权允许项便拒绝声明核心就绪。该实现和界面状态保持 `preview_only`，必须通过 Windows amd64 与 arm64 的真实集成测试后才能作为稳定实现。预览标记表示发布成熟度，不会把明确执行的启用操作改成只读演练。
 
 如果官方 Mihomo 与 Wintun 的实际限制使低权限进程无法可靠使用预创建设备，允许 LocalSystem 的 `submux-runtime-net` 按固定路径和摘要启动 Mihomo。它不能接受客户端路径或任意 argv；GUI、TUI、CLI 和主 Runtime 仍保持低权限。
 

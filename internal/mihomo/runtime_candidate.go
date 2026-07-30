@@ -91,13 +91,13 @@ func (b ExplicitCandidateBuilder) runtimeSettings() (int, string, error) {
 		return 0, "", fmt.Errorf("unsupported Mihomo Runtime platform %q", platform)
 	}
 	if b.TUN != nil {
-		if platform != "linux" {
-			return 0, "", errors.New("pre-created ordinary TUN is only supported on Linux")
+		if platform != "linux" && platform != "windows" {
+			return 0, "", errors.New("pre-created ordinary TUN is only supported on Linux and Windows")
 		}
 		if !validTUNDevice(b.TUN.Device) {
 			return 0, "", errors.New("Mihomo TUN device is invalid")
 		}
-		if b.TUN.RoutingMark < 1 {
+		if platform == "linux" && b.TUN.RoutingMark < 1 {
 			return 0, "", errors.New("Mihomo TUN routing mark is invalid")
 		}
 		switch b.TUN.IPv6Policy {

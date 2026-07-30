@@ -168,7 +168,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 	}
 	defer state.Close()
 	var network *runtimenet.Connector
-	if runtime.GOOS == "linux" && *networkEndpoint != "" {
+	if (runtime.GOOS == "linux" || runtime.GOOS == "windows") && *networkEndpoint != "" {
 		installationID, idErr := state.InstallationID()
 		if idErr != nil {
 			writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, idErr.Error(), true)
@@ -499,7 +499,7 @@ func runNetwork(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "Plan: %s (expires %s)\n", preview.PlanID, preview.ExpiresAt.Format(time.RFC3339))
 		if preview.PreviewOnly {
-			fmt.Fprintln(stdout, "Feature status: preview; physical Linux gateway acceptance is still required.")
+			fmt.Fprintln(stdout, "Feature status: preview; real-system acceptance is still required.")
 		}
 		if preview.GatewaySettings != nil {
 			fmt.Fprintf(
@@ -597,7 +597,7 @@ func writeNetworkStatus(writer io.Writer, status runtimeapi.NetworkStatus) {
 	}
 	fmt.Fprintln(writer)
 	if status.PreviewOnly {
-		fmt.Fprintln(writer, "Feature status: preview; physical Linux gateway acceptance is still required.")
+		fmt.Fprintln(writer, "Feature status: preview; real-system acceptance is still required.")
 	}
 	if status.LeaseExpiresAt != nil {
 		fmt.Fprintf(writer, "Network lease expires: %s\n", status.LeaseExpiresAt.Format(time.RFC3339))
