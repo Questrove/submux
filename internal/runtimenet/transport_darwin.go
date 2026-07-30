@@ -5,10 +5,12 @@ package runtimenet
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 
@@ -25,7 +27,16 @@ func Listen(endpoint string, runtimeGID uint32) (LocalListener, error) {
 	if !validDarwinNetworkEndpoint(endpoint) {
 		return nil, errors.New("privileged Runtime network Socket must use the fixed macOS endpoint")
 	}
-	parent := filepath.Dir(endpoint)
+	absolute := endpoint
+	parent := filepath.Dir(absolute)
+	if endpoint == darwinNetworkSocket {
+		canonicalParent, err := filepath.EvalSymlinks(filepath.Dir(parent))
+		if err != nil {
+			return nil, err
+		}
+		parent = filepath.Join(canonicalParent, filepath.Base(parent))
+		absolute = filepath.Join(parent, filepath.Base(endpoint))
+	}
 	if linked, err := safepath.ContainsLinkInExistingPath(parent); err != nil {
 		return nil, err
 	} else if linked {
@@ -50,27 +61,35 @@ func Listen(endpoint string, runtimeGID uint32) (LocalListener, error) {
 			return nil, err
 		}
 	}
-	if info, err := os.Lstat(endpoint); err == nil {
+	if info, err := os.Lstat(absolute); err == nil {
 		if info.Mode()&os.ModeSocket == 0 || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("privileged Runtime network endpoint is not a Socket")
 		}
-		if err := os.Remove(endpoint); err != nil {
-			return nil, err
+		connection, dialErr := net.DialTimeout("unix", absolute, 250*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			return nil, errors.New("privileged Runtime network endpoint is already accepting connections")
+		}
+		if !errors.Is(dialErr, unix.ECONNREFUSED) && !errors.Is(dialErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("verify existing privileged Runtime network Socket: %w", dialErr)
+		}
+		if err := os.Remove(absolute); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("remove stale privileged Runtime network Socket: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: endpoint, Net: "unix"})
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: absolute, Net: "unix"})
 	if err != nil {
 		return nil, err
 	}
 	if endpoint == darwinNetworkSocket {
-		if err := os.Chown(endpoint, 0, int(runtimeGID)); err != nil {
+		if err := os.Chown(absolute, 0, int(runtimeGID)); err != nil {
 			_ = listener.Close()
 			return nil, err
 		}
 	}
-	if err := os.Chmod(endpoint, 0660); err != nil {
+	if err := os.Chmod(absolute, 0660); err != nil {
 		_ = listener.Close()
 		return nil, err
 	}

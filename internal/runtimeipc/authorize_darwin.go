@@ -25,12 +25,3 @@ func authorizeCurrentPeer(current, peer runtimeapi.PeerIdentity) error {
 	}
 	return errors.New("Runtime peer UID and groups are not authorized")
 }
-
-func containsGroupID(groups []uint32, expected uint32) bool {
-	for _, group := range groups {
-		if group == expected {
-			return true
-		}
-	}
-	return false
-}

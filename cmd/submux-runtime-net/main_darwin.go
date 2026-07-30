@@ -11,10 +11,14 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"os/user"
+	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
 	"submux/internal/buildinfo"
+	"submux/internal/runtimeaccount"
 	"submux/internal/runtimenet"
 	"submux/internal/runtimepaths"
 )
@@ -46,8 +50,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		defaults.ControlEndpoint,
 		"fixed Mihomo control Socket",
 	)
-	runtimeUID := flags.Int("runtime-uid", -1, "low-privilege Runtime service account UID")
-	runtimeGID := flags.Int("runtime-gid", -1, "low-privilege Runtime service account GID")
+	runtimeUser := flags.String("runtime-user", "_submux-runtime", "fixed low-privilege Runtime service account")
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
@@ -59,8 +62,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "submux-runtime-net must run as root")
 		return 1
 	}
-	if *runtimeUID <= 0 || *runtimeGID <= 0 {
-		fmt.Fprintln(stderr, "submux-runtime-net requires --runtime-uid and --runtime-gid")
+	resolvedUID, resolvedGID, err := resolveDarwinRuntimeIdentity(*runtimeUser)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 	if *endpoint != defaults.NetworkEndpoint ||
@@ -70,18 +74,27 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "submux-runtime-net requires the fixed macOS Runtime paths")
 		return 2
 	}
+	operatorGID, err := lookupDarwinOperatorGID()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := prepareDarwinManagementDirectory(resolvedUID, operatorGID); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 
 	system, err := runtimenet.NewDarwinSystem(
 		*runtimeRoot,
-		uint32(*runtimeUID),
-		uint32(*runtimeGID),
+		resolvedUID,
+		resolvedGID,
 		*controlEndpoint,
 	)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	manager, err := runtimenet.OpenManager(*stateRoot, uint32(*runtimeUID), system)
+	manager, err := runtimenet.OpenManager(*stateRoot, resolvedUID, system)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -92,7 +105,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	listener, err := runtimenet.Listen(*endpoint, uint32(*runtimeGID))
+	listener, err := runtimenet.Listen(*endpoint, resolvedGID)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -124,4 +137,47 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func lookupDarwinOperatorGID() (uint32, error) {
+	group, err := user.LookupGroup("submux-runtime-operators")
+	if err != nil {
+		return 0, fmt.Errorf("resolve macOS Runtime operator group: %w", err)
+	}
+	value, err := strconv.ParseUint(group.Gid, 10, 32)
+	if err != nil || value == 0 {
+		return 0, errors.New("macOS Runtime operator group GID is invalid")
+	}
+	return uint32(value), nil
+}
+
+func prepareDarwinManagementDirectory(runtimeUID, operatorGID uint32) error {
+	runRoot, err := filepath.EvalSymlinks("/var/run")
+	if err != nil {
+		return fmt.Errorf("resolve macOS run directory: %w", err)
+	}
+	directory := filepath.Join(runRoot, "submux-runtime")
+	if info, err := os.Lstat(directory); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return errors.New("macOS Runtime management path is not a real directory")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect macOS Runtime management directory: %w", err)
+	} else if err := os.Mkdir(directory, 0750); err != nil {
+		return fmt.Errorf("create macOS Runtime management directory: %w", err)
+	}
+	if err := os.Chown(directory, int(runtimeUID), int(operatorGID)); err != nil {
+		return fmt.Errorf("assign macOS Runtime management directory ownership: %w", err)
+	}
+	if err := os.Chmod(directory, 0750); err != nil {
+		return fmt.Errorf("secure macOS Runtime management directory: %w", err)
+	}
+	return nil
+}
+
+func resolveDarwinRuntimeIdentity(name string) (uint32, uint32, error) {
+	if name != "_submux-runtime" {
+		return 0, 0, errors.New("macOS Runtime service account name must remain _submux-runtime")
+	}
+	return runtimeaccount.Lookup(name)
 }

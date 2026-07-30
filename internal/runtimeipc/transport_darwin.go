@@ -121,6 +121,14 @@ func validateUnixEndpoint(endpoint string, createParent bool) (string, error) {
 		return "", errors.New("Runtime Socket must not use the filesystem root")
 	}
 	parent := filepath.Dir(absolute)
+	if endpoint == darwinManagementSocket {
+		canonicalParent, err := filepath.EvalSymlinks(parent)
+		if err != nil {
+			return "", fmt.Errorf("resolve macOS Runtime Socket directory: %w", err)
+		}
+		parent = canonicalParent
+		absolute = filepath.Join(parent, filepath.Base(absolute))
+	}
 	linked, err := safepath.ContainsLinkInExistingPath(parent)
 	if err != nil {
 		return "", fmt.Errorf("inspect Runtime Socket ancestors: %w", err)
