@@ -198,6 +198,33 @@ fn runtime_disable_gateway(bridge: State<'_, RuntimeBridge>) -> Result<Value, Br
 }
 
 #[tauri::command]
+fn runtime_preview_mihomo_update(
+    bridge: State<'_, RuntimeBridge>,
+    source: String,
+    version: String,
+) -> Result<Value, BridgeError> {
+    bridge.preview_mihomo_update(&source, &version)
+}
+
+#[tauri::command]
+fn runtime_install_mihomo_update(
+    bridge: State<'_, RuntimeBridge>,
+    plan_id: String,
+    trust: String,
+    confirm: bool,
+) -> Result<Value, BridgeError> {
+    bridge.install_mihomo_update(&plan_id, &trust, confirm)
+}
+
+#[tauri::command]
+fn runtime_rollback_mihomo(
+    bridge: State<'_, RuntimeBridge>,
+    confirm: bool,
+) -> Result<Value, BridgeError> {
+    bridge.rollback_mihomo(confirm)
+}
+
+#[tauri::command]
 fn runtime_get_operation(
     bridge: State<'_, RuntimeBridge>,
     operation_id: String,
@@ -294,6 +321,9 @@ pub fn run() {
             runtime_disable_tun,
             runtime_enable_gateway,
             runtime_disable_gateway,
+            runtime_preview_mihomo_update,
+            runtime_install_mihomo_update,
+            runtime_rollback_mihomo,
             runtime_get_operation,
             runtime_wait_operation,
             runtime_cancel_operation,

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -35,6 +37,7 @@ import (
 	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
 	"submux/internal/runtimetui"
+	"submux/internal/runtimeupdate"
 )
 
 func main() {
@@ -78,6 +81,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "proxy" {
 		return runProxy(arguments[1:], stdout, stderr)
 	}
+	if arguments[0] == "mihomo" {
+		return runMihomo(arguments[1:], stdout, stderr)
+	}
 	if arguments[0] == "network" {
 		return runNetwork(arguments[1:], stdout, stderr)
 	}
@@ -93,7 +99,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "diagnostics" {
 		return runDiagnostics(arguments[1:], stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|network|source|resource|override|diagnostics|version|--version-json]")
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|mihomo|network|source|resource|override|diagnostics|version|--version-json]")
 	return 2
 }
 
@@ -234,15 +240,41 @@ func runServe(arguments []string, stderr io.Writer) int {
 		}
 		process.Delegate = delegate
 	}
-	core := &runtimecore.Store{
-		Root:       filepath.Join(*stateRoot, "core"),
-		Verifier:   runtimecore.CommandVerifier{},
-		Activation: process,
-	}
 	control := runtimeprocess.ControlProbe{Endpoint: defaults.ControlEndpoint}
 	verifier := &mihomo.RuntimeCheck{
 		Control:    control,
 		ProxyProbe: mihomo.LocalHTTPProxyProbe{},
+	}
+	resourceRoot, err := state.ManagedResourceRoot()
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
+		return 1
+	}
+	candidateVerifier := runtimeapp.CoreCandidateVerifier{
+		ConfigPath: process.ConfigPath,
+		DataDir:    process.DataDir,
+		SafePaths:  []string{resourceRoot},
+	}
+	core := &runtimecore.Store{
+		Root:     filepath.Join(*stateRoot, "core"),
+		Verifier: candidateVerifier,
+		Activation: &runtimeapp.CoreActivation{
+			Process:    process,
+			Verifier:   verifier,
+			ConfigPath: process.ConfigPath,
+		},
+	}
+	updateManager := &runtimeupdate.Manager{
+		Root:     filepath.Join(*stateRoot, "updates"),
+		Platform: runtime.GOOS,
+		Arch:     runtime.GOARCH,
+		Trust: &runtimeupdate.Verifier{
+			InitialRoot: runtimeupdate.InitialRoot(),
+			StateRoot:   filepath.Join(*stateRoot, "trust", "tuf"),
+		},
+		Official:          runtimecore.NewOfficialReleaseSource(nil),
+		Core:              core,
+		CandidateVerifier: candidateVerifier,
 	}
 	executor := &runtimeapp.MihomoExecutor{
 		State:           state,
@@ -255,6 +287,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Verifier:        verifier,
 		Network:         network,
 		TUN:             network,
+		Updates:         updateManager,
 	}
 	executor.Sources = &runtimesource.Manager{
 		State: state,
@@ -272,6 +305,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Executor: executor,
 		Recovery: supervisor,
 		Network:  network,
+		Updates:  updateManager,
 		Diagnostics: &runtimediag.Service{
 			State:          state,
 			StateRoot:      *stateRoot,
@@ -890,6 +924,179 @@ func runProxy(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		}
 	}
 	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func runMihomo(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime mihomo [check|import|install|rollback]")
+		return 2
+	}
+	command := arguments[0]
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("mihomo "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	version := flags.String("version", "", "exact stable Mihomo vX.Y.Z version")
+	source := flags.String("source", runtimeapi.MihomoUpdateSourceOnlineTUF, "online_tuf or upstream_only")
+	planID := flags.String("plan", "", "verified Mihomo update plan ID")
+	trust := flags.String("trust", runtimeapi.MihomoUpdateTrustTUF, "tuf or upstream_only")
+	confirm := flags.Bool("confirm", false, "explicitly confirm core replacement or rollback")
+	wait := flags.Bool("wait", false, "wait for the operation to finish")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return 2
+	}
+	if command != "check" && command != "import" && command != "install" && command != "rollback" {
+		fmt.Fprintln(stderr, "usage: submux-runtime mihomo [check|import|install|rollback]")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	ctx := context.Background()
+
+	if command == "check" {
+		if flags.NArg() != 0 || *planID != "" || *confirm || *wait ||
+			(*source != runtimeapi.MihomoUpdateSourceOnlineTUF &&
+				*source != runtimeapi.MihomoUpdateSourceUpstreamOnly) {
+			fmt.Fprintln(stderr, "mihomo check accepts --source online_tuf|upstream_only and optional --version")
+			return 2
+		}
+		preview, err := client.PreviewMihomoUpdate(ctx, runtimeapi.MihomoUpdatePreviewRequest{
+			Source:  *source,
+			Version: *version,
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		return writeMihomoUpdatePlan(stdout, *jsonOutput, preview)
+	}
+
+	if command == "import" {
+		if flags.NArg() != 1 || *planID != "" || *confirm || *wait ||
+			*source != runtimeapi.MihomoUpdateSourceOnlineTUF {
+			fmt.Fprintln(stderr, "mihomo import accepts optional --version and exactly one offline bundle file")
+			return 2
+		}
+		fileName, openFile, size, digest, err := inspectUpdateBundle(flags.Arg(0))
+		if err != nil {
+			writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+			return 1
+		}
+		defer openFile.Close()
+		bundle, err := client.UploadMihomoUpdateBundle(ctx, openFile, size, digest)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		preview, err := client.PreviewMihomoUpdate(ctx, runtimeapi.MihomoUpdatePreviewRequest{
+			Source:   runtimeapi.MihomoUpdateSourceOfflineTUF,
+			Version:  *version,
+			BundleID: bundle.ID,
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		if !*jsonOutput {
+			fmt.Fprintf(stdout, "verified offline bundle %s\n", filepath.Base(fileName))
+		}
+		return writeMihomoUpdatePlan(stdout, *jsonOutput, preview)
+	}
+
+	if flags.NArg() != 0 || *version != "" || *source != runtimeapi.MihomoUpdateSourceOnlineTUF {
+		fmt.Fprintf(stderr, "mihomo %s does not accept version, source, or positional arguments\n", command)
+		return 2
+	}
+	snapshot, err := client.Observe(ctx)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	action := runtimeapi.Action{Kind: runtimeapi.ActionRollbackMihomo}
+	action.Params.Confirm = *confirm
+	if command == "install" {
+		if *planID == "" || !*confirm ||
+			(*trust != runtimeapi.MihomoUpdateTrustTUF &&
+				*trust != runtimeapi.MihomoUpdateTrustUpstreamOnly) {
+			fmt.Fprintln(stderr, "mihomo install requires --plan, --trust tuf|upstream_only, and --confirm")
+			return 2
+		}
+		action.Kind = runtimeapi.ActionUpdateMihomo
+		action.Params.PlanID = *planID
+		action.Params.Trust = *trust
+	} else if *planID != "" || !*confirm || *trust != runtimeapi.MihomoUpdateTrustTUF {
+		fmt.Fprintln(stderr, "mihomo rollback requires --confirm and does not accept --plan or --trust")
+		return 2
+	}
+	operation, err := client.Execute(ctx, runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action:     action,
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(ctx, operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func inspectUpdateBundle(name string) (string, *os.File, int64, string, error) {
+	absolute, err := filepath.Abs(name)
+	if err != nil {
+		return "", nil, 0, "", err
+	}
+	info, err := os.Lstat(absolute)
+	if err != nil {
+		return "", nil, 0, "", err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+		info.Size() <= 0 || info.Size() > runtimeupdate.MaxBundleBytes {
+		return "", nil, 0, "", errors.New("offline Mihomo update bundle must be a bounded regular non-linked file")
+	}
+	file, err := os.Open(absolute)
+	if err != nil {
+		return "", nil, 0, "", err
+	}
+	hash := sha256.New()
+	written, err := io.Copy(hash, file)
+	if err != nil || written != info.Size() {
+		file.Close()
+		return "", nil, 0, "", errors.New("offline Mihomo update bundle could not be hashed completely")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		file.Close()
+		return "", nil, 0, "", err
+	}
+	return absolute, file, info.Size(), hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func writeMihomoUpdatePlan(stdout io.Writer, jsonOutput bool, plan runtimeapi.MihomoUpdatePlan) int {
+	if jsonOutput {
+		_ = json.NewEncoder(stdout).Encode(plan)
+		return 0
+	}
+	fmt.Fprintf(
+		stdout,
+		"%s %s (%s, %s/%s)\nasset %s bytes sha256:%s\nplan %s expires %s\n",
+		plan.Version,
+		plan.Repository,
+		plan.Trust,
+		plan.Platform,
+		plan.Arch,
+		strconv.FormatInt(plan.AssetSize, 10),
+		plan.AssetSHA256,
+		plan.PlanID,
+		plan.ExpiresAt.Format(time.RFC3339),
+	)
+	if plan.Warning != "" {
+		fmt.Fprintln(stdout, plan.Warning)
+	}
+	return 0
 }
 
 func runResource(arguments []string, stdin io.Reader, stdout io.Writer, stderr io.Writer) int {

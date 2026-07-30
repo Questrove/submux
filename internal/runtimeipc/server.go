@@ -2,6 +2,7 @@ package runtimeipc
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimeprivacy"
 	"submux/internal/runtimestate"
+	"submux/internal/runtimeupdate"
 )
 
 type Observer interface {
@@ -42,11 +44,17 @@ type NetworkPreviewer interface {
 	PreviewNetwork(context.Context, runtimeapi.PeerIdentity, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
 }
 
+type MihomoUpdateOperator interface {
+	UploadMihomoUpdateBundle(context.Context, runtimeapi.PeerIdentity, int64, string, io.Reader) (runtimeapi.MihomoUpdateBundle, error)
+	PreviewMihomoUpdate(context.Context, runtimeapi.PeerIdentity, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
+}
+
 type Server struct {
 	observer       Observer
 	eventObserver  EventObserver
 	operator       Operator
 	network        NetworkPreviewer
+	updates        MihomoUpdateOperator
 	authorizer     Authorizer
 	runtimeVersion string
 }
@@ -67,6 +75,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	}
 	operator, _ := observer.(Operator)
 	network, _ := observer.(NetworkPreviewer)
+	updates, _ := observer.(MihomoUpdateOperator)
 	eventObserver, _ := observer.(EventObserver)
 	runtimeVersion := ""
 	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
@@ -77,6 +86,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		eventObserver:  eventObserver,
 		operator:       operator,
 		network:        network,
+		updates:        updates,
 		authorizer:     authorizer,
 		runtimeVersion: runtimeVersion,
 	}, nil
@@ -92,8 +102,8 @@ func (s *Server) Serve(ctx context.Context, listener LocalListener) error {
 	httpServer := &http.Server{
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
+		ReadTimeout:       10 * time.Minute,
+		WriteTimeout:      10 * time.Minute,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    16 << 10,
 		ConnContext: func(connectionContext context.Context, connection net.Conn) context.Context {
@@ -134,6 +144,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/advanced-override", s.handleAdvancedOverride)
 	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
 	mux.HandleFunc("/v1/network/preview", s.handleNetworkPreview)
+	mux.HandleFunc("/v1/mihomo/update-bundles", s.handleMihomoUpdateBundle)
+	mux.HandleFunc("/v1/mihomo/updates/preview", s.handleMihomoUpdatePreview)
 	mux.HandleFunc("/v1/operations", s.handleCreateOperation)
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
 	mux.HandleFunc("/v1/proxy/verify", s.handleProxyVerification)
@@ -144,6 +156,100 @@ func (s *Server) Handler() http.Handler {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
 	return mux
+}
+
+func (s *Server) handleMihomoUpdateBundle(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Mihomo update bundles only accept POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Mihomo update bundles do not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.updates == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Mihomo update bundle service is unavailable", true)
+		return
+	}
+	if !s.validateWriteCompatibility(writer, request, clientVersion) {
+		return
+	}
+	if strings.TrimSpace(strings.Split(request.Header.Get("Content-Type"), ";")[0]) != runtimeapi.MihomoUpdateBundleContentType {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Mihomo update bundle content type is invalid", false)
+		return
+	}
+	size, err := strconv.ParseInt(request.Header.Get(HeaderContentSize), 10, 64)
+	if err != nil || size <= 0 || size > runtimeupdate.MaxBundleBytes {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Mihomo update bundle size is missing or invalid", false)
+		return
+	}
+	digest := request.Header.Get(HeaderContentSHA256)
+	decodedDigest, err := hex.DecodeString(digest)
+	if err != nil || len(decodedDigest) != sha256.Size {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Mihomo update bundle SHA-256 is missing or invalid", false)
+		return
+	}
+	bundle, err := s.updates.UploadMihomoUpdateBundle(
+		request.Context(),
+		peer,
+		size,
+		digest,
+		io.LimitReader(request.Body, runtimeupdate.MaxBundleBytes+1),
+	)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusCreated, bundle)
+}
+
+func (s *Server) handleMihomoUpdatePreview(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Mihomo update preview only accepts POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Mihomo update preview does not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.updates == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Mihomo update preview is unavailable", true)
+		return
+	}
+	if !s.validateWriteCompatibility(writer, request, clientVersion) {
+		return
+	}
+	var previewRequest runtimeapi.MihomoUpdatePreviewRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &previewRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	preview, err := s.updates.PreviewMihomoUpdate(request.Context(), peer, previewRequest)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, preview)
 }
 
 func (s *Server) handleNetworkPreview(writer http.ResponseWriter, request *http.Request) {
@@ -895,8 +1001,12 @@ func requestHasBody(request *http.Request) bool {
 }
 
 func validAction(action runtimeapi.Action) bool {
+	if action.Kind != runtimeapi.ActionUpdateMihomo && action.Params.Trust != "" {
+		return false
+	}
 	if action.Kind != runtimeapi.ActionEnableTUN &&
 		action.Kind != runtimeapi.ActionEnableGateway &&
+		action.Kind != runtimeapi.ActionUpdateMihomo &&
 		action.Params.PlanID != "" {
 		return false
 	}
@@ -940,6 +1050,29 @@ func validAction(action runtimeapi.Action) bool {
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == "" &&
 			action.Params.PlanID == ""
+	case runtimeapi.ActionUpdateMihomo:
+		return validPlanID(action.Params.PlanID) &&
+			action.Params.Confirm &&
+			(action.Params.Trust == runtimeapi.MihomoUpdateTrustTUF ||
+				action.Params.Trust == runtimeapi.MihomoUpdateTrustUpstreamOnly) &&
+			action.Params.ContentID == "" &&
+			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
+	case runtimeapi.ActionRollbackMihomo:
+		return action.Params.Confirm &&
+			action.Params.PlanID == "" &&
+			action.Params.Trust == "" &&
+			action.Params.ContentID == "" &&
+			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
 	case runtimeapi.ActionAddRemoteSource:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&

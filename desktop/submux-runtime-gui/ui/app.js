@@ -16,6 +16,8 @@ const state = {
   networkPlanExpiresAt: 0,
   networkPlanExpiryTimer: null,
   activeNetworkMode: "",
+  mihomoUpdatePlan: null,
+  previousMihomoVersion: "",
 };
 
 const elements = {
@@ -42,6 +44,13 @@ const elements = {
   previewNetwork: document.querySelector("#preview-network"),
   enableTun: document.querySelector("#enable-tun"),
   disableTun: document.querySelector("#disable-tun"),
+  mihomoCoreVersion: document.querySelector("#mihomo-core-version"),
+  mihomoUpdateSource: document.querySelector("#mihomo-update-source"),
+  mihomoUpdateVersion: document.querySelector("#mihomo-update-version"),
+  mihomoUpdatePreview: document.querySelector("#mihomo-update-preview"),
+  previewMihomoUpdate: document.querySelector("#preview-mihomo-update"),
+  installMihomoUpdate: document.querySelector("#install-mihomo-update"),
+  rollbackMihomo: document.querySelector("#rollback-mihomo"),
   candidateState: document.querySelector("#candidate-state"),
   candidateYaml: document.querySelector("#candidate-yaml"),
   ownedFields: document.querySelector("#owned-fields"),
@@ -118,6 +127,9 @@ const writeButtons = [
   elements.previewNetwork,
   elements.enableTun,
   elements.disableTun,
+  elements.previewMihomoUpdate,
+  elements.installMihomoUpdate,
+  elements.rollbackMihomo,
   elements.addRemoteSource,
   elements.addImportedSource,
   elements.applySource,
@@ -140,6 +152,10 @@ function setBusy(busy, message = "") {
   }
   elements.apply.disabled = busy || !state.compatible || !state.contentId;
   elements.enableTun.disabled = busy || !state.compatible || !state.networkPlanId;
+  elements.installMihomoUpdate.disabled =
+    busy || !state.compatible || !state.mihomoUpdatePlan;
+  elements.rollbackMihomo.disabled =
+    busy || !state.compatible || !state.previousMihomoVersion;
   for (const button of [
     elements.refreshSource,
     elements.refreshSourceDirect,
@@ -211,6 +227,10 @@ function renderSnapshot(snapshot) {
     ? `${recoverySummary} · ${snapshot.mihomo.fault.code}`
     : recoverySummary;
   elements.runMode.textContent = `运行方式：${snapshot.run_mode || "未配置"}`;
+  const updates = snapshot.updates || {};
+  state.previousMihomoVersion = updates.mihomo_previous_version || "";
+  elements.mihomoCoreVersion.textContent =
+    updates.mihomo_current_version || snapshot.mihomo?.version || "未安装";
   const network = snapshot.network || {};
   state.activeNetworkMode = network.mode || "";
   elements.networkState.textContent =
@@ -269,6 +289,93 @@ function renderSnapshot(snapshot) {
   elements.overrideState.textContent = advancedOverride.present
     ? `${String(advancedOverride.sha256 || "").slice(0, 12)} · ${advancedOverride.size || 0} 字节`
     : "尚未配置";
+}
+
+function renderMihomoUpdatePlan(plan) {
+  state.mihomoUpdatePlan = plan;
+  elements.mihomoUpdatePreview.textContent = [
+    `版本：${plan.version}`,
+    `来源：${plan.repository} · ${plan.source}`,
+    `信任：${plan.trust}`,
+    `平台：${plan.platform}/${plan.arch}`,
+    `资产：${plan.asset_name} · ${plan.asset_size} 字节`,
+    `SHA-256：${plan.asset_sha256}`,
+    `当前：${plan.current_version || "未安装"} · 上一版：${plan.previous_version || "无"}`,
+    `当前候选配置静态检查：${plan.static_config_verified ? "通过" : "未通过"}`,
+    `计划有效期：${plan.expires_at}`,
+    plan.warning || "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  setBusy(false);
+}
+
+async function previewMihomoUpdate() {
+  const source = elements.mihomoUpdateSource.value;
+  const version = elements.mihomoUpdateVersion.value.trim();
+  if (source === "upstream_only" && !version) {
+    setMessage("仅上游路径必须填写精确稳定版本。", true);
+    return;
+  }
+  state.mihomoUpdatePlan = null;
+  setBusy(true, "正在验证 TUF 元数据、官方 Release 和当前候选配置…");
+  try {
+    const plan = await invoke("runtime_preview_mihomo_update", { source, version });
+    renderMihomoUpdatePlan(plan);
+    setMessage("候选核心已经验证。安装仍需再次明确确认。");
+  } catch (error) {
+    setBusy(false);
+    setMessage(errorText(error), true);
+  }
+}
+
+async function installMihomoUpdate() {
+  const plan = state.mihomoUpdatePlan;
+  if (!plan) return;
+  const warning = plan.warning ? `\n\n${plan.warning}` : "";
+  if (
+    !window.confirm(
+      `确认把 Mihomo ${plan.current_version || "未安装"} 更新为 ${plan.version}？代理会短暂停止。${warning}`,
+    )
+  ) {
+    return;
+  }
+  setBusy(true, "正在提交已确认的 Mihomo 核心安装…");
+  try {
+    const operation = await invoke("runtime_install_mihomo_update", {
+      planId: plan.plan_id,
+      trust: plan.trust,
+      confirm: true,
+    });
+    state.mihomoUpdatePlan = null;
+    renderOperation(operation);
+    elements.mihomoUpdatePreview.textContent = "更新计划已消费；再次安装必须重新检查并确认。";
+    setMessage("Mihomo 更新已经进入 Runtime 操作队列。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function rollbackMihomo() {
+  if (!state.previousMihomoVersion) return;
+  if (
+    !window.confirm(
+      `确认回滚到 Mihomo ${state.previousMihomoVersion}？代理会短暂停止，回滚后的启动和即时健康检查仍必须通过。`,
+    )
+  ) {
+    return;
+  }
+  setBusy(true, "正在提交已确认的 Mihomo 核心回滚…");
+  try {
+    renderOperation(await invoke("runtime_rollback_mihomo", { confirm: true }));
+    setMessage("Mihomo 回滚已经进入 Runtime 操作队列。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function selectedCapturedRoutes() {
@@ -1021,6 +1128,19 @@ elements.verify.addEventListener("click", verifyProxy);
 elements.previewNetwork.addEventListener("click", previewNetwork);
 elements.enableTun.addEventListener("click", enableTUN);
 elements.disableTun.addEventListener("click", disableTUN);
+elements.previewMihomoUpdate.addEventListener("click", previewMihomoUpdate);
+elements.installMihomoUpdate.addEventListener("click", installMihomoUpdate);
+elements.rollbackMihomo.addEventListener("click", rollbackMihomo);
+elements.mihomoUpdateSource.addEventListener("change", () => {
+  state.mihomoUpdatePlan = null;
+  elements.mihomoUpdatePreview.textContent = "信任路径已变化，请重新检查。";
+  setBusy(state.busy);
+});
+elements.mihomoUpdateVersion.addEventListener("input", () => {
+  state.mihomoUpdatePlan = null;
+  elements.mihomoUpdatePreview.textContent = "版本已变化，请重新检查。";
+  setBusy(state.busy);
+});
 elements.networkMode.addEventListener("change", () => {
   if (elements.networkMode.value === "gateway" && elements.networkIpv6.value === "proxy") {
     elements.networkIpv6.value = "direct";

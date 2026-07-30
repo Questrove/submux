@@ -19,6 +19,7 @@ import (
 	"submux/internal/runtimeprocess"
 	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
+	"submux/internal/runtimeupdate"
 )
 
 type MihomoExecutor struct {
@@ -33,6 +34,7 @@ type MihomoExecutor struct {
 	Sources         *runtimesource.Manager
 	Network         FailOpenController
 	TUN             TUNController
+	Updates         *runtimeupdate.Manager
 	Now             func() time.Time
 
 	lifecycleMu sync.Mutex
@@ -150,6 +152,16 @@ func (e *MihomoExecutor) Execute(
 		return e.enableNetwork(ctx, operation, runtimeapi.RunModeGateway, report)
 	case runtimeapi.ActionDisableGateway:
 		return e.disableNetwork(ctx, operation, runtimeapi.RunModeGateway, report)
+	case runtimeapi.ActionUpdateMihomo:
+		if e.Updates == nil {
+			return nil, errors.New("Mihomo update manager is unavailable")
+		}
+		return e.Updates.Activate(ctx, operation, runtimeupdate.Reporter(report))
+	case runtimeapi.ActionRollbackMihomo:
+		if e.Updates == nil {
+			return nil, errors.New("Mihomo update manager is unavailable")
+		}
+		return e.Updates.Rollback(ctx, operation, runtimeupdate.Reporter(report))
 	case runtimeapi.ActionAddManagedResource:
 		return e.addManagedResource(operation, report)
 	case runtimeapi.ActionSetAdvancedOverride:

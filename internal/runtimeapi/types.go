@@ -186,6 +186,7 @@ type ActionParams struct {
 	ResourceKind string `json:"resource_kind,omitempty"`
 	ResourceName string `json:"resource_name,omitempty"`
 	PlanID       string `json:"plan_id,omitempty"`
+	Trust        string `json:"trust,omitempty"`
 }
 
 type CreateOperationRequest struct {
@@ -226,6 +227,7 @@ type AuditRecord struct {
 	ClientVersion string         `json:"client_version"`
 	Action        string         `json:"action"`
 	ObjectID      string         `json:"object_id,omitempty"`
+	Trust         string         `json:"trust,omitempty"`
 	Stage         string         `json:"stage"`
 	Result        string         `json:"result"`
 	At            time.Time      `json:"at"`
@@ -251,6 +253,9 @@ type OperationResult struct {
 	AdvancedOverrideSHA256 string         `json:"advanced_override_sha256,omitempty"`
 	RunMode                string         `json:"run_mode,omitempty"`
 	Network                *NetworkStatus `json:"network,omitempty"`
+	CoreVersion            string         `json:"core_version,omitempty"`
+	PreviousCoreVersion    string         `json:"previous_core_version,omitempty"`
+	Trust                  string         `json:"trust,omitempty"`
 }
 
 type OperationResponse struct {
@@ -311,8 +316,42 @@ type Event struct {
 }
 
 type UpdateStatus struct {
-	RuntimeAvailable bool `json:"runtime_available"`
-	MihomoAvailable  bool `json:"mihomo_available"`
+	RuntimeAvailable      bool   `json:"runtime_available"`
+	MihomoAvailable       bool   `json:"mihomo_available"`
+	MihomoCurrentVersion  string `json:"mihomo_current_version,omitempty"`
+	MihomoPreviousVersion string `json:"mihomo_previous_version,omitempty"`
+}
+
+type MihomoUpdateBundle struct {
+	ID        string    `json:"bundle_id"`
+	Size      int64     `json:"size"`
+	SHA256    string    `json:"sha256"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+type MihomoUpdatePreviewRequest struct {
+	Source   string `json:"source"`
+	Version  string `json:"version,omitempty"`
+	BundleID string `json:"bundle_id,omitempty"`
+}
+
+type MihomoUpdatePlan struct {
+	PlanID               string    `json:"plan_id"`
+	Source               string    `json:"source"`
+	Trust                string    `json:"trust"`
+	Version              string    `json:"version"`
+	CurrentVersion       string    `json:"current_version,omitempty"`
+	PreviousVersion      string    `json:"previous_version,omitempty"`
+	Platform             string    `json:"platform"`
+	Arch                 string    `json:"arch"`
+	Repository           string    `json:"repository"`
+	AssetName            string    `json:"asset_name"`
+	AssetSize            int64     `json:"asset_size"`
+	AssetSHA256          string    `json:"asset_sha256"`
+	BinarySHA256         string    `json:"binary_sha256"`
+	StaticConfigVerified bool      `json:"static_config_verified"`
+	Warning              string    `json:"warning,omitempty"`
+	ExpiresAt            time.Time `json:"expires_at"`
 }
 
 type ErrorEnvelope struct {
@@ -367,6 +406,8 @@ const (
 	ActionDisableTUN          = "network.disable_tun"
 	ActionEnableGateway       = "network.enable_gateway"
 	ActionDisableGateway      = "network.disable_gateway"
+	ActionUpdateMihomo        = "mihomo.update"
+	ActionRollbackMihomo      = "mihomo.rollback"
 
 	OperationQueued         = "queued"
 	OperationRunning        = "running"
@@ -399,6 +440,13 @@ const (
 
 	SourceRouteDirect = "direct"
 	SourceRouteMihomo = "mihomo"
+
+	MihomoUpdateSourceOnlineTUF    = "online_tuf"
+	MihomoUpdateSourceOfflineTUF   = "offline_tuf"
+	MihomoUpdateSourceUpstreamOnly = "upstream_only"
+	MihomoUpdateTrustTUF           = "tuf"
+	MihomoUpdateTrustUpstreamOnly  = "upstream_only"
+	MihomoUpdateBundleContentType  = "application/vnd.submux.mihomo-update-bundle+zip"
 
 	ManagedResourceContentType = "application/vnd.submux.managed-resource"
 

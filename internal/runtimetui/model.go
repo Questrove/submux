@@ -37,6 +37,10 @@ type NetworkClient interface {
 	PreviewNetwork(context.Context, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
 }
 
+type MihomoUpdateClient interface {
+	PreviewMihomoUpdate(context.Context, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
+}
+
 type Model struct {
 	ctx               context.Context
 	client            Client
@@ -50,6 +54,7 @@ type Model struct {
 	selectedSourceID  string
 	preview           runtimeapi.CandidatePreview
 	networkPreview    runtimeapi.NetworkPreview
+	mihomoUpdate      runtimeapi.MihomoUpdatePlan
 	networkEditorMode string
 	lastOperation     runtimeapi.Operation
 	verification      runtimeapi.ProxyVerification
@@ -120,6 +125,10 @@ type diagnosticsResultMsg struct {
 
 type networkPreviewMsg struct {
 	preview runtimeapi.NetworkPreview
+}
+
+type mihomoUpdateMsg struct {
+	preview runtimeapi.MihomoUpdatePlan
 }
 
 type errMsg struct {
@@ -265,6 +274,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.editor.Blur()
 		m.status = fmt.Sprintf("%s 网络预览已生成：%s", message.preview.Mode, message.preview.PlanID)
+	case mihomoUpdateMsg:
+		m.mihomoUpdate = message.preview
+		m.busy = false
+		m.err = nil
+		m.sensitiveConfirm = ""
+		m.status = fmt.Sprintf("Mihomo %s 更新计划已验证；再按 U 查看确认提示", message.preview.Version)
 	case errMsg:
 		m.busy = false
 		m.err = message.err
@@ -575,6 +590,65 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				actionKind = runtimeapi.ActionDisableGateway
 			}
 			return m, m.executeCmd(runtimeapi.Action{Kind: actionKind})
+		case "U":
+			if m.mihomoUpdate.PlanID == "" ||
+				!m.mihomoUpdate.ExpiresAt.IsZero() && !time.Now().Before(m.mihomoUpdate.ExpiresAt) {
+				client, ok := m.client.(MihomoUpdateClient)
+				if !ok {
+					m.err = errors.New("当前 TUI 客户端不支持 Mihomo 更新")
+					m.status = m.err.Error()
+					return m, nil
+				}
+				m.busy = true
+				m.mihomoUpdate = runtimeapi.MihomoUpdatePlan{}
+				m.status = "正在通过 TUF 检查官方 Mihomo 稳定更新…"
+				return m, m.previewMihomoUpdateCmd(client)
+			}
+			confirmation := "mihomo-update:" + m.mihomoUpdate.PlanID
+			if m.sensitiveConfirm != confirmation {
+				m.sensitiveConfirm = confirmation
+				m.err = nil
+				m.status = fmt.Sprintf(
+					"将把 Mihomo %s 更新为 %s，代理会短暂停止；再按一次 U 明确确认。",
+					valueOr(m.mihomoUpdate.CurrentVersion, "未安装"),
+					m.mihomoUpdate.Version,
+				)
+				return m, nil
+			}
+			m.sensitiveConfirm = ""
+			m.busy = true
+			m.status = "正在提交已确认的 Mihomo 更新…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind: runtimeapi.ActionUpdateMihomo,
+				Params: runtimeapi.ActionParams{
+					PlanID:  m.mihomoUpdate.PlanID,
+					Trust:   m.mihomoUpdate.Trust,
+					Confirm: true,
+				},
+			})
+		case "R":
+			if m.snapshot.Updates.MihomoPreviousVersion == "" {
+				m.err = errors.New("当前没有可回滚的上一版 Mihomo 核心")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			if m.sensitiveConfirm != "mihomo-rollback" {
+				m.sensitiveConfirm = "mihomo-rollback"
+				m.err = nil
+				m.status = fmt.Sprintf(
+					"将从 Mihomo %s 回滚到 %s，代理会短暂停止；再按一次 R 明确确认。",
+					valueOr(m.snapshot.Updates.MihomoCurrentVersion, "未知"),
+					m.snapshot.Updates.MihomoPreviousVersion,
+				)
+				return m, nil
+			}
+			m.sensitiveConfirm = ""
+			m.busy = true
+			m.status = "正在提交已确认的 Mihomo 回滚…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind:   runtimeapi.ActionRollbackMihomo,
+				Params: runtimeapi.ActionParams{Confirm: true},
+			})
 		case "y":
 			sourceID := m.selectedSource()
 			if sourceID == "" {
@@ -752,6 +826,13 @@ func (m Model) View() tea.View {
 		),
 		fmt.Sprintf("%s %d  %s %s", labelStyle.Render("重试次数"), m.snapshot.Mihomo.CrashAttempts, labelStyle.Render("下次重试"), nextRestart),
 		fmt.Sprintf("%s %d  %s %d", labelStyle.Render("Revision"), m.snapshot.Revision, labelStyle.Render("队列"), m.snapshot.Operations.Queued),
+		fmt.Sprintf(
+			"%s %s  %s %s",
+			labelStyle.Render("Mihomo 核心"),
+			valueOr(m.snapshot.Updates.MihomoCurrentVersion, "未安装"),
+			labelStyle.Render("上一版"),
+			valueOr(m.snapshot.Updates.MihomoPreviousVersion, "无"),
+		),
 	}
 	if m.snapshot.Mihomo.Fault != nil {
 		lines = append(lines, errorStyle.Render(fmt.Sprintf(
@@ -849,6 +930,23 @@ func (m Model) View() tea.View {
 			lines = append(lines, fmt.Sprintf("%s · %s · %s", origin.Path, origin.Origin, origin.Status))
 		}
 	}
+	if m.mihomoUpdate.PlanID != "" {
+		lines = append(lines,
+			"",
+			labelStyle.Render("Mihomo 更新计划"),
+			fmt.Sprintf(
+				"%s · %s · %s/%s · %s",
+				m.mihomoUpdate.Version,
+				m.mihomoUpdate.Trust,
+				m.mihomoUpdate.Platform,
+				m.mihomoUpdate.Arch,
+				m.mihomoUpdate.PlanID,
+			),
+		)
+		if m.mihomoUpdate.Warning != "" {
+			lines = append(lines, warnStyle.Render(m.mihomoUpdate.Warning))
+		}
+	}
 	if m.revealedURL != "" {
 		lines = append(lines, "", warnStyle.Render("来源原始地址："+m.revealedURL))
 	}
@@ -921,7 +1019,7 @@ func (m Model) View() tea.View {
 		renderStatus(m.status, m.err, m.busy),
 		"",
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
-		mutedStyle.Render("Ctrl+T 编辑/预览普通 TUN · Ctrl+L 编辑/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		mutedStyle.Render("U 检查/确认安装 Mihomo 更新 · R 确认回滚 Mihomo · Ctrl+T 编辑/预览普通 TUN · Ctrl+L 编辑/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -933,6 +1031,18 @@ func (m Model) observeCmd() tea.Cmd {
 			return errMsg{err: err}
 		}
 		return snapshotMsg{snapshot: snapshot}
+	}
+}
+
+func (m Model) previewMihomoUpdateCmd(client MihomoUpdateClient) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewMihomoUpdate(m.ctx, runtimeapi.MihomoUpdatePreviewRequest{
+			Source: runtimeapi.MihomoUpdateSourceOnlineTUF,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return mihomoUpdateMsg{preview: preview}
 	}
 }
 

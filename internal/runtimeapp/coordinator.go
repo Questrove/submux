@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,12 @@ type NetworkService interface {
 	Observe(context.Context) (runtimeapi.NetworkStatus, error)
 }
 
+type MihomoUpdateService interface {
+	UploadBundle(context.Context, runtimeapi.PeerIdentity, int64, string, io.Reader) (runtimeapi.MihomoUpdateBundle, error)
+	Preview(context.Context, runtimeapi.PeerIdentity, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
+	Status() (runtimeapi.UpdateStatus, error)
+}
+
 type PublicError struct {
 	Code      string
 	Message   string
@@ -85,6 +92,7 @@ type Coordinator struct {
 	Recovery      RecoveryService
 	Diagnostics   DiagnosticsService
 	Network       NetworkService
+	Updates       MihomoUpdateService
 	Version       string
 	Now           func() time.Time
 	QueueCapacity int
@@ -107,7 +115,7 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 			Mode:      runtimeapi.RunModeExplicit,
 			State:     runtimeapi.NetworkStateUnavailable,
 		}
-		return snapshot, nil
+		return c.observeUpdates(snapshot)
 	}
 	network, networkErr := c.Network.Observe(ctx)
 	snapshot.Network = network
@@ -128,6 +136,18 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 		snapshot.RunMode == runtimeapi.RunModeGateway {
 		snapshot.RunMode = runtimeapi.RunModeExplicit
 	}
+	return c.observeUpdates(snapshot)
+}
+
+func (c *Coordinator) observeUpdates(snapshot runtimeapi.Snapshot) (runtimeapi.Snapshot, error) {
+	if c.Updates == nil {
+		return snapshot, nil
+	}
+	status, err := c.Updates.Status()
+	if err != nil {
+		return runtimeapi.Snapshot{}, err
+	}
+	snapshot.Updates = status
 	return snapshot, nil
 }
 
@@ -157,6 +177,30 @@ func (c *Coordinator) UploadImport(
 		return runtimeapi.ImportContent{}, err
 	}
 	return c.State.UploadImport(peer, contentType, expectedSize, expectedSHA256, body, now)
+}
+
+func (c *Coordinator) UploadMihomoUpdateBundle(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	expectedSize int64,
+	expectedSHA256 string,
+	body io.Reader,
+) (runtimeapi.MihomoUpdateBundle, error) {
+	if c == nil || c.Updates == nil {
+		return runtimeapi.MihomoUpdateBundle{}, errors.New("Mihomo update bundle service is unavailable")
+	}
+	return c.Updates.UploadBundle(ctx, peer, expectedSize, expectedSHA256, body)
+}
+
+func (c *Coordinator) PreviewMihomoUpdate(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.MihomoUpdatePreviewRequest,
+) (runtimeapi.MihomoUpdatePlan, error) {
+	if c == nil || c.Updates == nil {
+		return runtimeapi.MihomoUpdatePlan{}, errors.New("Mihomo update preview service is unavailable")
+	}
+	return c.Updates.Preview(ctx, peer, request)
 }
 
 func (c *Coordinator) Execute(
@@ -643,10 +687,14 @@ func (c *Coordinator) now() time.Time {
 }
 
 func validateAction(action runtimeapi.Action) error {
+	if action.Kind != runtimeapi.ActionUpdateMihomo && action.Params.Trust != "" {
+		return errors.New("trust is only accepted by a Mihomo update action")
+	}
 	if action.Kind != runtimeapi.ActionEnableTUN &&
 		action.Kind != runtimeapi.ActionEnableGateway &&
+		action.Kind != runtimeapi.ActionUpdateMihomo &&
 		action.Params.PlanID != "" {
-		return errors.New("plan_id is only accepted by a network enable action")
+		return errors.New("plan_id is only accepted by a network enable or Mihomo update action")
 	}
 	switch action.Kind {
 	case runtimeapi.ActionApplyImportedConfig:
@@ -698,6 +746,33 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
 			return errors.New("network disable does not accept parameters")
+		}
+	case runtimeapi.ActionUpdateMihomo:
+		if !validPlanID(action.Params.PlanID) ||
+			!action.Params.Confirm ||
+			(action.Params.Trust != runtimeapi.MihomoUpdateTrustTUF &&
+				action.Params.Trust != runtimeapi.MihomoUpdateTrustUpstreamOnly) ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("mihomo.update requires plan_id, trust, and explicit confirmation")
+		}
+	case runtimeapi.ActionRollbackMihomo:
+		if !action.Params.Confirm ||
+			action.Params.PlanID != "" ||
+			action.Params.Trust != "" ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("mihomo.rollback requires only explicit confirmation")
 		}
 	case runtimeapi.ActionAddRemoteSource:
 		if !validContentID(action.Params.ContentID) ||
@@ -870,6 +945,10 @@ func publicExecutionMessage(kind string) string {
 		return "Runtime could not enable Linux gateway networking"
 	case runtimeapi.ActionDisableGateway:
 		return "Runtime could not disable Linux gateway networking"
+	case runtimeapi.ActionUpdateMihomo:
+		return "Runtime could not install the confirmed Mihomo core update"
+	case runtimeapi.ActionRollbackMihomo:
+		return "Runtime could not roll back the Mihomo core"
 	case runtimeapi.ActionAddRemoteSource:
 		return "Runtime could not add the remote configuration source"
 	case runtimeapi.ActionAddImportedSource:

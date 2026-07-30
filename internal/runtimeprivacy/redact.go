@@ -105,6 +105,7 @@ func SanitizeAudit(record runtimeapi.AuditRecord) runtimeapi.AuditRecord {
 	record.ClientVersion = RedactText(record.ClientVersion)
 	record.Action = RedactText(record.Action)
 	record.ObjectID = RedactText(record.ObjectID)
+	record.Trust = RedactText(record.Trust)
 	record.Stage = RedactText(record.Stage)
 	record.Result = RedactText(record.Result)
 	if record.Error != nil {

@@ -46,6 +46,10 @@ type Activation interface {
 	Start(ctx context.Context) error
 }
 
+type ActivationVerifier interface {
+	VerifyActivation(context.Context) error
+}
+
 type Store struct {
 	Root       string
 	Verifier   BinaryVerifier
@@ -155,12 +159,12 @@ func (s *Store) Activate(ctx context.Context, binary Binary) error {
 		return err
 	}
 	if wasRunning {
-		if err := s.Activation.Start(ctx); err != nil {
+		if err := s.startAndVerify(ctx); err != nil {
 			restoreErr := restorePrevious(root)
 			if restoreErr == nil {
-				restoreErr = s.Activation.Start(ctx)
+				restoreErr = s.startAndVerify(ctx)
 			}
-			return errors.Join(fmt.Errorf("new Mihomo version failed to start: %w", err), restoreErr)
+			return errors.Join(fmt.Errorf("new Mihomo version failed immediate activation health: %w", err), restoreErr)
 		}
 	}
 	if !hadCurrent {
@@ -203,15 +207,31 @@ func (s *Store) Rollback(ctx context.Context) error {
 		return err
 	}
 	if wasRunning {
-		if err := s.Activation.Start(ctx); err != nil {
+		if err := s.startAndVerify(ctx); err != nil {
 			restoreErr := restorePrevious(root)
 			if restoreErr == nil {
-				restoreErr = s.Activation.Start(ctx)
+				restoreErr = s.startAndVerify(ctx)
 			}
-			return errors.Join(errors.New("rolled-back Mihomo version failed to start; original version restored"), err, restoreErr)
+			return errors.Join(errors.New("rolled-back Mihomo version failed immediate activation health; original version restored"), err, restoreErr)
 		}
 	}
 	return finishOperation(root)
+}
+
+func (s *Store) startAndVerify(ctx context.Context) error {
+	if err := s.Activation.Start(ctx); err != nil {
+		return err
+	}
+	verifier, ok := s.Activation.(ActivationVerifier)
+	if !ok {
+		stopErr := s.Activation.Stop(ctx)
+		return errors.Join(errors.New("Mihomo activation health verifier is required"), stopErr)
+	}
+	if err := verifier.VerifyActivation(ctx); err != nil {
+		stopErr := s.Activation.Stop(ctx)
+		return errors.Join(err, stopErr)
+	}
+	return nil
 }
 
 func (s *Store) Recover(ctx context.Context) error {

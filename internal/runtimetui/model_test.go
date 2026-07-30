@@ -29,6 +29,7 @@ type fakeClient struct {
 	operationSerial    int
 	networkRequests    []runtimeapi.NetworkPreviewRequest
 	networkPreview     runtimeapi.NetworkPreview
+	updatePreview      runtimeapi.MihomoUpdatePlan
 }
 
 func (f *fakeClient) Observe(context.Context) (runtimeapi.Snapshot, error) {
@@ -161,6 +162,88 @@ func (f *fakeClient) PreviewNetwork(
 		}
 	}
 	return preview, nil
+}
+
+func (f *fakeClient) PreviewMihomoUpdate(
+	_ context.Context,
+	_ runtimeapi.MihomoUpdatePreviewRequest,
+) (runtimeapi.MihomoUpdatePlan, error) {
+	preview := f.updatePreview
+	if preview.PlanID == "" {
+		preview = runtimeapi.MihomoUpdatePlan{
+			PlanID:         "plan_0123456789abcdef0123456789abcdef",
+			Source:         runtimeapi.MihomoUpdateSourceOnlineTUF,
+			Trust:          runtimeapi.MihomoUpdateTrustTUF,
+			Version:        "v1.2.3",
+			CurrentVersion: "v1.2.2",
+			Platform:       "linux",
+			Arch:           "amd64",
+			Repository:     "MetaCubeX/mihomo",
+			ExpiresAt:      time.Now().Add(5 * time.Minute),
+		}
+	}
+	return preview, nil
+}
+
+func TestModelMihomoUpdateAndRollbackRequireTwoStepConfirmation(t *testing.T) {
+	client := &fakeClient{snapshot: runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        9,
+		Updates: runtimeapi.UpdateStatus{
+			MihomoCurrentVersion:  "v1.2.3",
+			MihomoPreviousVersion: "v1.2.2",
+		},
+	}}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+
+	updated, command := model.Update(keyPress('U'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("Mihomo update check did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if model.mihomoUpdate.PlanID == "" {
+		t.Fatal("Mihomo update plan was not retained")
+	}
+
+	updated, command = model.Update(keyPress('U'))
+	model = updated.(Model)
+	if command != nil || model.sensitiveConfirm == "" {
+		t.Fatal("first Mihomo update confirmation did not stop before execution")
+	}
+	updated, command = model.Update(keyPress('U'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("second Mihomo update confirmation did not execute")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	updateAction := client.actions[len(client.actions)-1]
+	if updateAction.Kind != runtimeapi.ActionUpdateMihomo ||
+		!updateAction.Params.Confirm ||
+		updateAction.Params.Trust != runtimeapi.MihomoUpdateTrustTUF {
+		t.Fatalf("unexpected Mihomo update action: %#v", updateAction)
+	}
+
+	model.busy = false
+	updated, command = model.Update(keyPress('R'))
+	model = updated.(Model)
+	if command != nil || model.sensitiveConfirm != "mihomo-rollback" {
+		t.Fatal("first Mihomo rollback confirmation did not stop before execution")
+	}
+	updated, command = model.Update(keyPress('R'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("second Mihomo rollback confirmation did not execute")
+	}
+	updated, _ = model.Update(command())
+	rollbackAction := client.actions[len(client.actions)-1]
+	if rollbackAction.Kind != runtimeapi.ActionRollbackMihomo || !rollbackAction.Params.Confirm {
+		t.Fatalf("unexpected Mihomo rollback action: %#v", rollbackAction)
+	}
 }
 
 func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {

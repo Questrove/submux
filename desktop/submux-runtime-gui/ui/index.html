@@ -41,6 +41,36 @@
       <section class="panel">
         <div class="panel-heading">
           <div>
+            <p class="eyebrow">MIHOMO CORE</p>
+            <h2>官方核心更新与回滚</h2>
+          </div>
+          <span id="mihomo-core-version" class="badge">正在读取</span>
+        </div>
+        <div class="form-grid">
+          <label>
+            信任路径
+            <select id="mihomo-update-source">
+              <option value="online_tuf">Submux TUF + 官方 Release</option>
+              <option value="upstream_only">仅固定上游 Release（高级）</option>
+            </select>
+          </label>
+          <label>
+            精确版本（高级路径必填）
+            <input id="mihomo-update-version" placeholder="v1.19.0" />
+          </label>
+        </div>
+        <pre id="mihomo-update-preview">尚未检查更新。</pre>
+        <div class="actions">
+          <button id="preview-mihomo-update" class="secondary">检查并静态校验候选核心</button>
+          <button id="install-mihomo-update" disabled>明确确认并安装</button>
+          <button id="rollback-mihomo" class="danger" disabled>明确确认回滚上一版</button>
+        </div>
+        <p class="muted">Runtime 不会在后台安装核心。安装前必须显示已验证计划并再次确认；仅上游路径不受 Submux TUF Targets 保护。</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
             <p class="eyebrow">LOCAL NETWORK</p>
             <h2>普通 TUN 与 Linux 网关</h2>
           </div>

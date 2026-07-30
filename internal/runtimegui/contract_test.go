@@ -46,6 +46,9 @@ func TestWebViewOnlyUsesAllowlistedTauriCommands(t *testing.T) {
 		"runtime_preview_network",
 		"runtime_enable_tun",
 		"runtime_disable_tun",
+		"runtime_preview_mihomo_update",
+		"runtime_install_mihomo_update",
+		"runtime_rollback_mihomo",
 		"runtime_get_operation",
 		"runtime_wait_operation",
 		"runtime_cancel_operation",
@@ -56,6 +59,47 @@ func TestWebViewOnlyUsesAllowlistedTauriCommands(t *testing.T) {
 	} {
 		if !strings.Contains(script, `"`+command+`"`) {
 			t.Fatalf("WebView does not invoke %q", command)
+		}
+	}
+}
+
+func TestGUIExposesConfirmedMihomoUpdateAndRollback(t *testing.T) {
+	page := readGUIFile(t, "ui", "index.html")
+	for _, id := range []string{
+		`id="mihomo-update-source"`,
+		`id="mihomo-update-version"`,
+		`id="mihomo-update-preview"`,
+		`id="preview-mihomo-update"`,
+		`id="install-mihomo-update"`,
+		`id="rollback-mihomo"`,
+	} {
+		if !strings.Contains(page, id) {
+			t.Fatalf("GUI Mihomo update control %s is missing", id)
+		}
+	}
+	script := readGUIFile(t, "ui", "app.js")
+	for _, contract := range []string{
+		"static_config_verified",
+		"runtime_preview_mihomo_update",
+		"runtime_install_mihomo_update",
+		"runtime_rollback_mihomo",
+		"plan.warning",
+		"window.confirm",
+	} {
+		if !strings.Contains(script, contract) {
+			t.Fatalf("GUI Mihomo update contract %q is missing", contract)
+		}
+	}
+	bridge := readGUIFile(t, "src-tauri", "src", "runtime_ipc.rs")
+	for _, contract := range []string{
+		"/v1/mihomo/updates/preview",
+		"mihomo.update",
+		"mihomo.rollback",
+		"upstream_only",
+		`"confirm": true`,
+	} {
+		if !strings.Contains(bridge, contract) {
+			t.Fatalf("GUI Mihomo update IPC contract %q is missing", contract)
 		}
 	}
 }

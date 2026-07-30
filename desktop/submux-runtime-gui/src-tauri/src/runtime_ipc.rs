@@ -428,6 +428,70 @@ impl RuntimeBridge {
         self.execute_action_with_params("network.disable_gateway", json!({}))
     }
 
+    pub fn preview_mihomo_update(
+        &self,
+        source: &str,
+        version: &str,
+    ) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        if !matches!(source, "online_tuf" | "upstream_only") {
+            return Err(BridgeError::request("Mihomo update source is invalid"));
+        }
+        if source == "upstream_only" && version.is_empty() {
+            return Err(BridgeError::request(
+                "Upstream-only Mihomo update requires an exact stable version",
+            ));
+        }
+        if !version.is_empty() && !valid_stable_version(version) {
+            return Err(BridgeError::request(
+                "Mihomo update version must use exact vX.Y.Z form",
+            ));
+        }
+        let body = serde_json::to_vec(&json!({
+            "source": source,
+            "version": version,
+        }))
+        .map_err(BridgeError::internal)?;
+        self.call_json(
+            "POST",
+            "/v1/mihomo/updates/preview",
+            Some("application/json"),
+            &[],
+            &body,
+            None,
+        )
+    }
+
+    pub fn install_mihomo_update(
+        &self,
+        plan_id: &str,
+        trust: &str,
+        confirm: bool,
+    ) -> Result<Value, BridgeError> {
+        validate_plan_id(plan_id)?;
+        if !matches!(trust, "tuf" | "upstream_only") {
+            return Err(BridgeError::request("Mihomo update trust mode is invalid"));
+        }
+        if !confirm {
+            return Err(BridgeError::request(
+                "Mihomo core installation requires explicit confirmation",
+            ));
+        }
+        self.execute_action_with_params(
+            "mihomo.update",
+            json!({ "plan_id": plan_id, "trust": trust, "confirm": true }),
+        )
+    }
+
+    pub fn rollback_mihomo(&self, confirm: bool) -> Result<Value, BridgeError> {
+        if !confirm {
+            return Err(BridgeError::request(
+                "Mihomo core rollback requires explicit confirmation",
+            ));
+        }
+        self.execute_action_with_params("mihomo.rollback", json!({ "confirm": true }))
+    }
+
     pub fn apply_candidate(&self, content_id: &str) -> Result<Value, BridgeError> {
         self.execute_action("proxy.apply_import", Some(content_id))
     }
@@ -1066,6 +1130,17 @@ fn validate_source_name(name: &str) -> Result<(), BridgeError> {
     } else {
         Err(BridgeError::request("Runtime source name is invalid"))
     }
+}
+
+fn valid_stable_version(version: &str) -> bool {
+    let Some(value) = version.strip_prefix('v') else {
+        return false;
+    };
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
 fn validate_source_route(route: &str) -> Result<(), BridgeError> {

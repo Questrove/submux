@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -41,6 +42,21 @@ type fakeActivation struct {
 	failStarts int
 }
 
+type healthCheckedActivation struct {
+	*fakeActivation
+	failHealth int
+	checks     int
+}
+
+func (a *healthCheckedActivation) VerifyActivation(context.Context) error {
+	a.checks++
+	if a.failHealth > 0 {
+		a.failHealth--
+		return errors.New("immediate health failed")
+	}
+	return nil
+}
+
 func (a *fakeActivation) IsRunning(context.Context) (bool, error) {
 	return a.running, nil
 }
@@ -73,7 +89,7 @@ func testBinary(version, value string) Binary {
 
 func TestStoreInstallsRetainsPreviousAndRollsBack(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "cores")
-	activation := &fakeActivation{}
+	activation := &healthCheckedActivation{fakeActivation: &fakeActivation{}}
 	store := &Store{
 		Root:       root,
 		Verifier:   &fakeBinaryVerifier{},
@@ -133,7 +149,7 @@ func TestStoreRejectsDigestMismatchBeforeReplacingCurrent(t *testing.T) {
 
 func TestStoreRestoresPreviousWhenNewRunningCoreFails(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "cores")
-	activation := &fakeActivation{}
+	activation := &healthCheckedActivation{fakeActivation: &fakeActivation{}}
 	store := &Store{Root: root, Verifier: &fakeBinaryVerifier{}, Activation: activation}
 	if err := store.Activate(context.Background(), testBinary("v1.19.28", "first")); err != nil {
 		t.Fatal(err)
@@ -149,6 +165,49 @@ func TestStoreRestoresPreviousWhenNewRunningCoreFails(t *testing.T) {
 	}
 	if status.Version != "v1.19.28" || status.PreviousVersion != "v1.19.29" || !activation.running {
 		t.Fatalf("failed replacement did not restore the original core: status=%#v activation=%#v", status, activation)
+	}
+}
+
+func TestStoreRestoresPreviousWhenNewCoreFailsImmediateHealth(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "cores")
+	activation := &healthCheckedActivation{fakeActivation: &fakeActivation{}}
+	store := &Store{Root: root, Verifier: &fakeBinaryVerifier{}, Activation: activation}
+	if err := store.Activate(context.Background(), testBinary("v1.19.28", "first")); err != nil {
+		t.Fatal(err)
+	}
+	activation.running = true
+	activation.failHealth = 1
+	if err := store.Activate(context.Background(), testBinary("v1.19.29", "second")); err == nil {
+		t.Fatal("unhealthy replacement was accepted")
+	}
+	status, err := store.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Version != "v1.19.28" || status.PreviousVersion != "v1.19.29" ||
+		!activation.running || activation.checks != 2 || activation.stops != 2 {
+		t.Fatalf("unhealthy replacement did not restore verified original: status=%#v activation=%#v", status, activation)
+	}
+}
+
+func TestStoreRestoresPreviousWhenActivationHasNoHealthVerifier(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "cores")
+	activation := &fakeActivation{}
+	store := &Store{Root: root, Verifier: &fakeBinaryVerifier{}, Activation: activation}
+	if err := store.Activate(context.Background(), testBinary("v1.19.28", "first")); err != nil {
+		t.Fatal(err)
+	}
+	activation.running = true
+	err := store.Activate(context.Background(), testBinary("v1.19.29", "second"))
+	if err == nil || !strings.Contains(err.Error(), "activation health verifier is required") {
+		t.Fatalf("missing activation health verifier error = %v", err)
+	}
+	status, statusErr := store.Status()
+	if statusErr != nil {
+		t.Fatal(statusErr)
+	}
+	if status.Version != "v1.19.28" || status.PreviousVersion != "v1.19.29" || activation.running {
+		t.Fatalf("missing verifier did not fail closed and restore the original core: status=%#v activation=%#v", status, activation)
 	}
 }
 

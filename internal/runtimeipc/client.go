@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"submux/internal/runtimeapi"
@@ -324,6 +325,76 @@ func (c *Client) UploadImport(
 		return content, invalidResponseError("import response", err)
 	}
 	return content, nil
+}
+
+func (c *Client) UploadMihomoUpdateBundle(
+	ctx context.Context,
+	body io.Reader,
+	size int64,
+	sha256Digest string,
+) (runtimeapi.MihomoUpdateBundle, error) {
+	var bundle runtimeapi.MihomoUpdateBundle
+	if body == nil || size <= 0 || len(sha256Digest) != 64 {
+		return bundle, &ClientError{Code: runtimeapi.ErrorInvalidRequest, Message: "Mihomo update bundle metadata is invalid"}
+	}
+	if _, err := hex.DecodeString(sha256Digest); err != nil {
+		return bundle, &ClientError{Code: runtimeapi.ErrorInvalidRequest, Message: "Mihomo update bundle SHA-256 is invalid"}
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return bundle, err
+	}
+	request, err := c.newRequest(ctx, http.MethodPost, "/v1/mihomo/update-bundles", body, requestID)
+	if err != nil {
+		return bundle, err
+	}
+	request.Header.Set("Content-Type", runtimeapi.MihomoUpdateBundleContentType)
+	request.Header.Set(HeaderContentSize, strconv.FormatInt(size, 10))
+	request.Header.Set(HeaderContentSHA256, strings.ToLower(sha256Digest))
+	response, err := c.doLong(request)
+	if err != nil {
+		return bundle, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		return bundle, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, &bundle); err != nil {
+		return bundle, invalidResponseError("Mihomo update bundle response", err)
+	}
+	return bundle, nil
+}
+
+func (c *Client) PreviewMihomoUpdate(
+	ctx context.Context,
+	requestValue runtimeapi.MihomoUpdatePreviewRequest,
+) (runtimeapi.MihomoUpdatePlan, error) {
+	var preview runtimeapi.MihomoUpdatePlan
+	body, err := json.Marshal(requestValue)
+	if err != nil {
+		return preview, err
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return preview, err
+	}
+	request, err := c.newRequest(ctx, http.MethodPost, "/v1/mihomo/updates/preview", bytes.NewReader(body), requestID)
+	if err != nil {
+		return preview, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := c.doLong(request)
+	if err != nil {
+		return preview, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return preview, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, &preview); err != nil {
+		return preview, invalidResponseError("Mihomo update preview response", err)
+	}
+	return preview, nil
 }
 
 func (c *Client) GetAdvancedOverride(ctx context.Context, reveal bool) (runtimeapi.AdvancedOverrideDocument, error) {
@@ -687,6 +758,19 @@ func (c *Client) newRequest(
 
 func (c *Client) do(request *http.Request) (*http.Response, error) {
 	response, err := c.http.Do(request)
+	if err == nil {
+		return response, nil
+	}
+	return nil, transportClientError(err)
+}
+
+func (c *Client) doLong(request *http.Request) (*http.Response, error) {
+	if c == nil || c.http == nil {
+		return nil, &ClientError{Code: runtimeapi.ErrorServiceUnavailable, Message: "Runtime client is not initialized"}
+	}
+	longClient := *c.http
+	longClient.Timeout = 0
+	response, err := longClient.Do(request)
 	if err == nil {
 		return response, nil
 	}

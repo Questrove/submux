@@ -3,8 +3,11 @@ package runtimeipc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -41,6 +44,30 @@ type eventObserver struct {
 type networkObserver struct {
 	observerFunc
 	preview func(context.Context, runtimeapi.PeerIdentity, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
+}
+
+type updateObserver struct {
+	operatorObserver
+	upload  func(runtimeapi.PeerIdentity, int64, string, io.Reader) (runtimeapi.MihomoUpdateBundle, error)
+	preview func(runtimeapi.PeerIdentity, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
+}
+
+func (observer updateObserver) UploadMihomoUpdateBundle(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	size int64,
+	digest string,
+	body io.Reader,
+) (runtimeapi.MihomoUpdateBundle, error) {
+	return observer.upload(peer, size, digest, body)
+}
+
+func (observer updateObserver) PreviewMihomoUpdate(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.MihomoUpdatePreviewRequest,
+) (runtimeapi.MihomoUpdatePlan, error) {
+	return observer.preview(peer, request)
 }
 
 func (observer networkObserver) PreviewNetwork(
@@ -640,6 +667,87 @@ func TestSensitiveEndpointsRequireConfirmationAndCarryClientIdentity(t *testing.
 	}
 }
 
+func TestMihomoUpdateBundleAndPreviewUseAuthorizedLocalIPC(t *testing.T) {
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	bundleBody := []byte("offline-update-bundle")
+	sum := sha256.Sum256(bundleBody)
+	digest := hex.EncodeToString(sum[:])
+	uploadCalls := 0
+	previewCalls := 0
+	service := updateObserver{
+		operatorObserver: operatorObserver{observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{ProtocolVersion: runtimeapi.ProtocolVersion}, nil
+		}},
+		upload: func(gotPeer runtimeapi.PeerIdentity, size int64, gotDigest string, body io.Reader) (runtimeapi.MihomoUpdateBundle, error) {
+			uploadCalls++
+			read, err := io.ReadAll(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotPeer.Key() != peer.Key() || size != int64(len(bundleBody)) ||
+				gotDigest != digest || !bytes.Equal(read, bundleBody) {
+				t.Fatalf("unexpected update upload peer=%#v size=%d digest=%q body=%q", gotPeer, size, gotDigest, read)
+			}
+			return runtimeapi.MihomoUpdateBundle{
+				ID:        "bundle_0123456789abcdef0123456789abcdef",
+				Size:      size,
+				SHA256:    gotDigest,
+				ExpiresAt: time.Now().Add(time.Minute),
+			}, nil
+		},
+		preview: func(gotPeer runtimeapi.PeerIdentity, request runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error) {
+			previewCalls++
+			if gotPeer.Key() != peer.Key() ||
+				request.Source != runtimeapi.MihomoUpdateSourceOfflineTUF ||
+				request.BundleID != "bundle_0123456789abcdef0123456789abcdef" {
+				t.Fatalf("unexpected update preview peer=%#v request=%#v", gotPeer, request)
+			}
+			return runtimeapi.MihomoUpdatePlan{
+				PlanID:  "plan_0123456789abcdef0123456789abcdef",
+				Source:  request.Source,
+				Trust:   runtimeapi.MihomoUpdateTrustTUF,
+				Version: "v1.2.3",
+			}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/mihomo/update-bundles", bytes.NewReader(bundleBody))
+	request.Header.Set(HeaderRequestID, "request-update")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientType, "cli")
+	request.Header.Set(HeaderClientVersion, "test")
+	request.Header.Set("Content-Type", runtimeapi.MihomoUpdateBundleContentType)
+	request.Header.Set(HeaderContentSize, strconv.Itoa(len(bundleBody)))
+	request.Header.Set(HeaderContentSHA256, digest)
+	request = withPeerContext(request, peer, nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated || uploadCalls != 1 ||
+		!strings.Contains(recorder.Body.String(), "bundle_0123456789abcdef0123456789abcdef") {
+		t.Fatalf("update upload status=%d calls=%d body=%s", recorder.Code, uploadCalls, recorder.Body.String())
+	}
+
+	request = httptest.NewRequest(
+		http.MethodPost,
+		"/v1/mihomo/updates/preview",
+		strings.NewReader(`{"source":"offline_tuf","bundle_id":"bundle_0123456789abcdef0123456789abcdef"}`),
+	)
+	request.Header.Set(HeaderRequestID, "request-update-preview")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientType, "cli")
+	request.Header.Set(HeaderClientVersion, "test")
+	request = withPeerContext(request, peer, nil)
+	recorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || previewCalls != 1 ||
+		!strings.Contains(recorder.Body.String(), "plan_0123456789abcdef0123456789abcdef") {
+		t.Fatalf("update preview status=%d calls=%d body=%s", recorder.Code, previewCalls, recorder.Body.String())
+	}
+}
+
 func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 	sourceID := "src_0123456789abcdef0123456789abcdef"
 	for _, action := range []runtimeapi.Action{
@@ -706,6 +814,18 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 				ContentID: "content_0123456789abcdef0123456789abcdef",
 			},
 		},
+		{
+			Kind: runtimeapi.ActionUpdateMihomo,
+			Params: runtimeapi.ActionParams{
+				PlanID:  "plan_0123456789abcdef0123456789abcdef",
+				Trust:   runtimeapi.MihomoUpdateTrustTUF,
+				Confirm: true,
+			},
+		},
+		{
+			Kind:   runtimeapi.ActionRollbackMihomo,
+			Params: runtimeapi.ActionParams{Confirm: true},
+		},
 	} {
 		if !validAction(action) {
 			t.Fatalf("valid source action rejected: %#v", action)
@@ -771,6 +891,17 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 				ContentID:    "content_0123456789abcdef0123456789abcdef",
 				ResourceName: "forbidden",
 			},
+		},
+		{
+			Kind: runtimeapi.ActionUpdateMihomo,
+			Params: runtimeapi.ActionParams{
+				PlanID: "plan_0123456789abcdef0123456789abcdef",
+				Trust:  runtimeapi.MihomoUpdateTrustTUF,
+			},
+		},
+		{
+			Kind:   runtimeapi.ActionStartProxy,
+			Params: runtimeapi.ActionParams{Trust: runtimeapi.MihomoUpdateTrustTUF},
 		},
 	} {
 		if validAction(action) {

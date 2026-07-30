@@ -43,8 +43,10 @@ type releaseMetadata struct {
 type ReleaseBinary struct {
 	Version      string
 	AssetName    string
+	AssetSize    int64
 	AssetDigest  string
 	BinaryDigest string
+	Archive      []byte
 	Data         []byte
 }
 
@@ -196,8 +198,10 @@ func (s *OfficialReleaseSource) FetchStable(ctx context.Context, version, osName
 	return ReleaseBinary{
 		Version:      version,
 		AssetName:    asset,
+		AssetSize:    int64(len(compressed)),
 		AssetDigest:  assetDigest,
 		BinaryDigest: hex.EncodeToString(binarySum[:]),
+		Archive:      compressed,
 		Data:         binary,
 	}, nil
 }
@@ -238,6 +242,51 @@ func releaseCoordinates(version, osName, arch string) (string, string, error) {
 	default:
 		return "", "", errors.New("Mihomo Runtime supports only Linux, Windows and macOS")
 	}
+}
+
+func OfficialReleaseCoordinates(version, osName, arch string) (string, string, error) {
+	return releaseCoordinates(version, osName, arch)
+}
+
+func VerifyOfficialArchive(
+	version string,
+	osName string,
+	arch string,
+	assetName string,
+	assetDigest string,
+	archive []byte,
+) (ReleaseBinary, error) {
+	_, expectedAsset, err := releaseCoordinates(version, osName, arch)
+	if err != nil {
+		return ReleaseBinary{}, err
+	}
+	if assetName != expectedAsset {
+		return ReleaseBinary{}, errors.New("official Mihomo archive name does not match the fixed platform target")
+	}
+	if len(archive) == 0 || len(archive) > maxAssetSize || len(assetDigest) != 64 {
+		return ReleaseBinary{}, errors.New("official Mihomo archive is empty, too large, or has no SHA-256 digest")
+	}
+	if _, err := hex.DecodeString(assetDigest); err != nil {
+		return ReleaseBinary{}, errors.New("official Mihomo archive SHA-256 is invalid")
+	}
+	archiveSum := sha256.Sum256(archive)
+	if !strings.EqualFold(hex.EncodeToString(archiveSum[:]), assetDigest) {
+		return ReleaseBinary{}, errors.New("official Mihomo archive SHA-256 verification failed")
+	}
+	binary, err := unpackReleaseBinary(assetName, archive)
+	if err != nil {
+		return ReleaseBinary{}, err
+	}
+	binarySum := sha256.Sum256(binary)
+	return ReleaseBinary{
+		Version:      version,
+		AssetName:    assetName,
+		AssetSize:    int64(len(archive)),
+		AssetDigest:  strings.ToLower(assetDigest),
+		BinaryDigest: hex.EncodeToString(binarySum[:]),
+		Archive:      append([]byte(nil), archive...),
+		Data:         binary,
+	}, nil
 }
 
 func unpackReleaseBinary(asset string, compressed []byte) ([]byte, error) {

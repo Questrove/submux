@@ -157,6 +157,7 @@ func auditForOperation(
 		ClientVersion: operation.ClientVersion,
 		Action:        operation.Action.Kind,
 		ObjectID:      auditObjectID(operation.Action),
+		Trust:         operation.Action.Params.Trust,
 		Stage:         stage,
 		Result:        result,
 		At:            now,
@@ -170,6 +171,8 @@ func auditObjectID(action runtimeapi.Action) string {
 		return action.Params.SourceID
 	case action.Params.ResourceName != "":
 		return action.Params.ResourceName
+	case action.Params.PlanID != "":
+		return action.Params.PlanID
 	default:
 		return ""
 	}
