@@ -166,7 +166,7 @@ func TestDarwinApplyAndCleanupRestoreSelectedRoute(t *testing.T) {
 }
 
 func TestStageDarwinCoreObjectLocksVerifiedDigest(t *testing.T) {
-	root := t.TempDir()
+	root := darwinTestTempDir(t)
 	source := filepath.Join(root, "source", "mihomo")
 	execution := filepath.Join(root, "execution")
 	if err := os.MkdirAll(filepath.Dir(source), 0700); err != nil {
@@ -209,7 +209,7 @@ func TestStageDarwinCoreObjectLocksVerifiedDigest(t *testing.T) {
 
 func testDarwinSystem(t *testing.T, platform DarwinPlatform) *DarwinSystem {
 	t.Helper()
-	root := t.TempDir()
+	root := darwinTestTempDir(t)
 	return &DarwinSystem{
 		RuntimeRoot:       root,
 		RuntimeUID:        501,
@@ -220,6 +220,20 @@ func testDarwinSystem(t *testing.T, platform DarwinPlatform) *DarwinSystem {
 		coreExecutionRoot: filepath.Join(root, "execution"),
 		allowTestPaths:    true,
 	}
+}
+
+func darwinTestTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("/private/tmp", "submux-runtimenet-")
+	if err != nil {
+		t.Fatalf("create macOS test directory outside the /var system alias: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove macOS test directory: %v", err)
+		}
+	})
+	return root
 }
 
 func testDarwinOwnership(t *testing.T) Ownership {

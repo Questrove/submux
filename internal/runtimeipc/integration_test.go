@@ -3,6 +3,7 @@ package runtimeipc
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -101,5 +102,22 @@ func testEndpoint(t *testing.T) string {
 		}
 		return `\\.\pipe\submux-runtime-test-` + requestID
 	}
-	return filepath.Join(t.TempDir(), "runtime.sock")
+	return filepath.Join(runtimeIPCTestTempDir(t), "runtime.sock")
+}
+
+func runtimeIPCTestTempDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return t.TempDir()
+	}
+	root, err := os.MkdirTemp("/private/tmp", "submux-runtimeipc-")
+	if err != nil {
+		t.Fatalf("create short macOS test directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove short macOS test directory: %v", err)
+		}
+	})
+	return root
 }

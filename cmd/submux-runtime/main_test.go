@@ -1060,5 +1060,22 @@ func commandTestEndpoint(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		return fmt.Sprintf(`\\.\pipe\submux-runtime-test-%d`, time.Now().UnixNano())
 	}
-	return filepath.Join(t.TempDir(), "runtime.sock")
+	return filepath.Join(commandTestTempDir(t), "runtime.sock")
+}
+
+func commandTestTempDir(t *testing.T) string {
+	t.Helper()
+	if runtime.GOOS != "darwin" {
+		return t.TempDir()
+	}
+	root, err := os.MkdirTemp("/private/tmp", "submux-runtime-cli-")
+	if err != nil {
+		t.Fatalf("create short macOS test directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove short macOS test directory: %v", err)
+		}
+	})
+	return root
 }

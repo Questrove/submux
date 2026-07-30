@@ -24,7 +24,7 @@ func TestDialDoesNotCreateRuntimeDirectory(t *testing.T) {
 }
 
 func TestListenDoesNotRemoveActiveSocket(t *testing.T) {
-	endpoint := filepath.Join(t.TempDir(), "runtime.sock")
+	endpoint := filepath.Join(runtimeIPCTestTempDir(t), "runtime.sock")
 	active, err := net.Listen("unix", endpoint)
 	if err != nil {
 		t.Fatalf("listen on active test Socket: %v", err)
