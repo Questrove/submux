@@ -59,3 +59,20 @@ func TestWindowsAuthorizerAcceptsOnlyExpectedLocalIdentities(t *testing.T) {
 		})
 	}
 }
+
+func TestWindowsAuthorizerAcceptsNewlyPersistedOperatorWithoutRelogin(t *testing.T) {
+	original := windowsPersistedOperatorMember
+	windowsPersistedOperatorMember = func(sid string) bool {
+		return sid == "S-1-5-21-4000"
+	}
+	t.Cleanup(func() {
+		windowsPersistedOperatorMember = original
+	})
+	err := authorizeCurrentPeer(
+		runtimeapi.PeerIdentity{Platform: "windows", SID: "S-1-5-80-1"},
+		runtimeapi.PeerIdentity{Platform: "windows", SID: "S-1-5-21-4000"},
+	)
+	if err != nil {
+		t.Fatalf("newly persisted operator authorization: %v", err)
+	}
+}

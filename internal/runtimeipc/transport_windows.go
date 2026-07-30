@@ -129,6 +129,13 @@ func windowsManagementPipeDescriptor(
 			"(A;;GA;;;"+serviceSID.String()+")",
 			"(A;;GA;;;"+operatorSID.String()+")",
 		)
+		memberSIDs, err := windowsOperatorMemberSIDs()
+		if err != nil {
+			return "", err
+		}
+		for _, memberSID := range memberSIDs {
+			aces = append(aces, "(A;;GA;;;"+memberSID+")")
+		}
 	} else {
 		aces = append(aces, "(A;;GA;;;"+identity.SID+")")
 	}

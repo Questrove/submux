@@ -27,6 +27,9 @@ func authorizeCurrentPeer(current, peer runtimeapi.PeerIdentity) error {
 		containsSID(peer.GroupSIDs, operatorSID.String()) {
 		return nil
 	}
+	if windowsPersistedOperatorMember(peer.SID) {
+		return nil
+	}
 	return errors.New("Runtime peer SID is not authorized")
 }
 

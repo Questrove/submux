@@ -44,6 +44,9 @@ import (
 )
 
 func main() {
+	if handled, code := runPlatformService(os.Args[1:], os.Stderr); handled {
+		os.Exit(code)
+	}
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
@@ -151,6 +154,13 @@ func interactiveTerminal(stdin, stdout *os.File) bool {
 }
 
 func runServe(arguments []string, stderr io.Writer) int {
+	return runServeContext(context.Background(), arguments, stderr)
+}
+
+func runServeContext(parent context.Context, arguments []string, stderr io.Writer) int {
+	if parent == nil {
+		parent = context.Background()
+	}
 	defaults := runtimepaths.Current()
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -354,7 +364,7 @@ func runServe(arguments []string, stderr io.Writer) int {
 		return 1
 	}
 
-	contextWithSignal, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	contextWithSignal, stopSignal := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stopSignal()
 	serviceContext, stop := context.WithCancel(contextWithSignal)
 	defer stop()

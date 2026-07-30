@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util"
+     RequiredVersion="6.0">
+  <Package
+      Name="Submux Runtime"
+      Manufacturer="Questrove"
+      Version="$(var.ProductVersion)"
+      UpgradeCode="{F788A287-8F79-469B-9281-CC5B449145D2}"
+      ProductCode="*"
+      Scope="perMachine"
+      InstallerVersion="500"
+      Language="1033"
+      Codepage="65001">
+    <SummaryInformation Description="Local-only Submux Runtime ($(var.PackageKind))"
+                        Manufacturer="Questrove" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <Property Id="ALLOW_DOWNGRADE" Secure="yes" />
+    <Property Id="DATABASE_COMPATIBLE" Secure="yes" />
+    <Property Id="AUTHORIZE_CURRENT_USER" Secure="yes" />
+    <Property Id="NEWERPRODUCTFOUND" Secure="yes" />
+    <Property Id="SAMEVERSIONFOUND" Secure="yes" />
+    <Property Id="OLDERVERSIONFOUND" Secure="yes" />
+    <Property Id="WINDOWSBUILDNUMBER" Secure="yes">
+      <RegistrySearch Id="WindowsBuildNumberSearch"
+                      Root="HKLM"
+                      Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber"
+                      Type="raw" />
+    </Property>
+
+    <Launch Condition="Installed OR (WINDOWSBUILDNUMBER &gt;= 17763)"
+            Message="Submux Runtime requires Windows Server 2019 or a supported Windows 10/11 release." />
+    <Launch Condition="NOT SAMEVERSIONFOUND OR Installed"
+            Message="The same Runtime version is already installed. Use Repair on the installed product." />
+    <Launch Condition="NOT NEWERPRODUCTFOUND OR (ALLOW_DOWNGRADE = 1 AND DATABASE_COMPATIBLE = 1)"
+            Message="Downgrade is blocked. An explicit downgrade also requires confirmed database compatibility." />
+
+    <Upgrade Id="{F788A287-8F79-469B-9281-CC5B449145D2}">
+      <UpgradeVersion Minimum="$(var.ProductVersion)"
+                      IncludeMinimum="no"
+                      Property="NEWERPRODUCTFOUND" />
+      <UpgradeVersion Minimum="$(var.ProductVersion)"
+                      IncludeMinimum="yes"
+                      Maximum="$(var.ProductVersion)"
+                      IncludeMaximum="yes"
+                      Property="SAMEVERSIONFOUND"
+                      OnlyDetect="yes" />
+      <UpgradeVersion Minimum="0.0.0"
+                      IncludeMinimum="yes"
+                      Maximum="$(var.ProductVersion)"
+                      IncludeMaximum="no"
+                      Property="OLDERVERSIONFOUND" />
+    </Upgrade>
+    <InstallExecuteSequence>
+      <RemoveExistingProducts After="InstallInitialize" />
+    </InstallExecuteSequence>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Submux Runtime">
+        <Directory Id="LICENSEFOLDER" Name="licenses" />
+        <?if "$(var.PackageKind)" = "offline" ?>
+          <Directory Id="OFFLINEFOLDER" Name="offline">
+            <Directory Id="TUFFOLDER" Name="tuf" />
+          </Directory>
+        <?endif?>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="STATEDIR" Name="SubmuxRuntime" />
+    </StandardDirectory>
+
+    <Component Id="RuntimeServiceComponent"
+               Directory="INSTALLFOLDER"
+               Guid="{8C78FA16-6A6D-46DE-A497-8D57E5A055F3}">
+      <File Id="RuntimeExecutable"
+            Source="$(var.RuntimePath)"
+            Name="submux-runtime.exe"
+            KeyPath="yes" />
+      <ServiceInstall Id="RuntimeServiceInstall"
+                      Name="SubmuxRuntime"
+                      DisplayName="Submux Runtime"
+                      Description="Local-only Submux Runtime management service"
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Account="NT SERVICE\SubmuxRuntime"
+                      Arguments="serve">
+        <ServiceDependency Id="SubmuxRuntimeNet" />
+        <ServiceConfig ServiceSid="unrestricted"
+                       OnInstall="yes"
+                       OnReinstall="yes" />
+        <util:ServiceConfig FirstFailureActionType="restart"
+                            SecondFailureActionType="restart"
+                            ThirdFailureActionType="none"
+                            ResetPeriodInDays="1"
+                            RestartServiceDelayInSeconds="5" />
+      </ServiceInstall>
+      <ServiceControl Id="RuntimeServiceControl"
+                      Name="SubmuxRuntime"
+                      Start="install"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+    </Component>
+
+    <Component Id="NetworkServiceComponent"
+               Directory="INSTALLFOLDER"
+               Guid="{FC561446-9200-41B1-893A-68CCAF039CCD}">
+      <File Id="NetworkExecutable"
+            Source="$(var.NetworkPath)"
+            Name="submux-runtime-net.exe"
+            KeyPath="yes" />
+      <ServiceInstall Id="NetworkServiceInstall"
+                      Name="SubmuxRuntimeNet"
+                      DisplayName="Submux Runtime network helper"
+                      Description="Privileged local network helper for Submux Runtime"
+                      Type="ownProcess"
+                      Start="auto"
+                      ErrorControl="normal"
+                      Account="LocalSystem">
+        <ServiceConfig ServiceSid="unrestricted"
+                       OnInstall="yes"
+                       OnReinstall="yes" />
+        <util:ServiceConfig FirstFailureActionType="restart"
+                            SecondFailureActionType="restart"
+                            ThirdFailureActionType="none"
+                            ResetPeriodInDays="1"
+                            RestartServiceDelayInSeconds="5" />
+      </ServiceInstall>
+      <ServiceControl Id="NetworkServiceControl"
+                      Name="SubmuxRuntimeNet"
+                      Start="install"
+                      Stop="both"
+                      Remove="uninstall"
+                      Wait="yes" />
+    </Component>
+
+    <Component Id="GuiComponent"
+               Directory="INSTALLFOLDER"
+               Guid="{B9007338-C20D-44F5-98B1-B8FE0B15AE84}">
+      <File Id="GuiExecutable"
+            Source="$(var.GuiPath)"
+            Name="submux-runtime-gui.exe"
+            KeyPath="yes" />
+    </Component>
+    <Component Id="ReleaseEvidenceComponent"
+               Directory="INSTALLFOLDER"
+               Guid="{C45EA9A6-D966-474B-9F72-D4413321290A}">
+      <File Id="SbomFile" Source="$(var.SbomPath)" Name="SBOM.spdx.json" />
+      <File Id="ManifestFile" Source="$(var.ManifestPath)" Name="ARTIFACT-MANIFEST.sha256" />
+      <RegistryValue Root="HKLM"
+                     Key="Software\Questrove\SubmuxRuntime"
+                     Name="InstallRoot"
+                     Value="[INSTALLFOLDER]"
+                     Type="string"
+                     KeyPath="yes" />
+    </Component>
+    <Component Id="LicenseComponent"
+               Directory="LICENSEFOLDER"
+               Guid="{D5EF262C-D4DD-48C6-B464-8B09DDC00451}">
+      <File Id="NoticeFile" Source="$(var.LicensePath)" Name="NOTICE.txt" KeyPath="yes" />
+    </Component>
+
+    <Component Id="StateComponent"
+               Directory="STATEDIR"
+               Guid="{F47C29E3-3251-4BCE-91A2-2D1FE0A45F79}"
+               Permanent="yes">
+      <CreateFolder>
+        <PermissionEx Sddl="O:BAG:SYD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;S-1-5-80-823352364-334017306-3320853632-2284054525-1749174466)" />
+      </CreateFolder>
+      <RegistryValue Root="HKLM"
+                     Key="Software\Questrove\SubmuxRuntime"
+                     Name="StateRoot"
+                     Value="[STATEDIR]"
+                     Type="string"
+                     KeyPath="yes" />
+    </Component>
+
+    <Component Id="OperatorGroupComponent"
+               Directory="INSTALLFOLDER"
+               Guid="{F6A69749-B95E-410D-A4F9-F1FE57C1FC8B}">
+      <RegistryValue Root="HKLM"
+                     Key="Software\Questrove\SubmuxRuntime"
+                     Name="OperatorGroup"
+                     Value="Submux Runtime Operators"
+                     Type="string"
+                     KeyPath="yes" />
+      <util:Group Id="RuntimeOperators"
+                  Name="Submux Runtime Operators"
+                  Domain="[ComputerName]"
+                  Comment="Users allowed to manage the local Submux Runtime through its Named Pipe"
+                  CreateGroup="yes"
+                  FailIfExists="yes"
+                  UpdateIfExists="no"
+                  RemoveOnUninstall="yes" />
+    </Component>
+    <Component Id="DesktopAuthorizationComponent"
+               Directory="INSTALLFOLDER"
+               Guid="{8394FDFD-6F8F-41B8-85A9-FF92D51D1C42}"
+               Condition="AUTHORIZE_CURRENT_USER = 1">
+      <RegistryValue Root="HKLM"
+                     Key="Software\Questrove\SubmuxRuntime"
+                     Name="DesktopAuthorization"
+                     Value="[LogonUser]"
+                     Type="string"
+                     KeyPath="yes" />
+      <util:User Id="AuthorizedDesktopUser"
+                 Name="[LogonUser]"
+                 Domain="[ComputerName]"
+                 CreateUser="no"
+                 UpdateIfExists="yes"
+                 RemoveOnUninstall="no"
+                 Vital="yes">
+        <util:GroupRef Id="RuntimeOperators" />
+      </util:User>
+    </Component>
+
+    <?if "$(var.PackageKind)" = "offline" ?>
+      <Component Id="OfflineMihomoComponent"
+                 Directory="OFFLINEFOLDER"
+                 Guid="{B24DFA4E-0C46-47CA-80D1-EAEE4DDB5321}">
+        <File Id="OfflineMihomo"
+              Source="$(var.MihomoPath)"
+              Name="mihomo.exe"
+              KeyPath="yes" />
+      </Component>
+      <Component Id="OfflineTufComponent"
+                 Directory="TUFFOLDER"
+                 Guid="{ED9096CD-A445-4C75-B129-A174096A45DF}">
+        <File Id="TufRoot" Source="$(var.TufRootPath)" Name="root.json" KeyPath="yes" />
+        <File Id="TufTimestamp" Source="$(var.TufTimestampPath)" Name="timestamp.json" />
+        <File Id="TufSnapshot" Source="$(var.TufSnapshotPath)" Name="snapshot.json" />
+        <File Id="TufTargets" Source="$(var.TufTargetsPath)" Name="targets.json" />
+      </Component>
+    <?endif?>
+
+    <Feature Id="Complete" Title="Submux Runtime" Level="1">
+      <ComponentRef Id="RuntimeServiceComponent" />
+      <ComponentRef Id="NetworkServiceComponent" />
+      <ComponentRef Id="GuiComponent" />
+      <ComponentRef Id="ReleaseEvidenceComponent" />
+      <ComponentRef Id="LicenseComponent" />
+      <ComponentRef Id="StateComponent" />
+      <ComponentRef Id="OperatorGroupComponent" />
+      <ComponentRef Id="DesktopAuthorizationComponent" />
+      <?if "$(var.PackageKind)" = "offline" ?>
+        <ComponentRef Id="OfflineMihomoComponent" />
+        <ComponentRef Id="OfflineTufComponent" />
+      <?endif?>
+    </Feature>
+  </Package>
+</Wix>
