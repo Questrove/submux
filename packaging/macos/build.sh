@@ -68,6 +68,9 @@ for input in \
   "license:$license"; do
   require_regular "${input%%:*}" "${input#*:}"
 done
+for tool in jq lipo pkgbuild productbuild plutil shasum; do
+  command -v "$tool" >/dev/null || fail "$tool is required"
+done
 if [[ $kind == offline ]]; then
   require_regular "Mihomo amd64" "$mihomo_amd64"
   require_regular "Mihomo arm64" "$mihomo_arm64"
@@ -80,15 +83,17 @@ if [[ $kind == offline ]]; then
   fi
   for metadata in root.json timestamp.json snapshot.json targets.json; do
     require_regular "TUF $metadata" "$tuf_dir/$metadata"
-    plutil -lint "$tuf_dir/$metadata" >/dev/null
+    jq -e '
+      type == "object" and
+      (.signed | type == "object") and
+      (.signatures | type == "array")
+    ' "$tuf_dir/$metadata" >/dev/null ||
+      fail "TUF $metadata must contain signed metadata and signatures"
   done
 elif [[ -n $mihomo_amd64 || -n $mihomo_arm64 || -n $mihomo_provenance || -n $mihomo_source || -n $mihomo_license || -n $tuf_dir ]]; then
   fail "online PKG files must not contain Mihomo, its source/provenance, or offline TUF metadata"
 fi
 
-for tool in lipo pkgbuild productbuild plutil shasum; do
-  command -v "$tool" >/dev/null || fail "$tool is required"
-done
 verify_arch() {
   local architecture=$1 binary=$2
   lipo "$binary" -verify_arch "$architecture" ||

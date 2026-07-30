@@ -245,3 +245,30 @@ jobs:
             "$RUNNER_TEMP/runtime-pkg/submux-runtime_0.0.0_universal_online_unsigned.pkg" \
             "$RUNNER_TEMP/runtime-pkg-expanded"
           test -f "$RUNNER_TEMP/runtime-pkg-expanded/Distribution"
+          mkdir -p "$RUNNER_TEMP/runtime-tuf"
+          for metadata in root.json timestamp.json snapshot.json targets.json; do
+            printf '%s\n' '{"signed":{},"signatures":[]}' >"$RUNNER_TEMP/runtime-tuf/$metadata"
+          done
+          tar -czf "$RUNNER_TEMP/mihomo-source.tar.gz" LICENSE
+          packaging/macos/build.sh \
+            --version v0.0.0 \
+            --kind offline \
+            --runtime-amd64 ./submux-runtime-amd64 \
+            --runtime-arm64 ./submux-runtime-arm64 \
+            --runtime-net-amd64 ./submux-runtime-net-amd64 \
+            --runtime-net-arm64 ./submux-runtime-net-arm64 \
+            --gui-amd64 ./desktop/submux-runtime-gui/src-tauri/target/x86_64-apple-darwin/release/submux-runtime-gui \
+            --gui-arm64 ./desktop/submux-runtime-gui/src-tauri/target/aarch64-apple-darwin/release/submux-runtime-gui \
+            --sbom ./packaging/testdata/minimal.spdx.json \
+            --license ./packaging/testdata/licenses/NOTICE.txt \
+            --mihomo-amd64 ./submux-runtime-amd64 \
+            --mihomo-arm64 ./submux-runtime-arm64 \
+            --mihomo-provenance ./packaging/testdata/minimal.spdx.json \
+            --mihomo-source "$RUNNER_TEMP/mihomo-source.tar.gz" \
+            --mihomo-license ./packaging/testdata/licenses/NOTICE.txt \
+            --tuf "$RUNNER_TEMP/runtime-tuf" \
+            --output "$RUNNER_TEMP/runtime-pkg"
+          pkgutil --expand-full \
+            "$RUNNER_TEMP/runtime-pkg/submux-runtime_0.0.0_universal_offline_unsigned.pkg" \
+            "$RUNNER_TEMP/runtime-pkg-offline-expanded"
+          test -f "$RUNNER_TEMP/runtime-pkg-offline-expanded/Distribution"
