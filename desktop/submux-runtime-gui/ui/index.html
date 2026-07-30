@@ -41,6 +41,37 @@
       <section class="panel">
         <div class="panel-heading">
           <div>
+            <p class="eyebrow">RUNTIME PRODUCT</p>
+            <h2>整套产品更新与回滚</h2>
+          </div>
+          <span id="product-version" class="badge">正在读取</span>
+        </div>
+        <p class="notice">
+          在线检查只读取稳定频道的 TUF 元数据，不会预下载程序。安装会先恢复直连，停止 Mihomo 和相关服务，
+          再替换 Runtime、特权网络程序与 GUI；失败时恢复旧程序、数据库和原运行状态。
+        </p>
+        <div class="form-grid">
+          <label>
+            精确稳定版本（可选）
+            <input id="product-update-version" placeholder="v1.1.0" />
+          </label>
+          <label>
+            完整离线 TUF 包（可选，路径只由 GUI 读取）
+            <input id="product-update-bundle" placeholder="留空则在线检查" />
+          </label>
+        </div>
+        <pre id="product-update-preview">尚未检查产品更新。</pre>
+        <div class="actions">
+          <button id="preview-product-update" class="secondary">检查并验证产品更新</button>
+          <button id="install-product-update" disabled>明确确认并安装</button>
+          <button id="rollback-product" class="danger" disabled>明确确认回滚上一版</button>
+        </div>
+        <p class="muted">配置来源不能改变更新地址，也不能触发更新。在线与离线包使用相同的 TUF 根和验签器。</p>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div>
             <p class="eyebrow">PORTABLE STATE</p>
             <h2>完整备份与恢复</h2>
           </div>

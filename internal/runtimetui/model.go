@@ -42,6 +42,10 @@ type MihomoUpdateClient interface {
 	PreviewMihomoUpdate(context.Context, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
 }
 
+type ProductUpdateClient interface {
+	PreviewProductUpdate(context.Context, runtimeapi.ProductUpdatePreviewRequest) (runtimeapi.ProductUpdatePlan, error)
+}
+
 type BackupClient interface {
 	PreviewBackup(context.Context, runtimeapi.BackupPreviewRequest) (runtimeapi.BackupPreview, error)
 	ExportBackup(context.Context, runtimeapi.BackupExportRequest) (runtimeapi.BackupArchive, error)
@@ -62,6 +66,7 @@ type Model struct {
 	preview           runtimeapi.CandidatePreview
 	networkPreview    runtimeapi.NetworkPreview
 	mihomoUpdate      runtimeapi.MihomoUpdatePlan
+	productUpdate     runtimeapi.ProductUpdatePlan
 	networkEditorMode string
 	lastOperation     runtimeapi.Operation
 	verification      runtimeapi.ProxyVerification
@@ -86,6 +91,7 @@ const (
 	editorModeNetwork        = "network"
 	editorModeBackupExport   = "backup_export"
 	editorModeBackupRestore  = "backup_restore"
+	editorModeProductImport  = "product_import"
 )
 
 type resourceDraft struct {
@@ -142,6 +148,10 @@ type networkPreviewMsg struct {
 
 type mihomoUpdateMsg struct {
 	preview runtimeapi.MihomoUpdatePlan
+}
+
+type productUpdateMsg struct {
+	preview runtimeapi.ProductUpdatePlan
 }
 
 type backupPreviewMsg struct {
@@ -252,6 +262,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if operationTerminal(message.operation.State) {
 			return m, m.observeCmd()
 		}
+		return m, m.waitCmd(message.operation.ID)
 	case verificationMsg:
 		m.verification = message.verification
 		m.busy = false
@@ -306,6 +317,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.sensitiveConfirm = ""
 		m.status = fmt.Sprintf("Mihomo %s 更新计划已验证；再按 U 查看确认提示", message.preview.Version)
+	case productUpdateMsg:
+		m.productUpdate = message.preview
+		m.busy = false
+		m.editing = false
+		m.err = nil
+		m.sensitiveConfirm = ""
+		m.editor.Blur()
+		m.status = fmt.Sprintf("Runtime %s 产品更新计划已验证；再按 P 查看确认提示", message.preview.Version)
 	case backupPreviewMsg:
 		m.backupPreview = message.preview
 		m.busy = false
@@ -392,6 +411,17 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.status = "正在读取、上传并检查备份…"
 					return m, m.previewBackupRestoreCmd(client, strings.TrimSpace(string(body)))
+				}
+				if m.editorMode == editorModeProductImport {
+					client, ok := m.client.(ProductUpdateClient)
+					if !ok {
+						m.busy = false
+						m.err = errors.New("当前 TUI 客户端不支持 Runtime 产品更新")
+						m.status = m.err.Error()
+						return m, nil
+					}
+					m.status = "正在读取、上传并验证离线产品更新包…"
+					return m, m.previewOfflineProductUpdateCmd(client, strings.TrimSpace(string(body)))
 				}
 				if m.editorMode == editorModeNetwork {
 					var request runtimeapi.NetworkPreviewRequest
@@ -735,6 +765,84 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "正在提交已确认的 Mihomo 回滚…"
 			return m, m.executeCmd(runtimeapi.Action{
 				Kind:   runtimeapi.ActionRollbackMihomo,
+				Params: runtimeapi.ActionParams{Confirm: true},
+			})
+		case "P":
+			if m.productUpdate.PlanID == "" ||
+				!m.productUpdate.ExpiresAt.IsZero() && !time.Now().Before(m.productUpdate.ExpiresAt) {
+				client, ok := m.client.(ProductUpdateClient)
+				if !ok {
+					m.err = errors.New("当前 TUI 客户端不支持 Runtime 产品更新")
+					m.status = m.err.Error()
+					return m, nil
+				}
+				m.busy = true
+				m.productUpdate = runtimeapi.ProductUpdatePlan{}
+				m.status = "正在通过 TUF 检查 Runtime 稳定产品更新；不会预下载程序…"
+				return m, m.previewProductUpdateCmd(client)
+			}
+			confirmation := "product-update:" + m.productUpdate.PlanID
+			if !m.productUpdate.Installable {
+				m.err = errors.New("当前平台安装器不可用；已验证计划只能查看，不能安装")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			if m.sensitiveConfirm != confirmation {
+				m.sensitiveConfirm = confirmation
+				m.err = nil
+				m.status = fmt.Sprintf(
+					"将把 Runtime %s 更新为 %s；网络会先恢复直连，随后停止相关服务。再按一次 P 明确确认。",
+					valueOr(m.productUpdate.CurrentVersion, "未知"),
+					m.productUpdate.Version,
+				)
+				return m, nil
+			}
+			m.sensitiveConfirm = ""
+			m.busy = true
+			m.status = "正在提交已确认的 Runtime 产品更新…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind: runtimeapi.ActionUpdateProduct,
+				Params: runtimeapi.ActionParams{
+					PlanID:  m.productUpdate.PlanID,
+					Trust:   runtimeapi.ProductUpdateTrustTUF,
+					Confirm: true,
+				},
+			})
+		case "I":
+			if _, ok := m.client.(ProductUpdateClient); !ok {
+				m.err = errors.New("当前 TUI 客户端不支持 Runtime 产品更新")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.productUpdate = runtimeapi.ProductUpdatePlan{}
+			m.sensitiveConfirm = ""
+			m.editing = true
+			m.editorMode = editorModeProductImport
+			m.err = nil
+			m.editor.SetValue("")
+			m.status = "输入离线产品 TUF 包路径后按 Ctrl+S 验证；文件路径不会发送给 Runtime"
+			return m, m.editor.Focus()
+		case "O":
+			if m.snapshot.Updates.RuntimePreviousVersion == "" {
+				m.err = errors.New("当前没有可回滚的上一版 Runtime 产品")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			if m.sensitiveConfirm != "product-rollback" {
+				m.sensitiveConfirm = "product-rollback"
+				m.err = nil
+				m.status = fmt.Sprintf(
+					"将从 Runtime %s 回滚到 %s；网络会先恢复直连。再按一次 O 明确确认。",
+					valueOr(m.snapshot.Updates.RuntimeCurrentVersion, "未知"),
+					m.snapshot.Updates.RuntimePreviousVersion,
+				)
+				return m, nil
+			}
+			m.sensitiveConfirm = ""
+			m.busy = true
+			m.status = "正在提交已确认的 Runtime 产品回滚…"
+			return m, m.executeCmd(runtimeapi.Action{
+				Kind:   runtimeapi.ActionRollbackProduct,
 				Params: runtimeapi.ActionParams{Confirm: true},
 			})
 		case "b", "B":
@@ -1096,41 +1204,65 @@ func (m Model) View() tea.View {
 		if m.mihomoUpdate.Warning != "" {
 			lines = append(lines, warnStyle.Render(m.mihomoUpdate.Warning))
 		}
-		if len(m.backupPreview.Items) > 0 {
-			title := "脱敏备份清单预览"
-			if m.backupPreview.IncludeSecrets {
-				title = "完整备份预览"
+	}
+	if m.productUpdate.PlanID != "" {
+		lines = append(lines,
+			"",
+			labelStyle.Render("Runtime 产品更新计划"),
+			fmt.Sprintf(
+				"%s → %s · %s/%s · %s",
+				valueOr(m.productUpdate.CurrentVersion, "未知"),
+				m.productUpdate.Version,
+				m.productUpdate.Platform,
+				m.productUpdate.Arch,
+				m.productUpdate.PlanID,
+			),
+			fmt.Sprintf(
+				"数据库 %d → %d · IPC %d（允许 %d-%d）",
+				m.productUpdate.Migration.CurrentSchema,
+				m.productUpdate.Migration.TargetSchema,
+				m.productUpdate.Migration.CurrentProtocol,
+				m.productUpdate.Migration.ProtocolMin,
+				m.productUpdate.Migration.ProtocolMax,
+			),
+			m.productUpdate.NetworkInterruption,
+			m.productUpdate.ReleaseNotes,
+		)
+	}
+	if len(m.backupPreview.Items) > 0 {
+		title := "脱敏备份清单预览"
+		if m.backupPreview.IncludeSecrets {
+			title = "完整备份预览"
+		}
+		lines = append(lines, "", labelStyle.Render(title))
+		for _, item := range m.backupPreview.Items {
+			if item.Included {
+				lines = append(lines, fmt.Sprintf("%s · %d 项 · %d 字节", item.Name, item.Count, item.Size))
 			}
-			lines = append(lines, "", labelStyle.Render(title))
-			for _, item := range m.backupPreview.Items {
-				if item.Included {
-					lines = append(lines, fmt.Sprintf("%s · %d 项 · %d 字节", item.Name, item.Count, item.Size))
-				}
-			}
-			lines = append(lines, warnStyle.Render(m.backupPreview.Warning))
 		}
-		if m.backupFile != "" {
-			lines = append(lines, "", okStyle.Render(fmt.Sprintf(
-				"备份已保存：%s · %d 字节 · %s",
-				m.backupFile,
-				m.backupArchive.Size,
-				shortDigest(m.backupArchive.SHA256),
-			)))
-		}
-		if m.backupRestore.ContentID != "" {
-			lines = append(lines,
-				"",
-				labelStyle.Render("整体恢复预览"),
-				fmt.Sprintf(
-					"%d 个来源 · %d 个托管资源 · %d 份近期配置",
-					m.backupRestore.SourceCount,
-					m.backupRestore.ManagedResourceCount,
-					m.backupRestore.RecentConfigurationCount,
-				),
-				warnStyle.Render("待重新确认："+strings.Join(m.backupRestore.PendingSettings, "、")),
-				warnStyle.Render(m.backupRestore.Warning),
-			)
-		}
+		lines = append(lines, warnStyle.Render(m.backupPreview.Warning))
+	}
+	if m.backupFile != "" {
+		lines = append(lines, "", okStyle.Render(fmt.Sprintf(
+			"备份已保存：%s · %d 字节 · %s",
+			m.backupFile,
+			m.backupArchive.Size,
+			shortDigest(m.backupArchive.SHA256),
+		)))
+	}
+	if m.backupRestore.ContentID != "" {
+		lines = append(lines,
+			"",
+			labelStyle.Render("整体恢复预览"),
+			fmt.Sprintf(
+				"%d 个来源 · %d 个托管资源 · %d 份近期配置",
+				m.backupRestore.SourceCount,
+				m.backupRestore.ManagedResourceCount,
+				m.backupRestore.RecentConfigurationCount,
+			),
+			warnStyle.Render("待重新确认："+strings.Join(m.backupRestore.PendingSettings, "、")),
+			warnStyle.Render(m.backupRestore.Warning),
+		)
 	}
 	if m.revealedURL != "" {
 		lines = append(lines, "", warnStyle.Render("来源原始地址："+m.revealedURL))
@@ -1204,7 +1336,7 @@ func (m Model) View() tea.View {
 		renderStatus(m.status, m.err, m.busy),
 		"",
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
-		mutedStyle.Render("b 预览/创建脱敏清单 · B 预览/创建完整备份 · L 检查/确认整体恢复 · U 检查/确认安装 Mihomo 更新 · R 确认回滚 Mihomo · Ctrl+T 编辑/预览普通 TUN · Ctrl+L 编辑/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		mutedStyle.Render("P 检查/确认安装 Runtime 产品更新 · I 验证离线产品包 · O 确认回滚 Runtime 产品 · U 检查/确认安装 Mihomo 更新 · R 确认回滚 Mihomo · b 预览/创建脱敏清单 · B 预览/创建完整备份 · L 检查/确认整体恢复 · Ctrl+T 编辑/预览普通 TUN · Ctrl+L 编辑/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -1228,6 +1360,39 @@ func (m Model) previewMihomoUpdateCmd(client MihomoUpdateClient) tea.Cmd {
 			return errMsg{err: err}
 		}
 		return mihomoUpdateMsg{preview: preview}
+	}
+}
+
+func (m Model) previewProductUpdateCmd(client ProductUpdateClient) tea.Cmd {
+	return func() tea.Msg {
+		preview, err := client.PreviewProductUpdate(m.ctx, runtimeapi.ProductUpdatePreviewRequest{
+			Source: runtimeapi.ProductUpdateSourceOnlineTUF,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return productUpdateMsg{preview: preview}
+	}
+}
+
+func (m Model) previewOfflineProductUpdateCmd(client ProductUpdateClient, path string) tea.Cmd {
+	return func() tea.Msg {
+		body, err := runtimebackupfile.Read(path, runtimeapi.RuntimeProductUpdateMaxBytes)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		content, err := m.client.UploadImport(m.ctx, runtimeapi.ProductUpdateBundleContentType, body)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		preview, err := client.PreviewProductUpdate(m.ctx, runtimeapi.ProductUpdatePreviewRequest{
+			Source:    runtimeapi.ProductUpdateSourceOfflineTUF,
+			ContentID: content.ID,
+		})
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return productUpdateMsg{preview: preview}
 	}
 }
 

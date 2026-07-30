@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"submux/internal/mihomo"
+	"submux/internal/productupdate"
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimebackup"
 	"submux/internal/runtimecore"
@@ -37,6 +38,8 @@ type MihomoExecutor struct {
 	Network         FailOpenController
 	TUN             TUNController
 	Updates         *runtimeupdate.Manager
+	ProductUpdates  *productupdate.Manager
+	ProductNetwork  NetworkService
 	Backups         *runtimebackup.Service
 	Now             func() time.Time
 
@@ -165,6 +168,22 @@ func (e *MihomoExecutor) Execute(
 			return nil, errors.New("Mihomo update manager is unavailable")
 		}
 		return e.Updates.Rollback(ctx, operation, runtimeupdate.Reporter(report))
+	case runtimeapi.ActionCheckProduct:
+		if e.ProductUpdates == nil {
+			return nil, errors.New("Runtime product update manager is unavailable")
+		}
+		result, err := e.ProductUpdates.CheckStable(ctx)
+		return &result, err
+	case runtimeapi.ActionUpdateProduct:
+		if e.ProductUpdates == nil {
+			return nil, errors.New("Runtime product update manager is unavailable")
+		}
+		return e.ProductUpdates.Activate(ctx, operation, e, productupdate.Reporter(report))
+	case runtimeapi.ActionRollbackProduct:
+		if e.ProductUpdates == nil {
+			return nil, errors.New("Runtime product update manager is unavailable")
+		}
+		return e.ProductUpdates.Rollback(ctx, operation, e, productupdate.Reporter(report))
 	case runtimeapi.ActionRestoreBackup:
 		return e.restoreBackup(ctx, operation, report)
 	case runtimeapi.ActionAddManagedResource:
@@ -1101,10 +1120,179 @@ func runtimeFieldOrigins(fields []mihomo.CandidateFieldOrigin) []runtimeapi.Cand
 }
 
 func (e *MihomoExecutor) DueActions(now time.Time) ([]runtimeapi.Action, error) {
-	if e == nil || e.Sources == nil {
+	if e == nil {
 		return nil, nil
 	}
-	return e.Sources.DueActions(now)
+	var actions []runtimeapi.Action
+	if e.Sources != nil {
+		sourceActions, err := e.Sources.DueActions(now)
+		if err != nil {
+			return nil, err
+		}
+		actions = append(actions, sourceActions...)
+	}
+	if e.ProductUpdates != nil {
+		due, err := e.ProductUpdates.Due(now)
+		if err != nil {
+			return nil, err
+		}
+		if due {
+			actions = append(actions, runtimeapi.Action{Kind: runtimeapi.ActionCheckProduct})
+		}
+	}
+	return actions, nil
+}
+
+func (e *MihomoExecutor) CaptureExpectedState(ctx context.Context) (productupdate.ExpectedRuntimeState, error) {
+	if e == nil || e.State == nil || e.Process == nil {
+		return productupdate.ExpectedRuntimeState{}, errors.New("Runtime product safety controller is incomplete")
+	}
+	running, err := e.Process.IsRunning(ctx)
+	if err != nil {
+		return productupdate.ExpectedRuntimeState{}, err
+	}
+	snapshot, err := e.State.Observe("", e.now())
+	if err != nil {
+		return productupdate.ExpectedRuntimeState{}, err
+	}
+	expected := productupdate.ExpectedRuntimeState{
+		MihomoRunning: running,
+		RunMode:       snapshot.RunMode,
+		Network: runtimeapi.NetworkStatus{
+			Available: e.TUN != nil,
+			Mode:      runtimeapi.RunModeExplicit,
+			State:     runtimeapi.NetworkStateInactive,
+		},
+	}
+	if e.TUN != nil {
+		expected.Network, err = e.TUN.Observe(ctx)
+		if err != nil {
+			return productupdate.ExpectedRuntimeState{}, err
+		}
+		if expected.Network.State == runtimeapi.NetworkStateActive {
+			expected.RunMode = expected.Network.Mode
+		} else {
+			expected.RunMode = runtimeapi.RunModeExplicit
+		}
+	}
+	return expected, nil
+}
+
+func (e *MihomoExecutor) StopForProductUpdate(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report productupdate.Reporter,
+) error {
+	if _, err := e.stop(ctx, operation, StageReporter(report)); err != nil {
+		return err
+	}
+	running, err := e.Process.IsRunning(ctx)
+	if err != nil {
+		return err
+	}
+	if running {
+		return errors.New("Mihomo remained running after Runtime product update shutdown")
+	}
+	if e.TUN != nil {
+		status, err := e.TUN.Observe(ctx)
+		if err != nil {
+			return err
+		}
+		if status.OwnershipID != "" || status.State == runtimeapi.NetworkStateActive {
+			return errors.New("Runtime network ownership remained active after fail-open")
+		}
+	}
+	return nil
+}
+
+func (e *MihomoExecutor) VerifyProductUpdateHealth(
+	ctx context.Context,
+	plan runtimeapi.ProductUpdatePlan,
+	report productupdate.Reporter,
+) error {
+	if err := report("verifying_runtime_database", 82, false); err != nil {
+		return err
+	}
+	schema, err := e.State.SchemaVersion()
+	if err != nil {
+		return err
+	}
+	if plan.Migration.TargetSchema > 0 && schema != plan.Migration.TargetSchema {
+		return fmt.Errorf("Runtime database schema is %d instead of %d", schema, plan.Migration.TargetSchema)
+	}
+	if _, _, err := e.currentCore(); err != nil {
+		return fmt.Errorf("verify installed Mihomo core after Runtime product update: %w", err)
+	}
+	if _, err := e.currentListeners(); err != nil {
+		return fmt.Errorf("verify current Mihomo configuration after Runtime product update: %w", err)
+	}
+	return ctx.Err()
+}
+
+func (e *MihomoExecutor) RestoreExpectedState(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	expected productupdate.ExpectedRuntimeState,
+	report productupdate.Reporter,
+) error {
+	if expected.Network.State == runtimeapi.NetworkStateActive {
+		if !expected.MihomoRunning {
+			return errors.New("saved Runtime state has active network ownership without Mihomo")
+		}
+		if e.ProductNetwork == nil {
+			return errors.New("Runtime network preview service is unavailable while restoring the saved state")
+		}
+		preview, err := e.ProductNetwork.Preview(ctx, networkPreviewRequest(expected.Network))
+		if err != nil {
+			return err
+		}
+		restoreOperation := operation
+		restoreOperation.ID = operation.ID + "_restore"
+		restoreOperation.Action = runtimeapi.Action{
+			Kind: runtimeapi.ActionEnableTUN,
+			Params: runtimeapi.ActionParams{
+				PlanID: preview.PlanID,
+			},
+		}
+		if expected.Network.Mode == runtimeapi.RunModeGateway {
+			restoreOperation.Action.Kind = runtimeapi.ActionEnableGateway
+		}
+		_, err = e.enableNetwork(
+			ctx,
+			restoreOperation,
+			expected.Network.Mode,
+			StageReporter(report),
+		)
+		return err
+	}
+	if expected.MihomoRunning {
+		_, err := e.start(ctx, StageReporter(report))
+		return err
+	}
+	return nil
+}
+
+func networkPreviewRequest(status runtimeapi.NetworkStatus) runtimeapi.NetworkPreviewRequest {
+	request := runtimeapi.NetworkPreviewRequest{
+		Mode:            status.Mode,
+		IPv6Policy:      status.Settings.IPv6Policy,
+		DNSPolicy:       status.Settings.DNSPolicy,
+		CaptureRouteIDs: append([]string(nil), status.Settings.CaptureRouteIDs...),
+	}
+	if settings := status.GatewaySettings; settings != nil {
+		captureTCP := settings.CaptureTCP
+		captureUDP := settings.CaptureUDP
+		request.IPv6Policy = settings.IPv6Policy
+		request.DNSPolicy = settings.DNSPolicy
+		request.CaptureTCP = &captureTCP
+		request.CaptureUDP = &captureUDP
+		request.ProxyHostTraffic = settings.ProxyHostTraffic
+		request.ExcludedRouteIDs = append([]string(nil), settings.ExcludedRouteIDs...)
+		request.UDPExceptions = append([]runtimeapi.GatewayTrafficException(nil), settings.UDPExceptions...)
+		request.DNSDirectCIDRs = append([]string(nil), settings.DNSDirectCIDRs...)
+		request.HostExceptions = append([]runtimeapi.GatewayTrafficException(nil), settings.HostExceptions...)
+	}
+	return request
 }
 
 func (e *MihomoExecutor) start(ctx context.Context, report StageReporter) (*runtimeapi.OperationResult, error) {

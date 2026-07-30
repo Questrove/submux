@@ -150,6 +150,14 @@ Action 使用固定 `kind` 和严格参数结构，不能承载 Shell、argv、�
 - `override.set` 只接受 YAML 的 `content_id`；
 - `backup.restore` 只接受备份的 `content_id` 和 `confirm: true`。
 
+产品更新使用固定的稳定频道和以下 Action：
+
+- `product.check` 不接受参数，只刷新固定 TUF 仓库的元数据，不下载程序；
+- `product.update` 只接受 `product_plan_...`、`trust: "tuf"` 和 `confirm: true`；
+- `product.rollback` 只接受 `confirm: true`。
+
+配置来源、客户端和 Action 都不能提交更新 URL、仓库、频道、平台安装命令或文件路径。
+
 添加和刷新只保存通过校验的不可变来源版本，不切换运行配置，也不启动 Mihomo。`source.apply` 应用当前来源的最近有效版本；Mihomo 原先停止时仍保持停止，原先运行时必须完成健康检查后才提交。
 
 `source.switch` 对远程来源先执行刷新。刷新失败时默认终止；只有 `use_cached: true` 才能使用该目标来源最近一次通过校验的缓存。Runtime 完成目标配置应用和健康检查后才提交当前来源，失败则保留旧当前来源、旧最近可用配置和旧运行状态。操作结果返回 `source_id`、`previous_source_id` 和 `used_cached_source`，三个客户端据此显示相同结果。每个来源使用独立的 Mihomo 数据目录，策略选择、provider 缓存和兼容的 fake-IP 状态不会跨来源混用。
@@ -262,6 +270,16 @@ POST /v1/backups/restore/preview
 POST /v1/imports
 POST /v1/operations
 ```
+
+Runtime 产品更新使用以下接口：
+
+```http
+POST /v1/imports
+POST /v1/product/updates/preview
+POST /v1/operations
+```
+
+在线预览提交 `source: "online_tuf"` 和可选的精确稳定版本，只刷新固定仓库的 TUF 元数据。离线预览先以 `application/vnd.submux.runtime-product-update+zip` 上传有大小和 SHA-256 约束的完整 TUF 包，再提交 `source: "offline_tuf"` 与返回的 `content_id`。两条路径使用同一内置 Root、最高已接受元数据版本和目标校验器。预览返回发行说明、数据库与 IPC 兼容范围、磁盘空间、网络中断说明、计划有效期和是否已持有目标字节；预览本身不安装。计划绑定调用者 OS 身份，消费一次后失效。
 
 预览请求用 `include_secrets` 选择完整明文备份或脱敏清单。脱敏清单不含来源地址、凭据、配置正文、私钥资源或最近可用配置，因此不能恢复。导出还必须设置 `confirm_plaintext: true`；响应使用 `application/vnd.submux.runtime-backup+zip` 字节流，携带大小、SHA-256、创建时间和是否可恢复等元数据，并设置 `Cache-Control: no-store`。客户端负责把字节写入仅当前所有者可访问的新文件，已有文件不能覆盖；输出路径不会进入 IPC。
 

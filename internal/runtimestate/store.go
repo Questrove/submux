@@ -39,7 +39,10 @@ var (
 	currentOperationKey      = []byte("current_operation")
 	currentConfigRevisionKey = []byte("current_config_revision")
 	currentConfigSHA256Key   = []byte("current_config_sha256")
+	schemaVersionKey         = []byte("schema_version")
 )
+
+const SchemaVersion = 1
 
 type Store struct {
 	db       *bbolt.DB
@@ -78,6 +81,28 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *Store) SchemaVersion() (int, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("Runtime state is not open")
+	}
+	var version uint64
+	if err := s.db.View(func(transaction *bbolt.Tx) error {
+		metadata := transaction.Bucket(metadataBucket)
+		if metadata == nil {
+			return errors.New("Runtime metadata is unavailable")
+		}
+		var err error
+		version, err = readUint64(metadata.Get(schemaVersionKey))
+		return err
+	}); err != nil {
+		return 0, err
+	}
+	if version != SchemaVersion {
+		return 0, fmt.Errorf("unsupported Runtime state schema version %d", version)
+	}
+	return int(version), nil
 }
 
 func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi.Snapshot, error) {
@@ -180,6 +205,19 @@ func (s *Store) initialize() error {
 		if metadata.Get(revisionKey) == nil {
 			if err := metadata.Put(revisionKey, encodeUint64(1)); err != nil {
 				return err
+			}
+		}
+		if metadata.Get(schemaVersionKey) == nil {
+			if err := metadata.Put(schemaVersionKey, encodeUint64(SchemaVersion)); err != nil {
+				return err
+			}
+		} else {
+			version, err := readUint64(metadata.Get(schemaVersionKey))
+			if err != nil {
+				return err
+			}
+			if version != SchemaVersion {
+				return fmt.Errorf("unsupported Runtime state schema version %d", version)
 			}
 		}
 		if metadata.Get(eventCursorKey) == nil {

@@ -20,6 +20,7 @@ const MAX_MANAGED_RESOURCE_BYTES: usize = 4 << 20;
 const MAX_ADVANCED_OVERRIDE_BYTES: usize = 1 << 20;
 const MAX_BACKUP_BYTES: usize = 300 << 20;
 const RUNTIME_BACKUP_CONTENT_TYPE: &str = "application/vnd.submux.runtime-backup+zip";
+const PRODUCT_UPDATE_CONTENT_TYPE: &str = "application/vnd.submux.runtime-product-update+zip";
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 300_000;
 
 #[cfg(target_os = "windows")]
@@ -498,6 +499,78 @@ impl RuntimeBridge {
             ));
         }
         self.execute_action_with_params("mihomo.rollback", json!({ "confirm": true }))
+    }
+
+    pub fn preview_product_update(
+        &self,
+        version: &str,
+        bundle_path: &str,
+    ) -> Result<Value, BridgeError> {
+        self.ensure_compatible()?;
+        if !version.is_empty() && !valid_stable_version(version) {
+            return Err(BridgeError::request(
+                "Runtime product update version must use exact vX.Y.Z form",
+            ));
+        }
+        let (source, content_id) = if bundle_path.trim().is_empty() {
+            ("online_tuf", String::new())
+        } else {
+            let body = read_backup(bundle_path)?;
+            let imported = self.upload_content(
+                PRODUCT_UPDATE_CONTENT_TYPE,
+                &body,
+                MAX_BACKUP_BYTES,
+                "Runtime product update bundle",
+            )?;
+            let content_id = imported
+                .get("content_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    BridgeError::service("Runtime product update upload response is invalid")
+                })?
+                .to_string();
+            ("offline_tuf", content_id)
+        };
+        let body = serde_json::to_vec(&json!({
+            "source": source,
+            "version": version,
+            "content_id": content_id,
+        }))
+        .map_err(BridgeError::internal)?;
+        self.call_json(
+            "POST",
+            "/v1/product/updates/preview",
+            Some("application/json"),
+            &[],
+            &body,
+            None,
+        )
+    }
+
+    pub fn install_product_update(
+        &self,
+        plan_id: &str,
+        confirm: bool,
+    ) -> Result<Value, BridgeError> {
+        validate_product_plan_id(plan_id)?;
+        if !confirm {
+            return Err(BridgeError::request(
+                "Runtime product installation requires explicit confirmation",
+            ));
+        }
+        self.execute_action_with_params(
+            "product.update",
+            json!({ "plan_id": plan_id, "trust": "tuf", "confirm": true }),
+        )
+    }
+
+    pub fn rollback_product(&self, confirm: bool) -> Result<Value, BridgeError> {
+        if !confirm {
+            return Err(BridgeError::request(
+                "Runtime product rollback requires explicit confirmation",
+            ));
+        }
+        self.execute_action_with_params("product.rollback", json!({ "confirm": true }))
     }
 
     pub fn apply_candidate(&self, content_id: &str) -> Result<Value, BridgeError> {
@@ -1472,6 +1545,21 @@ fn validate_plan_id(plan_id: &str) -> Result<(), BridgeError> {
         Ok(())
     } else {
         Err(BridgeError::request("Runtime network plan ID is invalid"))
+    }
+}
+
+fn validate_product_plan_id(plan_id: &str) -> Result<(), BridgeError> {
+    let valid = plan_id.starts_with("product_plan_")
+        && plan_id.len() == 45
+        && plan_id[13..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit());
+    if valid {
+        Ok(())
+    } else {
+        Err(BridgeError::request(
+            "Runtime product update plan ID is invalid",
+        ))
     }
 }
 

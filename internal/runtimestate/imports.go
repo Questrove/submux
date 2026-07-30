@@ -341,6 +341,7 @@ func allowedImportContentType(contentType string) bool {
 		"text/yaml",
 		runtimeapi.SourceDraftContentType,
 		runtimeapi.ManagedResourceContentType,
+		runtimeapi.ProductUpdateBundleContentType,
 		runtimeapi.RuntimeBackupContentType:
 		return true
 	default:
@@ -349,11 +350,12 @@ func allowedImportContentType(contentType string) bool {
 }
 
 func maxImportBytes(contentType string) int {
-	if strings.EqualFold(
-		strings.TrimSpace(strings.Split(contentType, ";")[0]),
-		runtimeapi.RuntimeBackupContentType,
-	) {
+	mediaType := strings.TrimSpace(strings.Split(contentType, ";")[0])
+	if strings.EqualFold(mediaType, runtimeapi.RuntimeBackupContentType) {
 		return runtimeapi.RuntimeBackupMaxBytes
+	}
+	if strings.EqualFold(mediaType, runtimeapi.ProductUpdateBundleContentType) {
+		return runtimeapi.RuntimeProductUpdateMaxBytes
 	}
 	return MaxImportBytes
 }

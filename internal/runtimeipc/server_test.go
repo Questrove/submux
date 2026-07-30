@@ -52,6 +52,11 @@ type updateObserver struct {
 	preview func(runtimeapi.PeerIdentity, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
 }
 
+type productUpdateObserver struct {
+	operatorObserver
+	preview func(runtimeapi.PeerIdentity, string, string, string, runtimeapi.ProductUpdatePreviewRequest) (runtimeapi.ProductUpdatePlan, error)
+}
+
 type backupObserver struct {
 	operatorObserver
 	preview        func(runtimeapi.PeerIdentity, runtimeapi.BackupPreviewRequest) (runtimeapi.BackupPreview, error)
@@ -102,6 +107,17 @@ func (observer updateObserver) PreviewMihomoUpdate(
 	request runtimeapi.MihomoUpdatePreviewRequest,
 ) (runtimeapi.MihomoUpdatePlan, error) {
 	return observer.preview(peer, request)
+}
+
+func (observer productUpdateObserver) PreviewProductUpdate(
+	_ context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.ProductUpdatePreviewRequest,
+) (runtimeapi.ProductUpdatePlan, error) {
+	return observer.preview(peer, clientType, clientVersion, requestID, request)
 }
 
 func (observer networkObserver) PreviewNetwork(
@@ -782,6 +798,67 @@ func TestMihomoUpdateBundleAndPreviewUseAuthorizedLocalIPC(t *testing.T) {
 	}
 }
 
+func TestProductUpdatePreviewPreservesAuthenticatedCallerMetadata(t *testing.T) {
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	calls := 0
+	service := productUpdateObserver{
+		operatorObserver: operatorObserver{observerFunc: func(
+			context.Context,
+			runtimeapi.PeerIdentity,
+		) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{ProtocolVersion: runtimeapi.ProtocolVersion}, nil
+		}},
+		preview: func(
+			gotPeer runtimeapi.PeerIdentity,
+			clientType string,
+			clientVersion string,
+			requestID string,
+			request runtimeapi.ProductUpdatePreviewRequest,
+		) (runtimeapi.ProductUpdatePlan, error) {
+			calls++
+			if gotPeer.Key() != peer.Key() ||
+				clientType != "gui" ||
+				clientVersion != "test" ||
+				requestID != "request-product-preview" ||
+				request.Source != runtimeapi.ProductUpdateSourceOnlineTUF ||
+				request.Version != "v2.0.0" {
+				t.Fatalf(
+					"product preview peer=%#v client=%s/%s requestID=%s request=%#v",
+					gotPeer,
+					clientType,
+					clientVersion,
+					requestID,
+					request,
+				)
+			}
+			return runtimeapi.ProductUpdatePlan{
+				PlanID:  "product_plan_0123456789abcdef0123456789abcdef",
+				Version: "v2.0.0",
+			}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/product/updates/preview",
+		strings.NewReader(`{"source":"online_tuf","version":"v2.0.0"}`),
+	)
+	request.Header.Set(HeaderRequestID, "request-product-preview")
+	request.Header.Set(HeaderProtocolVersion, "1")
+	request.Header.Set(HeaderClientType, "gui")
+	request.Header.Set(HeaderClientVersion, "test")
+	request = withPeerContext(request, peer, nil)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || calls != 1 ||
+		!strings.Contains(recorder.Body.String(), "product_plan_0123456789abcdef0123456789abcdef") {
+		t.Fatalf("product preview status=%d calls=%d body=%s", recorder.Code, calls, recorder.Body.String())
+	}
+}
+
 func TestBackupPreviewExportAndRestorePreviewUseAuthorizedLocalIPC(t *testing.T) {
 	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
 	archiveBody := []byte("bounded-backup-archive")
@@ -949,6 +1026,21 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 			Kind:   runtimeapi.ActionRollbackMihomo,
 			Params: runtimeapi.ActionParams{Confirm: true},
 		},
+		{
+			Kind: runtimeapi.ActionCheckProduct,
+		},
+		{
+			Kind: runtimeapi.ActionUpdateProduct,
+			Params: runtimeapi.ActionParams{
+				PlanID:  "product_plan_0123456789abcdef0123456789abcdef",
+				Trust:   runtimeapi.ProductUpdateTrustTUF,
+				Confirm: true,
+			},
+		},
+		{
+			Kind:   runtimeapi.ActionRollbackProduct,
+			Params: runtimeapi.ActionParams{Confirm: true},
+		},
 	} {
 		if !validAction(action) {
 			t.Fatalf("valid source action rejected: %#v", action)
@@ -1027,6 +1119,29 @@ func TestValidActionAcceptsOnlyWellFormedOperations(t *testing.T) {
 				PlanID: "plan_0123456789abcdef0123456789abcdef",
 				Trust:  runtimeapi.MihomoUpdateTrustTUF,
 			},
+		},
+		{
+			Kind: runtimeapi.ActionUpdateProduct,
+			Params: runtimeapi.ActionParams{
+				PlanID:  "plan_0123456789abcdef0123456789abcdef",
+				Trust:   runtimeapi.ProductUpdateTrustTUF,
+				Confirm: true,
+			},
+		},
+		{
+			Kind: runtimeapi.ActionUpdateProduct,
+			Params: runtimeapi.ActionParams{
+				PlanID: "product_plan_0123456789abcdef0123456789abcdef",
+				Trust:  runtimeapi.ProductUpdateTrustTUF,
+			},
+		},
+		{
+			Kind:   runtimeapi.ActionCheckProduct,
+			Params: runtimeapi.ActionParams{Confirm: true},
+		},
+		{
+			Kind:   runtimeapi.ActionRollbackProduct,
+			Params: runtimeapi.ActionParams{Trust: runtimeapi.ProductUpdateTrustTUF, Confirm: true},
 		},
 		{
 			Kind:   runtimeapi.ActionStartProxy,

@@ -259,6 +259,9 @@ type OperationResult struct {
 	Network                *NetworkStatus `json:"network,omitempty"`
 	CoreVersion            string         `json:"core_version,omitempty"`
 	PreviousCoreVersion    string         `json:"previous_core_version,omitempty"`
+	RuntimeVersion         string         `json:"runtime_version,omitempty"`
+	PreviousRuntimeVersion string         `json:"previous_runtime_version,omitempty"`
+	ProductRollback        string         `json:"product_rollback,omitempty"`
 	Trust                  string         `json:"trust,omitempty"`
 	BackupSHA256           string         `json:"backup_sha256,omitempty"`
 	AutomaticBackupFile    string         `json:"automatic_backup_file,omitempty"`
@@ -384,10 +387,58 @@ type Event struct {
 }
 
 type UpdateStatus struct {
-	RuntimeAvailable      bool   `json:"runtime_available"`
-	MihomoAvailable       bool   `json:"mihomo_available"`
-	MihomoCurrentVersion  string `json:"mihomo_current_version,omitempty"`
-	MihomoPreviousVersion string `json:"mihomo_previous_version,omitempty"`
+	RuntimeAvailable          bool       `json:"runtime_available"`
+	RuntimeCurrentVersion     string     `json:"runtime_current_version,omitempty"`
+	RuntimePreviousVersion    string     `json:"runtime_previous_version,omitempty"`
+	RuntimeAvailableVersion   string     `json:"runtime_available_version,omitempty"`
+	RuntimeLastCheckedAt      *time.Time `json:"runtime_last_checked_at,omitempty"`
+	RuntimeNextCheckAt        *time.Time `json:"runtime_next_check_at,omitempty"`
+	RuntimePredownloadEnabled bool       `json:"runtime_predownload_enabled"`
+	MihomoAvailable           bool       `json:"mihomo_available"`
+	MihomoCurrentVersion      string     `json:"mihomo_current_version,omitempty"`
+	MihomoPreviousVersion     string     `json:"mihomo_previous_version,omitempty"`
+}
+
+type ProductUpdatePreviewRequest struct {
+	Source    string `json:"source"`
+	Version   string `json:"version,omitempty"`
+	ContentID string `json:"content_id,omitempty"`
+}
+
+type ProductUpdateMigration struct {
+	CurrentSchema   int    `json:"current_schema"`
+	TargetSchema    int    `json:"target_schema"`
+	Required        bool   `json:"required"`
+	Reversible      bool   `json:"reversible"`
+	Summary         string `json:"summary"`
+	ProtocolMin     int    `json:"protocol_min"`
+	ProtocolMax     int    `json:"protocol_max"`
+	CurrentProtocol int    `json:"current_protocol"`
+}
+
+type ProductUpdatePlan struct {
+	PlanID              string                 `json:"plan_id"`
+	Source              string                 `json:"source"`
+	Trust               string                 `json:"trust"`
+	Channel             string                 `json:"channel"`
+	Version             string                 `json:"version"`
+	CurrentVersion      string                 `json:"current_version,omitempty"`
+	PreviousVersion     string                 `json:"previous_version,omitempty"`
+	Platform            string                 `json:"platform"`
+	Arch                string                 `json:"arch"`
+	AssetName           string                 `json:"asset_name"`
+	AssetSize           int64                  `json:"asset_size"`
+	AssetSHA256         string                 `json:"asset_sha256"`
+	ReleaseNotes        string                 `json:"release_notes"`
+	Migration           ProductUpdateMigration `json:"migration"`
+	Components          []string               `json:"components"`
+	RequiredFreeBytes   int64                  `json:"required_free_bytes"`
+	AvailableFreeBytes  uint64                 `json:"available_free_bytes"`
+	NetworkInterruption string                 `json:"network_interruption"`
+	Predownloaded       bool                   `json:"predownloaded"`
+	Installable         bool                   `json:"installable"`
+	Warning             string                 `json:"warning"`
+	ExpiresAt           time.Time              `json:"expires_at"`
 }
 
 type MihomoUpdateBundle struct {
@@ -476,6 +527,9 @@ const (
 	ActionDisableGateway      = "network.disable_gateway"
 	ActionUpdateMihomo        = "mihomo.update"
 	ActionRollbackMihomo      = "mihomo.rollback"
+	ActionCheckProduct        = "product.check"
+	ActionUpdateProduct       = "product.update"
+	ActionRollbackProduct     = "product.rollback"
 	ActionRestoreBackup       = "backup.restore"
 
 	OperationQueued         = "queued"
@@ -515,8 +569,15 @@ const (
 	MihomoUpdateSourceUpstreamOnly = "upstream_only"
 	MihomoUpdateTrustTUF           = "tuf"
 	MihomoUpdateTrustUpstreamOnly  = "upstream_only"
+	ProductUpdateSourceOnlineTUF   = "online_tuf"
+	ProductUpdateSourceOfflineTUF  = "offline_tuf"
+	ProductUpdateTrustTUF          = "tuf"
+	ProductUpdateChannelStable     = "stable"
 	MihomoUpdateBundleContentType  = "application/vnd.submux.mihomo-update-bundle+zip"
+	ProductUpdateBundleContentType = "application/vnd.submux.runtime-product-update+zip"
 	RuntimeBackupContentType       = "application/vnd.submux.runtime-backup+zip"
+
+	RuntimeProductUpdateMaxBytes = 300 << 20
 
 	ManagedResourceContentType = "application/vnd.submux.managed-resource"
 

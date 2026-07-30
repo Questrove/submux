@@ -53,6 +53,16 @@ type MihomoUpdateService interface {
 	Status() (runtimeapi.UpdateStatus, error)
 }
 
+type ProductUpdateService interface {
+	Preview(
+		context.Context,
+		runtimeapi.PeerIdentity,
+		runtimeapi.ProductUpdatePreviewRequest,
+		[]byte,
+	) (runtimeapi.ProductUpdatePlan, error)
+	Status(context.Context) (runtimeapi.UpdateStatus, error)
+}
+
 type BackupService interface {
 	Preview(bool) (runtimeapi.BackupPreview, error)
 	Export(runtimeapi.BackupExportRequest) (runtimeapi.BackupArchive, error)
@@ -93,16 +103,17 @@ func (e *PublicError) ProtocolRetryable() bool {
 }
 
 type Coordinator struct {
-	State         *runtimestate.Store
-	Executor      ActionExecutor
-	Recovery      RecoveryService
-	Diagnostics   DiagnosticsService
-	Network       NetworkService
-	Updates       MihomoUpdateService
-	Backups       BackupService
-	Version       string
-	Now           func() time.Time
-	QueueCapacity int
+	State          *runtimestate.Store
+	Executor       ActionExecutor
+	Recovery       RecoveryService
+	Diagnostics    DiagnosticsService
+	Network        NetworkService
+	Updates        MihomoUpdateService
+	ProductUpdates ProductUpdateService
+	Backups        BackupService
+	Version        string
+	Now            func() time.Time
+	QueueCapacity  int
 
 	wakeOnce sync.Once
 	wake     chan struct{}
@@ -122,7 +133,7 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 			Mode:      runtimeapi.RunModeExplicit,
 			State:     runtimeapi.NetworkStateUnavailable,
 		}
-		return c.observeUpdates(snapshot)
+		return c.observeUpdates(ctx, snapshot)
 	}
 	network, networkErr := c.Network.Observe(ctx)
 	snapshot.Network = network
@@ -135,7 +146,7 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 				Message: "Privileged Runtime network state is unavailable",
 			}
 		}
-		return snapshot, nil
+		return c.observeUpdates(ctx, snapshot)
 	}
 	if network.State == runtimeapi.NetworkStateActive {
 		snapshot.RunMode = network.Mode
@@ -143,18 +154,30 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 		snapshot.RunMode == runtimeapi.RunModeGateway {
 		snapshot.RunMode = runtimeapi.RunModeExplicit
 	}
-	return c.observeUpdates(snapshot)
+	return c.observeUpdates(ctx, snapshot)
 }
 
-func (c *Coordinator) observeUpdates(snapshot runtimeapi.Snapshot) (runtimeapi.Snapshot, error) {
-	if c.Updates == nil {
-		return snapshot, nil
+func (c *Coordinator) observeUpdates(ctx context.Context, snapshot runtimeapi.Snapshot) (runtimeapi.Snapshot, error) {
+	if c.Updates != nil {
+		status, err := c.Updates.Status()
+		if err != nil {
+			return runtimeapi.Snapshot{}, err
+		}
+		snapshot.Updates = status
 	}
-	status, err := c.Updates.Status()
-	if err != nil {
-		return runtimeapi.Snapshot{}, err
+	if c.ProductUpdates != nil {
+		status, err := c.ProductUpdates.Status(ctx)
+		if err != nil {
+			return runtimeapi.Snapshot{}, err
+		}
+		snapshot.Updates.RuntimeAvailable = status.RuntimeAvailable
+		snapshot.Updates.RuntimeCurrentVersion = status.RuntimeCurrentVersion
+		snapshot.Updates.RuntimePreviousVersion = status.RuntimePreviousVersion
+		snapshot.Updates.RuntimeAvailableVersion = status.RuntimeAvailableVersion
+		snapshot.Updates.RuntimeLastCheckedAt = status.RuntimeLastCheckedAt
+		snapshot.Updates.RuntimeNextCheckAt = status.RuntimeNextCheckAt
+		snapshot.Updates.RuntimePredownloadEnabled = status.RuntimePredownloadEnabled
 	}
-	snapshot.Updates = status
 	return snapshot, nil
 }
 
@@ -208,6 +231,58 @@ func (c *Coordinator) PreviewMihomoUpdate(
 		return runtimeapi.MihomoUpdatePlan{}, errors.New("Mihomo update preview service is unavailable")
 	}
 	return c.Updates.Preview(ctx, peer, request)
+}
+
+func (c *Coordinator) PreviewProductUpdate(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	clientType string,
+	clientVersion string,
+	requestID string,
+	request runtimeapi.ProductUpdatePreviewRequest,
+) (runtimeapi.ProductUpdatePlan, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.ProductUpdatePlan{}, err
+	}
+	if c == nil || c.State == nil || c.ProductUpdates == nil {
+		return runtimeapi.ProductUpdatePlan{}, errors.New("Runtime product update preview service is unavailable")
+	}
+	var offlineBundle []byte
+	var err error
+	if request.Source == runtimeapi.ProductUpdateSourceOfflineTUF {
+		if !validContentID(request.ContentID) {
+			err = errors.New("offline Runtime product update preview requires a valid content_id")
+		} else {
+			var content runtimeapi.ImportContent
+			offlineBundle, content, err = c.State.PeekImport(request.ContentID, peer.Key(), c.now())
+			if err == nil && content.ContentType != runtimeapi.ProductUpdateBundleContentType {
+				err = errors.New("uploaded content is not a Runtime product update TUF bundle")
+			}
+		}
+	} else if request.ContentID != "" {
+		err = errors.New("online Runtime product update preview does not accept content_id")
+	}
+	var preview runtimeapi.ProductUpdatePlan
+	if err == nil {
+		preview, err = c.ProductUpdates.Preview(ctx, peer, request, offlineBundle)
+	}
+	if err == nil && request.Source == runtimeapi.ProductUpdateSourceOfflineTUF {
+		if removeErr := c.State.RemoveImport(request.ContentID); removeErr != nil {
+			err = fmt.Errorf("remove consumed Runtime product update import: %w", removeErr)
+		}
+	}
+	if auditErr := c.auditRead(
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		"product.update.preview",
+		request.ContentID,
+		err,
+	); auditErr != nil {
+		return runtimeapi.ProductUpdatePlan{}, auditErr
+	}
+	return preview, err
 }
 
 func (c *Coordinator) PreviewBackup(
@@ -824,14 +899,17 @@ func (c *Coordinator) now() time.Time {
 }
 
 func validateAction(action runtimeapi.Action) error {
-	if action.Kind != runtimeapi.ActionUpdateMihomo && action.Params.Trust != "" {
-		return errors.New("trust is only accepted by a Mihomo update action")
+	if action.Kind != runtimeapi.ActionUpdateMihomo &&
+		action.Kind != runtimeapi.ActionUpdateProduct &&
+		action.Params.Trust != "" {
+		return errors.New("trust is only accepted by a Mihomo or Runtime product update action")
 	}
 	if action.Kind != runtimeapi.ActionEnableTUN &&
 		action.Kind != runtimeapi.ActionEnableGateway &&
 		action.Kind != runtimeapi.ActionUpdateMihomo &&
+		action.Kind != runtimeapi.ActionUpdateProduct &&
 		action.Params.PlanID != "" {
-		return errors.New("plan_id is only accepted by a network enable or Mihomo update action")
+		return errors.New("plan_id is only accepted by a network enable, Mihomo update, or Runtime product update action")
 	}
 	switch action.Kind {
 	case runtimeapi.ActionApplyImportedConfig:
@@ -910,6 +988,36 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.ResourceKind != "" ||
 			action.Params.ResourceName != "" {
 			return errors.New("mihomo.rollback requires only explicit confirmation")
+		}
+	case runtimeapi.ActionCheckProduct:
+		if action.Params != (runtimeapi.ActionParams{}) {
+			return errors.New("product.check does not accept parameters")
+		}
+	case runtimeapi.ActionUpdateProduct:
+		if !validProductPlanID(action.Params.PlanID) ||
+			!action.Params.Confirm ||
+			action.Params.Trust != runtimeapi.ProductUpdateTrustTUF ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("product.update requires product plan_id, TUF trust, and explicit confirmation")
+		}
+	case runtimeapi.ActionRollbackProduct:
+		if !action.Params.Confirm ||
+			action.Params.PlanID != "" ||
+			action.Params.Trust != "" ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" {
+			return errors.New("product.rollback requires only explicit confirmation")
 		}
 	case runtimeapi.ActionRestoreBackup:
 		if !validContentID(action.Params.ContentID) ||
@@ -1055,6 +1163,15 @@ func validPlanID(id string) bool {
 	return err == nil
 }
 
+func validProductPlanID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "product_plan_")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
 func validResourceKind(kind string) bool {
 	switch kind {
 	case runtimeapi.ResourceKindProxyProvider,
@@ -1099,6 +1216,12 @@ func publicExecutionMessage(kind string) string {
 		return "Runtime could not install the confirmed Mihomo core update"
 	case runtimeapi.ActionRollbackMihomo:
 		return "Runtime could not roll back the Mihomo core"
+	case runtimeapi.ActionCheckProduct:
+		return "Runtime could not check the stable product update channel"
+	case runtimeapi.ActionUpdateProduct:
+		return "Runtime could not install the confirmed product update"
+	case runtimeapi.ActionRollbackProduct:
+		return "Runtime could not roll back the product update"
 	case runtimeapi.ActionRestoreBackup:
 		return "Runtime could not restore the confirmed portable backup"
 	case runtimeapi.ActionAddRemoteSource:

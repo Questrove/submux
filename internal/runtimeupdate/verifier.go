@@ -73,6 +73,7 @@ type Verifier struct {
 	InitialRoot []byte
 	StateRoot   string
 	MetadataURL string
+	TargetsURL  string
 	HTTPClient  *http.Client
 	Now         func() time.Time
 

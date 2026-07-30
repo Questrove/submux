@@ -7,6 +7,7 @@ const state = {
   busy: false,
   contentId: "",
   lastOperationId: "",
+  operationWatchToken: 0,
   currentSourceId: "",
   selectedSourceId: "",
   sources: [],
@@ -18,6 +19,8 @@ const state = {
   activeNetworkMode: "",
   mihomoUpdatePlan: null,
   previousMihomoVersion: "",
+  productUpdatePlan: null,
+  previousProductVersion: "",
   backupRestoreContentId: "",
   backupRestorePath: "",
 };
@@ -53,6 +56,13 @@ const elements = {
   previewMihomoUpdate: document.querySelector("#preview-mihomo-update"),
   installMihomoUpdate: document.querySelector("#install-mihomo-update"),
   rollbackMihomo: document.querySelector("#rollback-mihomo"),
+  productVersion: document.querySelector("#product-version"),
+  productUpdateVersion: document.querySelector("#product-update-version"),
+  productUpdateBundle: document.querySelector("#product-update-bundle"),
+  productUpdatePreview: document.querySelector("#product-update-preview"),
+  previewProductUpdate: document.querySelector("#preview-product-update"),
+  installProductUpdate: document.querySelector("#install-product-update"),
+  rollbackProduct: document.querySelector("#rollback-product"),
   candidateState: document.querySelector("#candidate-state"),
   candidateYaml: document.querySelector("#candidate-yaml"),
   ownedFields: document.querySelector("#owned-fields"),
@@ -142,6 +152,9 @@ const writeButtons = [
   elements.previewMihomoUpdate,
   elements.installMihomoUpdate,
   elements.rollbackMihomo,
+  elements.previewProductUpdate,
+  elements.installProductUpdate,
+  elements.rollbackProduct,
   elements.addRemoteSource,
   elements.addImportedSource,
   elements.applySource,
@@ -172,6 +185,13 @@ function setBusy(busy, message = "") {
     busy || !state.compatible || !state.mihomoUpdatePlan;
   elements.rollbackMihomo.disabled =
     busy || !state.compatible || !state.previousMihomoVersion;
+  elements.installProductUpdate.disabled =
+    busy ||
+    !state.compatible ||
+    !state.productUpdatePlan ||
+    !state.productUpdatePlan.installable;
+  elements.rollbackProduct.disabled =
+    busy || !state.compatible || !state.previousProductVersion;
   elements.restoreBackup.disabled =
     busy || !state.compatible || !state.backupRestoreContentId;
   for (const button of [
@@ -247,6 +267,9 @@ function renderSnapshot(snapshot) {
   elements.runMode.textContent = `运行方式：${snapshot.run_mode || "未配置"}`;
   const updates = snapshot.updates || {};
   state.previousMihomoVersion = updates.mihomo_previous_version || "";
+  state.previousProductVersion = updates.runtime_previous_version || "";
+  elements.productVersion.textContent =
+    updates.runtime_current_version || snapshot.runtime?.version || "未知";
   elements.mihomoCoreVersion.textContent =
     updates.mihomo_current_version || snapshot.mihomo?.version || "未安装";
   const network = snapshot.network || {};
@@ -307,6 +330,104 @@ function renderSnapshot(snapshot) {
   elements.overrideState.textContent = advancedOverride.present
     ? `${String(advancedOverride.sha256 || "").slice(0, 12)} · ${advancedOverride.size || 0} 字节`
     : "尚未配置";
+}
+
+function renderProductUpdatePlan(plan) {
+  state.productUpdatePlan = plan;
+  const migration = plan.migration || {};
+  elements.productUpdatePreview.textContent = [
+    `版本：${plan.current_version || "未知"} → ${plan.version}`,
+    `信任：${plan.trust} · 频道：${plan.channel}`,
+    `平台：${plan.platform}/${plan.arch}`,
+    `资产：${plan.asset_name} · ${plan.asset_size} 字节`,
+    `SHA-256：${plan.asset_sha256}`,
+    `磁盘：需要 ${plan.required_free_bytes} · 可用 ${plan.available_free_bytes}`,
+    `数据库：${migration.current_schema} → ${migration.target_schema} · 可回滚：${migration.reversible ? "是" : "否"}`,
+    `IPC：当前 ${migration.current_protocol} · 允许 ${migration.protocol_min}-${migration.protocol_max}`,
+    `网络中断：${plan.network_interruption}`,
+    `程序已预下载：${plan.predownloaded ? "是（离线包）" : "否"}`,
+    `平台安装器：${plan.installable ? "可用" : "不可用（只能验证计划）"}`,
+    `计划有效期：${plan.expires_at}`,
+    plan.release_notes || "",
+    migration.summary || "",
+    plan.warning || "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  setBusy(false);
+}
+
+async function previewProductUpdate() {
+  const version = elements.productUpdateVersion.value.trim();
+  const bundlePath = elements.productUpdateBundle.value.trim();
+  state.productUpdatePlan = null;
+  setBusy(
+    true,
+    bundlePath
+      ? "正在读取并通过同一 TUF 验签器验证离线产品包…"
+      : "正在检查稳定产品元数据；不会预下载程序…",
+  );
+  try {
+    const plan = await invoke("runtime_preview_product_update", {
+      version,
+      bundlePath,
+    });
+    renderProductUpdatePlan(plan);
+    setMessage("产品更新计划已经验证。安装仍需再次明确确认。");
+  } catch (error) {
+    setBusy(false);
+    setMessage(errorText(error), true);
+  }
+}
+
+async function installProductUpdate() {
+  const plan = state.productUpdatePlan;
+  if (!plan) return;
+  const warning = [
+    `确认把 Runtime ${plan.current_version || "未知"} 更新为 ${plan.version}？`,
+    plan.network_interruption,
+    "更新会创建程序和数据库回滚点；失败时自动恢复旧版本与原运行状态。",
+    plan.warning || "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+  if (!window.confirm(warning)) return;
+  setBusy(true, "正在提交已确认的 Runtime 产品更新…");
+  try {
+    const operation = await invoke("runtime_install_product_update", {
+      planId: plan.plan_id,
+      confirm: true,
+    });
+    state.productUpdatePlan = null;
+    renderOperation(operation);
+    elements.productUpdatePreview.textContent =
+      "更新计划已消费；再次安装必须重新检查并确认。";
+    setMessage("Runtime 产品更新已经进入操作队列。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
+}
+
+async function rollbackProduct() {
+  if (!state.previousProductVersion) return;
+  if (
+    !window.confirm(
+      `确认回滚到 Runtime ${state.previousProductVersion}？网络会先恢复直连，旧程序、数据库和原运行状态必须重新验证。`,
+    )
+  ) {
+    return;
+  }
+  setBusy(true, "正在提交已确认的 Runtime 产品回滚…");
+  try {
+    renderOperation(await invoke("runtime_rollback_product", { confirm: true }));
+    setMessage("Runtime 产品回滚已经进入操作队列。");
+  } catch (error) {
+    setMessage(errorText(error), true);
+  } finally {
+    setBusy(false);
+  }
 }
 
 function renderMihomoUpdatePlan(plan) {
@@ -733,10 +854,52 @@ async function previewSelectedSource() {
   }
 }
 
-function renderOperation(operation) {
+function operationTerminal(operation) {
+  return ["succeeded", "failed", "cancelled", "outcome_unknown"].includes(operation?.state);
+}
+
+function renderOperation(operation, follow = true) {
   state.lastOperationId = operation.id;
   elements.operation.textContent = JSON.stringify(operation, null, 2);
-  setBusy(false);
+  if (follow) {
+    state.operationWatchToken += 1;
+    if (!operationTerminal(operation)) {
+      void watchOperation(operation.id, state.operationWatchToken);
+    }
+  }
+}
+
+async function watchOperation(operationId, token) {
+  const deadline = Date.now() + 5 * 60 * 1000;
+  let lastError = null;
+  while (
+    token === state.operationWatchToken &&
+    operationId === state.lastOperationId &&
+    Date.now() < deadline
+  ) {
+    await new Promise((resolve) => window.setTimeout(resolve, 750));
+    if (token !== state.operationWatchToken || operationId !== state.lastOperationId) return;
+    try {
+      const operation = await invoke("runtime_get_operation", { operationId });
+      lastError = null;
+      renderOperation(operation, false);
+      if (operationTerminal(operation)) {
+        state.operationWatchToken += 1;
+        try {
+          await refreshStatus();
+        } catch {
+          // The operation result remains visible even if a status refresh races a service restart.
+        }
+        setMessage(operationResultMessage(operation), operation.state !== "succeeded");
+        return;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (token === state.operationWatchToken && lastError) {
+    setMessage(`自动跟踪运行操作超时：${errorText(lastError)}`, true);
+  }
 }
 
 function operationResultMessage(operation) {
@@ -1271,6 +1434,19 @@ elements.disableTun.addEventListener("click", disableTUN);
 elements.previewMihomoUpdate.addEventListener("click", previewMihomoUpdate);
 elements.installMihomoUpdate.addEventListener("click", installMihomoUpdate);
 elements.rollbackMihomo.addEventListener("click", rollbackMihomo);
+elements.previewProductUpdate.addEventListener("click", previewProductUpdate);
+elements.installProductUpdate.addEventListener("click", installProductUpdate);
+elements.rollbackProduct.addEventListener("click", rollbackProduct);
+elements.productUpdateVersion.addEventListener("input", () => {
+  state.productUpdatePlan = null;
+  elements.productUpdatePreview.textContent = "版本已变化，请重新检查。";
+  setBusy(state.busy);
+});
+elements.productUpdateBundle.addEventListener("input", () => {
+  state.productUpdatePlan = null;
+  elements.productUpdatePreview.textContent = "离线包路径已变化，请重新检查。";
+  setBusy(state.busy);
+});
 elements.mihomoUpdateSource.addEventListener("change", () => {
   state.mihomoUpdatePlan = null;
   elements.mihomoUpdatePreview.textContent = "信任路径已变化，请重新检查。";

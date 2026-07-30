@@ -49,6 +49,17 @@ type MihomoUpdateOperator interface {
 	PreviewMihomoUpdate(context.Context, runtimeapi.PeerIdentity, runtimeapi.MihomoUpdatePreviewRequest) (runtimeapi.MihomoUpdatePlan, error)
 }
 
+type ProductUpdateOperator interface {
+	PreviewProductUpdate(
+		context.Context,
+		runtimeapi.PeerIdentity,
+		string,
+		string,
+		string,
+		runtimeapi.ProductUpdatePreviewRequest,
+	) (runtimeapi.ProductUpdatePlan, error)
+}
+
 type BackupOperator interface {
 	PreviewBackup(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.BackupPreviewRequest) (runtimeapi.BackupPreview, error)
 	ExportBackup(context.Context, runtimeapi.PeerIdentity, string, string, string, runtimeapi.BackupExportRequest) (runtimeapi.BackupArchive, error)
@@ -61,6 +72,7 @@ type Server struct {
 	operator       Operator
 	network        NetworkPreviewer
 	updates        MihomoUpdateOperator
+	productUpdates ProductUpdateOperator
 	backups        BackupOperator
 	authorizer     Authorizer
 	runtimeVersion string
@@ -83,6 +95,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	operator, _ := observer.(Operator)
 	network, _ := observer.(NetworkPreviewer)
 	updates, _ := observer.(MihomoUpdateOperator)
+	productUpdates, _ := observer.(ProductUpdateOperator)
 	backups, _ := observer.(BackupOperator)
 	eventObserver, _ := observer.(EventObserver)
 	runtimeVersion := ""
@@ -95,6 +108,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		operator:       operator,
 		network:        network,
 		updates:        updates,
+		productUpdates: productUpdates,
 		backups:        backups,
 		authorizer:     authorizer,
 		runtimeVersion: runtimeVersion,
@@ -155,6 +169,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/network/preview", s.handleNetworkPreview)
 	mux.HandleFunc("/v1/mihomo/update-bundles", s.handleMihomoUpdateBundle)
 	mux.HandleFunc("/v1/mihomo/updates/preview", s.handleMihomoUpdatePreview)
+	mux.HandleFunc("/v1/product/updates/preview", s.handleProductUpdatePreview)
 	mux.HandleFunc("/v1/backups/preview", s.handleBackupPreview)
 	mux.HandleFunc("/v1/backups/export", s.handleBackupExport)
 	mux.HandleFunc("/v1/backups/restore/preview", s.handleBackupRestorePreview)
@@ -408,6 +423,52 @@ func (s *Server) handleMihomoUpdatePreview(writer http.ResponseWriter, request *
 	s.writeJSON(writer, http.StatusOK, preview)
 }
 
+func (s *Server) handleProductUpdatePreview(writer http.ResponseWriter, request *http.Request) {
+	requestID, clientType, clientVersion, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodPost {
+		writer.Header().Set("Allow", http.MethodPost)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime product update preview only accepts POST", false)
+		return
+	}
+	if request.URL.RawQuery != "" {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime product update preview does not accept query parameters", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.productUpdates == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime product update preview is unavailable", true)
+		return
+	}
+	if !s.validateWriteCompatibility(writer, request, clientVersion) {
+		return
+	}
+	var previewRequest runtimeapi.ProductUpdatePreviewRequest
+	if err := decodeStrictJSON(request.Body, MaxRequestBytes, &previewRequest); err != nil {
+		s.writeDecodeError(writer, request, err)
+		return
+	}
+	preview, err := s.productUpdates.PreviewProductUpdate(
+		request.Context(),
+		peer,
+		clientType,
+		clientVersion,
+		requestID,
+		previewRequest,
+	)
+	if err != nil {
+		s.writeImmediateError(writer, request, err)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, preview)
+}
+
 func (s *Server) handleNetworkPreview(writer http.ResponseWriter, request *http.Request) {
 	requestID, _, _, ok := s.validateCommon(writer, request)
 	if !ok {
@@ -602,11 +663,11 @@ func (s *Server) handleImport(writer http.ResponseWriter, request *http.Request)
 	}
 	contentType := request.Header.Get("Content-Type")
 	maxBytes := int64(runtimestate.MaxImportBytes)
-	if strings.EqualFold(
-		strings.TrimSpace(strings.Split(contentType, ";")[0]),
-		runtimeapi.RuntimeBackupContentType,
-	) {
+	mediaType := strings.TrimSpace(strings.Split(contentType, ";")[0])
+	if strings.EqualFold(mediaType, runtimeapi.RuntimeBackupContentType) {
 		maxBytes = runtimeapi.RuntimeBackupMaxBytes
+	} else if strings.EqualFold(mediaType, runtimeapi.ProductUpdateBundleContentType) {
+		maxBytes = runtimeapi.RuntimeProductUpdateMaxBytes
 	}
 	size, err := strconv.ParseInt(request.Header.Get(HeaderContentSize), 10, 64)
 	if err != nil || size <= 0 || size > maxBytes {
@@ -1172,12 +1233,15 @@ func validBackupFileName(name string) bool {
 }
 
 func validAction(action runtimeapi.Action) bool {
-	if action.Kind != runtimeapi.ActionUpdateMihomo && action.Params.Trust != "" {
+	if action.Kind != runtimeapi.ActionUpdateMihomo &&
+		action.Kind != runtimeapi.ActionUpdateProduct &&
+		action.Params.Trust != "" {
 		return false
 	}
 	if action.Kind != runtimeapi.ActionEnableTUN &&
 		action.Kind != runtimeapi.ActionEnableGateway &&
 		action.Kind != runtimeapi.ActionUpdateMihomo &&
+		action.Kind != runtimeapi.ActionUpdateProduct &&
 		action.Params.PlanID != "" {
 		return false
 	}
@@ -1234,6 +1298,30 @@ func validAction(action runtimeapi.Action) bool {
 			action.Params.ResourceKind == "" &&
 			action.Params.ResourceName == ""
 	case runtimeapi.ActionRollbackMihomo:
+		return action.Params.Confirm &&
+			action.Params.PlanID == "" &&
+			action.Params.Trust == "" &&
+			action.Params.ContentID == "" &&
+			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
+	case runtimeapi.ActionCheckProduct:
+		return action.Params == (runtimeapi.ActionParams{})
+	case runtimeapi.ActionUpdateProduct:
+		return validProductPlanID(action.Params.PlanID) &&
+			action.Params.Confirm &&
+			action.Params.Trust == runtimeapi.ProductUpdateTrustTUF &&
+			action.Params.ContentID == "" &&
+			action.Params.SourceID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == ""
+	case runtimeapi.ActionRollbackProduct:
 		return action.Params.Confirm &&
 			action.Params.PlanID == "" &&
 			action.Params.Trust == "" &&
@@ -1384,6 +1472,15 @@ func validContentID(id string) bool {
 
 func validPlanID(id string) bool {
 	suffix, ok := strings.CutPrefix(id, "plan_")
+	if !ok || len(suffix) != 32 {
+		return false
+	}
+	_, err := hex.DecodeString(suffix)
+	return err == nil
+}
+
+func validProductPlanID(id string) bool {
+	suffix, ok := strings.CutPrefix(id, "product_plan_")
 	if !ok || len(suffix) != 32 {
 		return false
 	}

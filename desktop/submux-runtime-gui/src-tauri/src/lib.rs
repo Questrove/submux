@@ -225,6 +225,32 @@ fn runtime_rollback_mihomo(
 }
 
 #[tauri::command]
+fn runtime_preview_product_update(
+    bridge: State<'_, RuntimeBridge>,
+    version: String,
+    bundle_path: String,
+) -> Result<Value, BridgeError> {
+    bridge.preview_product_update(&version, &bundle_path)
+}
+
+#[tauri::command]
+fn runtime_install_product_update(
+    bridge: State<'_, RuntimeBridge>,
+    plan_id: String,
+    confirm: bool,
+) -> Result<Value, BridgeError> {
+    bridge.install_product_update(&plan_id, confirm)
+}
+
+#[tauri::command]
+fn runtime_rollback_product(
+    bridge: State<'_, RuntimeBridge>,
+    confirm: bool,
+) -> Result<Value, BridgeError> {
+    bridge.rollback_product(confirm)
+}
+
+#[tauri::command]
 fn runtime_get_operation(
     bridge: State<'_, RuntimeBridge>,
     operation_id: String,
@@ -359,6 +385,9 @@ pub fn run() {
             runtime_preview_mihomo_update,
             runtime_install_mihomo_update,
             runtime_rollback_mihomo,
+            runtime_preview_product_update,
+            runtime_install_product_update,
+            runtime_rollback_product,
             runtime_get_operation,
             runtime_wait_operation,
             runtime_cancel_operation,

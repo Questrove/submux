@@ -1,7 +1,10 @@
 package runtimeapp
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -32,6 +35,27 @@ type blockingStartupRecovery struct {
 type networkServiceFunc struct {
 	preview func(context.Context, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
 	observe func(context.Context) (runtimeapi.NetworkStatus, error)
+}
+
+type productUpdateServiceFunc struct {
+	preview func(context.Context, runtimeapi.PeerIdentity, runtimeapi.ProductUpdatePreviewRequest, []byte) (runtimeapi.ProductUpdatePlan, error)
+	status  func(context.Context) (runtimeapi.UpdateStatus, error)
+}
+
+func (service productUpdateServiceFunc) Preview(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.ProductUpdatePreviewRequest,
+	body []byte,
+) (runtimeapi.ProductUpdatePlan, error) {
+	return service.preview(ctx, peer, request, body)
+}
+
+func (service productUpdateServiceFunc) Status(ctx context.Context) (runtimeapi.UpdateStatus, error) {
+	if service.status == nil {
+		return runtimeapi.UpdateStatus{}, nil
+	}
+	return service.status(ctx)
 }
 
 func (service networkServiceFunc) Preview(
@@ -222,6 +246,115 @@ func TestCoordinatorReportsUnavailableNetworkWithoutClaimingCleanup(t *testing.T
 		snapshot.Network.Fault == nil ||
 		len(snapshot.Network.Residuals) != 1 {
 		t.Fatalf("unavailable Runtime network snapshot=%#v", snapshot.Network)
+	}
+}
+
+func TestCoordinatorBindsOfflineProductPreviewToUploadedContentAndCaller(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	body := []byte("bounded offline TUF product bundle")
+	digest := sha256.Sum256(body)
+	called := false
+	coordinator := &Coordinator{
+		State: state,
+		ProductUpdates: productUpdateServiceFunc{
+			preview: func(
+				_ context.Context,
+				gotPeer runtimeapi.PeerIdentity,
+				request runtimeapi.ProductUpdatePreviewRequest,
+				gotBody []byte,
+			) (runtimeapi.ProductUpdatePlan, error) {
+				called = true
+				if gotPeer.Key() != peer.Key() ||
+					request.Source != runtimeapi.ProductUpdateSourceOfflineTUF ||
+					!bytes.Equal(gotBody, body) {
+					t.Fatalf("offline product preview peer=%#v request=%#v body=%q", gotPeer, request, gotBody)
+				}
+				return runtimeapi.ProductUpdatePlan{
+					PlanID:  "product_plan_" + strings.Repeat("a", 32),
+					Version: "v2.0.0",
+				}, nil
+			},
+		},
+	}
+	content, err := coordinator.UploadImport(
+		t.Context(),
+		peer,
+		runtimeapi.ProductUpdateBundleContentType,
+		int64(len(body)),
+		hex.EncodeToString(digest[:]),
+		body,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := coordinator.PreviewProductUpdate(
+		t.Context(),
+		peer,
+		"cli",
+		"test",
+		"request-product-preview",
+		runtimeapi.ProductUpdatePreviewRequest{
+			Source:    runtimeapi.ProductUpdateSourceOfflineTUF,
+			ContentID: content.ID,
+		},
+	)
+	if err != nil || !called || preview.PlanID == "" {
+		t.Fatalf("offline product preview=%#v called=%v err=%v", preview, called, err)
+	}
+	if _, _, err := state.PeekImport(content.ID, peer.Key(), time.Now().UTC()); err == nil {
+		t.Fatal("offline product bundle remained after the verified plan copied it")
+	}
+	other := runtimeapi.PeerIdentity{Platform: "linux", UID: 1001}
+	if _, err := coordinator.PreviewProductUpdate(
+		t.Context(),
+		other,
+		"cli",
+		"test",
+		"request-product-preview-other",
+		runtimeapi.ProductUpdatePreviewRequest{
+			Source:    runtimeapi.ProductUpdateSourceOfflineTUF,
+			ContentID: content.ID,
+		},
+	); err == nil {
+		t.Fatal("offline product bundle was accepted for a different caller")
+	}
+}
+
+func TestProductActionsRequireFixedPlanTrustAndConfirmation(t *testing.T) {
+	valid := []runtimeapi.Action{
+		{Kind: runtimeapi.ActionCheckProduct},
+		{
+			Kind: runtimeapi.ActionUpdateProduct,
+			Params: runtimeapi.ActionParams{
+				PlanID:  "product_plan_" + strings.Repeat("a", 32),
+				Trust:   runtimeapi.ProductUpdateTrustTUF,
+				Confirm: true,
+			},
+		},
+		{
+			Kind:   runtimeapi.ActionRollbackProduct,
+			Params: runtimeapi.ActionParams{Confirm: true},
+		},
+	}
+	for _, action := range valid {
+		if err := validateAction(action); err != nil {
+			t.Fatalf("valid product action %#v: %v", action, err)
+		}
+	}
+	invalid := valid[1]
+	invalid.Params.Trust = "arbitrary"
+	if err := validateAction(invalid); err == nil {
+		t.Fatal("product update accepted arbitrary trust")
+	}
+	invalid = valid[1]
+	invalid.Params.PlanID = "plan_" + strings.Repeat("a", 32)
+	if err := validateAction(invalid); err == nil {
+		t.Fatal("product update accepted a non-product plan")
 	}
 }
 

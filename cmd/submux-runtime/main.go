@@ -22,6 +22,7 @@ import (
 
 	"submux/internal/buildinfo"
 	"submux/internal/mihomo"
+	"submux/internal/productupdate"
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimeapp"
 	"submux/internal/runtimebackup"
@@ -86,6 +87,9 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "mihomo" {
 		return runMihomo(arguments[1:], stdout, stderr)
 	}
+	if arguments[0] == "product" {
+		return runProduct(arguments[1:], stdout, stderr)
+	}
 	if arguments[0] == "network" {
 		return runNetwork(arguments[1:], stdout, stderr)
 	}
@@ -104,7 +108,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	if arguments[0] == "backup" {
 		return runBackup(arguments[1:], stdout, stderr)
 	}
-	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|mihomo|network|source|resource|override|diagnostics|backup|version|--version-json]")
+	fmt.Fprintln(stderr, "usage: submux-runtime [serve|tui|status|import|operation|proxy|mihomo|product|network|source|resource|override|diagnostics|backup|version|--version-json]")
 	return 2
 }
 
@@ -184,14 +188,14 @@ func runServe(arguments []string, stderr io.Writer) int {
 		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
 		return 1
 	}
+	installationID, err := state.InstallationID()
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
+		return 1
+	}
 	var network *runtimenet.Connector
 	if (runtime.GOOS == "linux" || runtime.GOOS == "windows" || runtime.GOOS == "darwin") &&
 		*networkEndpoint != "" {
-		installationID, idErr := state.InstallationID()
-		if idErr != nil {
-			writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, idErr.Error(), true)
-			return 1
-		}
 		network = &runtimenet.Connector{
 			Endpoint:          *networkEndpoint,
 			RuntimeInstanceID: installationID,
@@ -274,17 +278,27 @@ func runServe(arguments []string, stderr io.Writer) int {
 			ConfigPath: process.ConfigPath,
 		},
 	}
+	updateTrust := &runtimeupdate.Verifier{
+		InitialRoot: runtimeupdate.InitialRoot(),
+		StateRoot:   filepath.Join(*stateRoot, "trust", "tuf"),
+	}
 	updateManager := &runtimeupdate.Manager{
-		Root:     filepath.Join(*stateRoot, "updates"),
-		Platform: runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		Trust: &runtimeupdate.Verifier{
-			InitialRoot: runtimeupdate.InitialRoot(),
-			StateRoot:   filepath.Join(*stateRoot, "trust", "tuf"),
-		},
+		Root:              filepath.Join(*stateRoot, "updates"),
+		Platform:          runtime.GOOS,
+		Arch:              runtime.GOARCH,
+		Trust:             updateTrust,
 		Official:          runtimecore.NewOfficialReleaseSource(nil),
 		Core:              core,
 		CandidateVerifier: candidateVerifier,
+	}
+	productUpdateManager := &productupdate.Manager{
+		Root:           filepath.Join(*stateRoot, "product-updates"),
+		Platform:       runtime.GOOS,
+		Arch:           runtime.GOARCH,
+		CurrentVersion: buildinfo.Current().Version,
+		InstallationID: installationID,
+		Trust:          updateTrust,
+		State:          state,
 	}
 	backupManager := &runtimebackup.Service{
 		State:      state,
@@ -303,6 +317,8 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Network:         network,
 		TUN:             network,
 		Updates:         updateManager,
+		ProductUpdates:  productUpdateManager,
+		ProductNetwork:  network,
 		Backups:         backupManager,
 	}
 	executor.Sources = &runtimesource.Manager{
@@ -317,12 +333,13 @@ func runServe(arguments []string, stderr io.Writer) int {
 		Target: executor,
 	}
 	coordinator := &runtimeapp.Coordinator{
-		State:    state,
-		Executor: executor,
-		Recovery: supervisor,
-		Network:  network,
-		Updates:  updateManager,
-		Backups:  backupManager,
+		State:          state,
+		Executor:       executor,
+		Recovery:       supervisor,
+		Network:        network,
+		Updates:        updateManager,
+		ProductUpdates: productUpdateManager,
+		Backups:        backupManager,
 		Diagnostics: &runtimediag.Service{
 			State:          state,
 			StateRoot:      *stateRoot,
@@ -341,6 +358,14 @@ func runServe(arguments []string, stderr io.Writer) int {
 	defer stopSignal()
 	serviceContext, stop := context.WithCancel(contextWithSignal)
 	defer stop()
+	if err := productUpdateManager.RecoverIncomplete(
+		serviceContext,
+		executor,
+		func(string, int, bool) error { return nil },
+	); err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), false)
+		return 1
+	}
 	runtimeLogger := log.New(runtimeLogWriter, "submux-runtime: ", log.LstdFlags)
 	runtimeLogger.Print("serving local IPC")
 	workerResult := make(chan error, 1)
@@ -1110,6 +1135,157 @@ func writeMihomoUpdatePlan(stdout io.Writer, jsonOutput bool, plan runtimeapi.Mi
 		plan.PlanID,
 		plan.ExpiresAt.Format(time.RFC3339),
 	)
+	if plan.Warning != "" {
+		fmt.Fprintln(stdout, plan.Warning)
+	}
+	return 0
+}
+
+func runProduct(arguments []string, stdout io.Writer, stderr io.Writer) int {
+	if len(arguments) == 0 {
+		fmt.Fprintln(stderr, "usage: submux-runtime product [check|import|install|rollback]")
+		return 2
+	}
+	command := arguments[0]
+	defaults := runtimepaths.Current()
+	flags := flag.NewFlagSet("product "+command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	endpoint := flags.String("endpoint", defaults.Endpoint, "local Runtime IPC endpoint")
+	jsonOutput := flags.Bool("json", false, "print stable JSON")
+	version := flags.String("version", "", "exact stable Runtime vX.Y.Z version")
+	planID := flags.String("plan", "", "verified Runtime product update plan ID")
+	trust := flags.String("trust", runtimeapi.ProductUpdateTrustTUF, "must be tuf")
+	confirm := flags.Bool("confirm", false, "explicitly confirm product replacement or rollback")
+	wait := flags.Bool("wait", false, "wait for the operation to finish")
+	if err := flags.Parse(arguments[1:]); err != nil {
+		return 2
+	}
+	if command != "check" && command != "import" && command != "install" && command != "rollback" {
+		fmt.Fprintln(stderr, "usage: submux-runtime product [check|import|install|rollback]")
+		return 2
+	}
+	client, err := runtimeipc.NewClient(*endpoint, buildinfo.Current().Version)
+	if err != nil {
+		fmt.Fprintln(stderr, runtimeprivacy.RedactError(err))
+		return 1
+	}
+	defer client.CloseIdleConnections()
+	ctx := context.Background()
+
+	if command == "check" {
+		if flags.NArg() != 0 || *planID != "" || *confirm || *wait ||
+			*trust != runtimeapi.ProductUpdateTrustTUF {
+			fmt.Fprintln(stderr, "product check accepts only optional --version")
+			return 2
+		}
+		preview, err := client.PreviewProductUpdate(ctx, runtimeapi.ProductUpdatePreviewRequest{
+			Source:  runtimeapi.ProductUpdateSourceOnlineTUF,
+			Version: *version,
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		return writeProductUpdatePlan(stdout, *jsonOutput, preview)
+	}
+
+	if command == "import" {
+		if flags.NArg() != 1 || *planID != "" || *confirm || *wait ||
+			*trust != runtimeapi.ProductUpdateTrustTUF {
+			fmt.Fprintln(stderr, "product import accepts optional --version and exactly one offline TUF bundle file")
+			return 2
+		}
+		body, err := runtimebackupfile.Read(flags.Arg(0), runtimeapi.RuntimeProductUpdateMaxBytes)
+		if err != nil {
+			writeCLIError(stderr, runtimeapi.ErrorInvalidRequest, err.Error(), false)
+			return 1
+		}
+		content, err := client.UploadImport(ctx, runtimeapi.ProductUpdateBundleContentType, body)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		preview, err := client.PreviewProductUpdate(ctx, runtimeapi.ProductUpdatePreviewRequest{
+			Source:    runtimeapi.ProductUpdateSourceOfflineTUF,
+			Version:   *version,
+			ContentID: content.ID,
+		})
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+		return writeProductUpdatePlan(stdout, *jsonOutput, preview)
+	}
+
+	if flags.NArg() != 0 || *version != "" {
+		fmt.Fprintf(stderr, "product %s does not accept version or positional arguments\n", command)
+		return 2
+	}
+	snapshot, err := client.Observe(ctx)
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	action := runtimeapi.Action{
+		Kind: runtimeapi.ActionRollbackProduct,
+		Params: runtimeapi.ActionParams{
+			Confirm: *confirm,
+		},
+	}
+	if command == "install" {
+		if *planID == "" || !*confirm || *trust != runtimeapi.ProductUpdateTrustTUF {
+			fmt.Fprintln(stderr, "product install requires --plan, --trust tuf, and --confirm")
+			return 2
+		}
+		action.Kind = runtimeapi.ActionUpdateProduct
+		action.Params.PlanID = *planID
+		action.Params.Trust = *trust
+	} else if *planID != "" || !*confirm || *trust != runtimeapi.ProductUpdateTrustTUF {
+		fmt.Fprintln(stderr, "product rollback requires --confirm and does not accept --plan or --trust")
+		return 2
+	}
+	operation, err := client.Execute(ctx, runtimeapi.CreateOperationRequest{
+		IfRevision: snapshot.Revision,
+		Action:     action,
+	})
+	if err != nil {
+		return writeClientFailure(stdout, stderr, *jsonOutput, err)
+	}
+	if *wait {
+		operation, err = client.WaitOperation(ctx, operation.ID, 250*time.Millisecond)
+		if err != nil {
+			return writeClientFailure(stdout, stderr, *jsonOutput, err)
+		}
+	}
+	return writeOperation(stdout, *jsonOutput, operation)
+}
+
+func writeProductUpdatePlan(stdout io.Writer, jsonOutput bool, plan runtimeapi.ProductUpdatePlan) int {
+	if jsonOutput {
+		_ = json.NewEncoder(stdout).Encode(plan)
+		return 0
+	}
+	fmt.Fprintf(
+		stdout,
+		"Runtime %s -> %s (%s, %s/%s)\nasset %s bytes sha256:%s\nschema %d -> %d; IPC protocol %d in %d-%d\nnetwork interruption: %s\nplan %s expires %s\n",
+		plan.CurrentVersion,
+		plan.Version,
+		plan.Trust,
+		plan.Platform,
+		plan.Arch,
+		strconv.FormatInt(plan.AssetSize, 10),
+		plan.AssetSHA256,
+		plan.Migration.CurrentSchema,
+		plan.Migration.TargetSchema,
+		plan.Migration.CurrentProtocol,
+		plan.Migration.ProtocolMin,
+		plan.Migration.ProtocolMax,
+		plan.NetworkInterruption,
+		plan.PlanID,
+		plan.ExpiresAt.Format(time.RFC3339),
+	)
+	if plan.ReleaseNotes != "" {
+		fmt.Fprintln(stdout, plan.ReleaseNotes)
+	}
+	if plan.Migration.Summary != "" {
+		fmt.Fprintln(stdout, plan.Migration.Summary)
+	}
 	if plan.Warning != "" {
 		fmt.Fprintln(stdout, plan.Warning)
 	}

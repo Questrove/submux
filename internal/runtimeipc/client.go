@@ -315,10 +315,9 @@ func (c *Client) UploadImport(
 	request.Header.Set(HeaderContentSize, strconv.FormatInt(int64(len(body)), 10))
 	request.Header.Set(HeaderContentSHA256, hex.EncodeToString(digest[:]))
 	var response *http.Response
-	if strings.EqualFold(
-		strings.TrimSpace(strings.Split(contentType, ";")[0]),
-		runtimeapi.RuntimeBackupContentType,
-	) {
+	mediaType := strings.TrimSpace(strings.Split(contentType, ";")[0])
+	if strings.EqualFold(mediaType, runtimeapi.RuntimeBackupContentType) ||
+		strings.EqualFold(mediaType, runtimeapi.ProductUpdateBundleContentType) {
 		response, err = c.doLong(request)
 	} else {
 		response, err = c.do(request)
@@ -404,6 +403,15 @@ func (c *Client) PreviewMihomoUpdate(
 		return preview, invalidResponseError("Mihomo update preview response", err)
 	}
 	return preview, nil
+}
+
+func (c *Client) PreviewProductUpdate(
+	ctx context.Context,
+	request runtimeapi.ProductUpdatePreviewRequest,
+) (runtimeapi.ProductUpdatePlan, error) {
+	var response runtimeapi.ProductUpdatePlan
+	err := c.postJSON(ctx, "/v1/product/updates/preview", request, http.StatusOK, &response)
+	return response, err
 }
 
 func (c *Client) PreviewBackup(

@@ -145,6 +145,40 @@ func TestOfflineVerifierRejectsTargetDigestMismatch(t *testing.T) {
 	}
 }
 
+func TestOfflineProductVerifierUsesSameTUFWorkflow(t *testing.T) {
+	t.Parallel()
+	repository := newTestRepository(t, time.Now().Add(24*time.Hour), 1)
+	body := []byte("signed-runtime-product-package")
+	targetPath := addProductTestTarget(t, repository, body, "v2.3.4")
+	root, entries := repository.signedEntries(t)
+	bundle := writeBundle(t, entries, targetPath, body)
+
+	verifier := &Verifier{
+		InitialRoot: root,
+		StateRoot:   filepath.Join(t.TempDir(), "trust"),
+	}
+	target, verified, err := verifier.RefreshProductOffline(
+		t.Context(),
+		bundle,
+		"linux",
+		"amd64",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("verify offline Runtime product bundle: %v", err)
+	}
+	if target.Version != "v2.3.4" ||
+		target.Channel != ProductChannelStable ||
+		target.RuntimeSchemaTarget != 1 ||
+		target.ProtocolMin != 1 ||
+		string(verified) != string(body) {
+		t.Fatalf("unexpected verified Runtime product target: %#v %q", target, verified)
+	}
+	if err := verifier.VerifyProductTarget(target, verified); err != nil {
+		t.Fatalf("verify signed Runtime product bytes: %v", err)
+	}
+}
+
 func TestBundleRejectsTraversalAndDuplicateEntries(t *testing.T) {
 	t.Parallel()
 	for _, testCase := range []struct {
@@ -214,6 +248,49 @@ func addTestTarget(
 		Repository:     OfficialRepository,
 		AssetName:      asset,
 		UpstreamSHA256: hex.EncodeToString(sum[:]),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := json.RawMessage(custom)
+	target.Custom = &raw
+	repository.targets.Signed.Targets[targetPath] = target
+	return targetPath
+}
+
+func addProductTestTarget(
+	t *testing.T,
+	repository *testRepository,
+	body []byte,
+	version string,
+) string {
+	t.Helper()
+	asset := "submux-runtime-" + version + "-linux-amd64.zip"
+	targetPath := "product/" + version + "/linux/amd64/" + asset
+	target, err := metadata.TargetFile().FromBytes(targetPath, body, "sha256")
+	if err != nil {
+		t.Fatalf("create Runtime product target metadata: %v", err)
+	}
+	custom, err := json.Marshal(productTargetCustom{
+		Kind:                TargetKindProduct,
+		Version:             version,
+		Platform:            "linux",
+		Arch:                "amd64",
+		Channel:             ProductChannelStable,
+		AssetName:           asset,
+		ReleaseNotes:        "Stable Runtime product update.",
+		MigrationSummary:    "No database migration is required.",
+		RuntimeSchemaMin:    1,
+		RuntimeSchemaMax:    1,
+		RuntimeSchemaTarget: 1,
+		ProtocolMin:         1,
+		ProtocolMax:         1,
+		RequiredFreeBytes:   int64(len(body)) * 4,
+		Components: []string{
+			"submux-runtime",
+			"submux-runtime-net",
+			"submux-runtime-gui",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -32,6 +32,8 @@ type fakeClient struct {
 	networkRequests    []runtimeapi.NetworkPreviewRequest
 	networkPreview     runtimeapi.NetworkPreview
 	updatePreview      runtimeapi.MihomoUpdatePlan
+	productRequests    []runtimeapi.ProductUpdatePreviewRequest
+	productPreview     runtimeapi.ProductUpdatePlan
 	backupPreviews     int
 	backupExports      int
 	backupInspections  int
@@ -185,6 +187,29 @@ func (f *fakeClient) PreviewMihomoUpdate(
 			Platform:       "linux",
 			Arch:           "amd64",
 			Repository:     "MetaCubeX/mihomo",
+			ExpiresAt:      time.Now().Add(5 * time.Minute),
+		}
+	}
+	return preview, nil
+}
+
+func (f *fakeClient) PreviewProductUpdate(
+	_ context.Context,
+	request runtimeapi.ProductUpdatePreviewRequest,
+) (runtimeapi.ProductUpdatePlan, error) {
+	f.productRequests = append(f.productRequests, request)
+	preview := f.productPreview
+	if preview.PlanID == "" {
+		preview = runtimeapi.ProductUpdatePlan{
+			PlanID:         "product_plan_0123456789abcdef0123456789abcdef",
+			Source:         request.Source,
+			Trust:          runtimeapi.ProductUpdateTrustTUF,
+			Channel:        runtimeapi.ProductUpdateChannelStable,
+			Version:        "v2.0.0",
+			CurrentVersion: "v1.0.0",
+			Installable:    true,
+			Platform:       "linux",
+			Arch:           "amd64",
 			ExpiresAt:      time.Now().Add(5 * time.Minute),
 		}
 	}
@@ -419,6 +444,88 @@ func TestModelMihomoUpdateAndRollbackRequireTwoStepConfirmation(t *testing.T) {
 	rollbackAction := client.actions[len(client.actions)-1]
 	if rollbackAction.Kind != runtimeapi.ActionRollbackMihomo || !rollbackAction.Params.Confirm {
 		t.Fatalf("unexpected Mihomo rollback action: %#v", rollbackAction)
+	}
+}
+
+func TestModelProductUpdateOnlineOfflineAndRollbackUseSameConfirmedActions(t *testing.T) {
+	client := &fakeClient{snapshot: runtimeapi.Snapshot{
+		ProtocolVersion: runtimeapi.ProtocolVersion,
+		Revision:        9,
+		Updates: runtimeapi.UpdateStatus{
+			RuntimeCurrentVersion:  "v1.0.0",
+			RuntimePreviousVersion: "v0.9.0",
+		},
+	}}
+	model := New(t.Context(), client)
+	updated, _ := model.Update(model.Init()())
+	model = updated.(Model)
+
+	updated, command := model.Update(keyPress('P'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("Runtime product update check did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	if len(client.productRequests) != 1 ||
+		client.productRequests[0].Source != runtimeapi.ProductUpdateSourceOnlineTUF {
+		t.Fatalf("online product requests = %#v", client.productRequests)
+	}
+	updated, command = model.Update(keyPress('P'))
+	model = updated.(Model)
+	if command != nil || model.sensitiveConfirm == "" {
+		t.Fatal("first Runtime product confirmation did not stop before execution")
+	}
+	updated, command = model.Update(keyPress('P'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("second Runtime product confirmation did not execute")
+	}
+	updated, _ = model.Update(command())
+	updateAction := client.actions[len(client.actions)-1]
+	if updateAction.Kind != runtimeapi.ActionUpdateProduct ||
+		updateAction.Params.Trust != runtimeapi.ProductUpdateTrustTUF ||
+		!updateAction.Params.Confirm {
+		t.Fatalf("unexpected Runtime product update action: %#v", updateAction)
+	}
+
+	model.busy = false
+	updated, command = model.Update(keyPress('O'))
+	model = updated.(Model)
+	if command != nil || model.sensitiveConfirm != "product-rollback" {
+		t.Fatal("first Runtime product rollback confirmation did not stop")
+	}
+	updated, command = model.Update(keyPress('O'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("second Runtime product rollback confirmation did not execute")
+	}
+	updated, _ = model.Update(command())
+	rollbackAction := client.actions[len(client.actions)-1]
+	if rollbackAction.Kind != runtimeapi.ActionRollbackProduct || !rollbackAction.Params.Confirm {
+		t.Fatalf("unexpected Runtime product rollback action: %#v", rollbackAction)
+	}
+
+	model.busy = false
+	bundle := filepath.Join(t.TempDir(), "product-update.zip")
+	if err := os.WriteFile(bundle, []byte("offline product TUF bundle"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ = model.Update(keyPress('I'))
+	model = updated.(Model)
+	model.editor.SetValue(bundle)
+	updated, command = model.Update(ctrlKey('s'))
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("offline Runtime product preview did not return a command")
+	}
+	updated, _ = model.Update(command())
+	model = updated.(Model)
+	lastRequest := client.productRequests[len(client.productRequests)-1]
+	if client.uploadedType != runtimeapi.ProductUpdateBundleContentType ||
+		lastRequest.Source != runtimeapi.ProductUpdateSourceOfflineTUF ||
+		lastRequest.ContentID == "" {
+		t.Fatalf("offline product upload type=%s request=%#v", client.uploadedType, lastRequest)
 	}
 }
 
