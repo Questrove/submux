@@ -1,0 +1,5 @@
+d /run/submux-runtime 0750 submux-runtime submux-runtime -
+d /run/submux-runtime-privileged 2750 root submux-runtime -
+d /var/lib/submux-runtime 0700 submux-runtime submux-runtime -
+d /var/lib/submux-runtime-privileged 0700 root root -
+d /var/lib/submux-runtime-privileged/network 0700 root root -

@@ -1,0 +1,41 @@
+[Unit]
+Description=Submux local Runtime
+Documentation=https://github.com/Questrove/submux
+Requires=submux-runtime-net.service
+After=network-online.target submux-runtime-net.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=submux-runtime
+Group=submux-runtime
+UMask=0077
+ExecStart=/usr/lib/submux-runtime/submux-runtime serve
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+StateDirectory=submux-runtime
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/submux-runtime /run/submux-runtime
+
+[Install]
+WantedBy=multi-user.target

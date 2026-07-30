@@ -15,12 +15,13 @@ import (
 	"time"
 
 	"submux/internal/buildinfo"
+	"submux/internal/runtimeaccount"
 	"submux/internal/runtimenet"
 )
 
 const (
-	defaultEndpoint  = "/run/submux-runtime/runtime-net.sock"
-	defaultStateRoot = "/var/lib/submux/runtime-net"
+	defaultEndpoint  = "/run/submux-runtime-privileged/runtime-net.sock"
+	defaultStateRoot = "/var/lib/submux-runtime-privileged/network"
 )
 
 func main() {
@@ -41,6 +42,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	flags.SetOutput(stderr)
 	endpoint := flags.String("endpoint", defaultEndpoint, "fixed internal Runtime network Socket")
 	stateRoot := flags.String("state-dir", defaultStateRoot, "privileged Runtime network state directory")
+	runtimeUser := flags.String("runtime-user", "submux-runtime", "fixed unprivileged Runtime service account")
 	runtimeUID := flags.Int("runtime-uid", -1, "unprivileged Runtime service account UID")
 	runtimeGID := flags.Int("runtime-gid", -1, "unprivileged Runtime service account GID")
 	if err := flags.Parse(arguments); err != nil {
@@ -50,21 +52,26 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "submux-runtime-net does not accept positional arguments")
 		return 2
 	}
+	if *endpoint != defaultEndpoint || *stateRoot != defaultStateRoot {
+		fmt.Fprintln(stderr, "submux-runtime-net requires the fixed Linux Runtime paths")
+		return 2
+	}
 	if os.Geteuid() != 0 {
 		fmt.Fprintln(stderr, "submux-runtime-net must run as root")
 		return 1
 	}
-	if *runtimeUID <= 0 || *runtimeGID < 0 {
-		fmt.Fprintln(stderr, "submux-runtime-net requires --runtime-uid and --runtime-gid")
+	resolvedUID, resolvedGID, err := resolveRuntimeIdentity(*runtimeUser, *runtimeUID, *runtimeGID)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 2
 	}
 
-	system, err := runtimenet.NewLinuxSystem(uint32(*runtimeUID))
+	system, err := runtimenet.NewLinuxSystem(resolvedUID)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	manager, err := runtimenet.OpenManager(*stateRoot, uint32(*runtimeUID), system)
+	manager, err := runtimenet.OpenManager(*stateRoot, resolvedUID, system)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -75,7 +82,7 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	listener, err := runtimenet.Listen(*endpoint, *runtimeGID)
+	listener, err := runtimenet.Listen(*endpoint, int(resolvedGID))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -104,4 +111,17 @@ func run(arguments []string, stdout io.Writer, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func resolveRuntimeIdentity(name string, uid, gid int) (uint32, uint32, error) {
+	if uid == -1 && gid == -1 {
+		return runtimeaccount.Lookup(name)
+	}
+	if uid <= 0 || gid <= 0 {
+		return 0, 0, errors.New("--runtime-uid and --runtime-gid must be supplied together and be positive")
+	}
+	if name != "submux-runtime" {
+		return 0, 0, errors.New("Linux Runtime service account name must remain submux-runtime")
+	}
+	return uint32(uid), uint32(gid), nil
 }

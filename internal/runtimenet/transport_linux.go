@@ -21,20 +21,28 @@ type unixListener struct {
 	path string
 }
 
+const linuxNetworkSocket = "/run/submux-runtime-privileged/runtime-net.sock"
+
 func Listen(endpoint string, runtimeGID int) (LocalListener, error) {
 	if runtimeGID < 0 {
 		return nil, errors.New("privileged Runtime network group ID is invalid")
 	}
-	absolute, err := validateNetworkEndpoint(endpoint, true)
+	absolute, err := validateNetworkEndpoint(endpoint, endpoint != linuxNetworkSocket)
 	if err != nil {
 		return nil, err
 	}
 	parent := filepath.Dir(absolute)
-	if err := os.Chown(parent, 0, runtimeGID); err != nil {
-		return nil, fmt.Errorf("assign privileged Runtime network Socket directory group: %w", err)
-	}
-	if err := os.Chmod(parent, 0770); err != nil {
-		return nil, fmt.Errorf("secure privileged Runtime network Socket directory: %w", err)
+	if endpoint == linuxNetworkSocket {
+		if err := validateLinuxNetworkDirectory(parent, runtimeGID); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := os.Chown(parent, 0, runtimeGID); err != nil {
+			return nil, fmt.Errorf("assign privileged Runtime network Socket directory group: %w", err)
+		}
+		if err := os.Chmod(parent, 0750); err != nil {
+			return nil, fmt.Errorf("secure privileged Runtime network Socket directory: %w", err)
+		}
 	}
 	if info, err := os.Lstat(absolute); err == nil {
 		if info.Mode()&os.ModeSocket == 0 {
@@ -62,7 +70,15 @@ func Listen(endpoint string, runtimeGID int) (LocalListener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listen on privileged Runtime network Socket: %w", err)
 	}
-	if err := os.Chown(absolute, 0, runtimeGID); err != nil {
+	if endpoint == linuxNetworkSocket {
+		var stat unix.Stat_t
+		if err := unix.Stat(absolute, &stat); err != nil ||
+			stat.Uid != 0 || stat.Gid != uint32(runtimeGID) {
+			_ = listener.Close()
+			_ = os.Remove(absolute)
+			return nil, errors.New("privileged Runtime network Socket ownership is invalid")
+		}
+	} else if err := os.Chown(absolute, 0, runtimeGID); err != nil {
 		_ = listener.Close()
 		_ = os.Remove(absolute)
 		return nil, fmt.Errorf("assign privileged Runtime network Socket group: %w", err)
@@ -73,6 +89,28 @@ func Listen(endpoint string, runtimeGID int) (LocalListener, error) {
 		return nil, fmt.Errorf("secure privileged Runtime network Socket: %w", err)
 	}
 	return &unixListener{UnixListener: listener, path: absolute}, nil
+}
+
+func validateLinuxNetworkDirectory(parent string, runtimeGID int) error {
+	info, err := os.Stat(parent)
+	if err != nil {
+		return fmt.Errorf("inspect privileged Runtime network Socket directory: %w", err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Stat(parent, &stat); err != nil {
+		return fmt.Errorf("inspect privileged Runtime network Socket directory ownership: %w", err)
+	}
+	if !info.IsDir() || info.Mode().Perm() != 0750 ||
+		stat.Uid != 0 || stat.Gid != uint32(runtimeGID) {
+		return fmt.Errorf(
+			"privileged Runtime network Socket directory ownership or permissions are invalid: uid=%d gid=%d mode=%#o expected_gid=%d",
+			stat.Uid,
+			stat.Gid,
+			info.Mode().Perm(),
+			runtimeGID,
+		)
+	}
+	return nil
 }
 
 func (listener *unixListener) PeerUID(connection net.Conn) (uint32, error) {

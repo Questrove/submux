@@ -8,6 +8,6 @@ func platformDefaults() Defaults {
 		Endpoint:        "/run/submux-runtime/runtime.sock",
 		LockFile:        "/run/submux-runtime/runtime.lock",
 		ControlEndpoint: "/run/submux-runtime/mihomo.sock",
-		NetworkEndpoint: "/run/submux-runtime/runtime-net.sock",
+		NetworkEndpoint: "/run/submux-runtime-privileged/runtime-net.sock",
 	}
 }
