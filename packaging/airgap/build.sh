@@ -113,16 +113,6 @@ fi
   cd "$runtime_bundle/root"
   sha256sum --strict --check usr/lib/submux-runtime/ARTIFACT-MANIFEST.sha256 >/dev/null
 ) || fail "Runtime bundle artifact verification failed"
-case "$(uname -m)" in
-  x86_64 | amd64) build_arch=amd64 ;;
-  aarch64 | arm64) build_arch=arm64 ;;
-  *) build_arch=unknown ;;
-esac
-if [[ $build_arch == "$architecture" ]]; then
-  "$control_binary" --version | grep -F " $control_version (" >/dev/null ||
-    fail "control binary version does not match --control-version"
-fi
-
 mkdir -p "$output_dir"
 output_dir=$(cd -- "$output_dir" && pwd -P)
 work=$(mktemp -d)
@@ -139,6 +129,16 @@ install -m 0755 "$airgap_installer" "$root/install.sh"
 install -m 0644 "$kit_readme" "$root/README.md"
 install -m 0755 "$control_installer" "$root/control/install-submux.sh"
 install -m 0755 "$control_binary" "$root/control/submux-linux-$architecture"
+case "$(uname -m)" in
+  x86_64 | amd64) build_arch=amd64 ;;
+  aarch64 | arm64) build_arch=arm64 ;;
+  *) build_arch=unknown ;;
+esac
+if [[ $build_arch == "$architecture" ]]; then
+  "$root/control/submux-linux-$architecture" --version |
+    grep -F " $control_version (" >/dev/null ||
+    fail "control binary version does not match --control-version"
+fi
 (
   cd "$root/control"
   sha256sum "submux-linux-$architecture" >checksums.txt

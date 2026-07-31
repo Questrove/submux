@@ -47,8 +47,8 @@ printf 'runtime-test\n' >"$work/input/runtime/root/usr/lib/submux-runtime/submux
 ln -s ../lib/submux-runtime/submux-runtime \
   "$work/input/runtime/root/usr/bin/submux-runtime"
 printf 'bundle-test\n' >"$work/input/offline-verification-bundle.zip"
+chmod 0644 "$work/input/control"
 chmod 0755 \
-  "$work/input/control" \
   "$work/input/control-installer" \
   "$work/input/runtime/install.sh" \
   "$work/input/runtime/root/usr/lib/submux-runtime/submux-runtime"
@@ -85,6 +85,10 @@ mkdir "$work/extracted"
 tar -xzf "$work/output-one/$archive" -C "$work/extracted"
 kit="$work/extracted/submux-airgap_3.4.5_linux_${architecture}"
 bash "$kit/install.sh" verify >/dev/null
+[[ -x $kit/control/submux-linux-$architecture ]] || {
+  echo "airgap builder did not normalize the control binary mode" >&2
+  exit 1
+}
 
 printf 'unlisted\n' >"$kit/unlisted.txt"
 if bash "$kit/install.sh" verify >/dev/null 2>&1; then
