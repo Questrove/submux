@@ -38,6 +38,7 @@ if [ "${url##*/}" = "checksums.txt" ]; then
   exit 0
 fi
 version="$(printf '%s' "$url" | sed -E 's#^.*/download/([^/]+)/.*$#\1#')"
+version="${version#submux-}"
 binary="$(basename "$url")"
 printf '#!/usr/bin/env bash\nprintf "%%s %%s (installer-test)\\n" "%s" "%s"\n' "$binary" "$version" >"$output"
 EOF
@@ -45,9 +46,9 @@ chmod +x "$work/bin/id" "$work/bin/uname" "$work/bin/curl"
 
 run_installer_cycle() {
   local script="$1" install_dir="$2" binary="$3" fake_uid="$4"
-  PATH="$work/bin:$PATH" FAKE_UID="$fake_uid" INSTALL_DIR="$install_dir" bash "$script" --version v1.2.3
+  PATH="$work/bin:$PATH" FAKE_UID="$fake_uid" INSTALL_DIR="$install_dir" bash "$script" --version submux-v1.2.3
   "$install_dir/$binary" --version | grep -F 'v1.2.3' >/dev/null
-  if PATH="$work/bin:$PATH" FAKE_UID="$fake_uid" FAKE_BAD_CHECKSUM=1 INSTALL_DIR="$install_dir" bash "$script" --version v1.2.4 --upgrade 2>/dev/null; then
+  if PATH="$work/bin:$PATH" FAKE_UID="$fake_uid" FAKE_BAD_CHECKSUM=1 INSTALL_DIR="$install_dir" bash "$script" --version submux-v1.2.4 --upgrade 2>/dev/null; then
     printf 'bad checksum was accepted by %s\n' "$script" >&2
     return 1
   fi

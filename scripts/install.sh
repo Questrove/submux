@@ -18,7 +18,7 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [options]
 
-  --version VERSION   install an exact release (for example v0.4.0)
+  --version TAG       install an exact release tag (for example submux-v2.0.1)
   --channel CHANNEL   stable (default) or alpha
   --service           install or update the Linux systemd service
   --upgrade           require an existing installation and upgrade it
@@ -140,7 +140,7 @@ case "$os" in linux|darwin) ;; *) die "unsupported OS: $os" ;; esac
 [ "$WITH_SERVICE" -eq 0 ] || [ "$os" = linux ] || die "--service is supported only on Linux"
 asset="submux-${os}-${arch}"
 
-resolve_version() {
+resolve_release_tag() {
   if [ -n "$REQUESTED_VERSION" ]; then printf '%s' "$REQUESTED_VERSION"; return; fi
   if [ "$CHANNEL" = stable ]; then
     effective="$(curl -fsSIL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
@@ -157,9 +157,14 @@ for item in items:
 else: raise SystemExit("no alpha release found")'
 }
 
-version="$(resolve_version)"
-[ -n "$version" ] || die "could not resolve a release version"
-printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || die "invalid exact release version: $version"
+release_tag="$(resolve_release_tag)"
+[ -n "$release_tag" ] || die "could not resolve a release tag"
+case "$release_tag" in
+  submux-v*) version="${release_tag#submux-}" ;;
+  v*) version="$release_tag" ;;
+  *) die "invalid exact release tag: $release_tag" ;;
+esac
+printf '%s' "$version" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || die "invalid exact release tag: $release_tag"
 if [ "$CHANNEL" = stable ] && printf '%s' "$version" | grep -Eqi '(alpha|beta|rc|pre)'; then
   die "pre-release $version requires --channel alpha"
 fi
@@ -167,7 +172,7 @@ fi
 tmpdir="$(mktemp -d)"
 cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT INT TERM
-base_url="https://github.com/${REPO}/releases/download/${version}"
+base_url="https://github.com/${REPO}/releases/download/${release_tag}"
 say "downloading submux ${version} (${os}/${arch})"
 curl -fsSL "${base_url}/${asset}" -o "${tmpdir}/${asset}"
 curl -fsSL "${base_url}/checksums.txt" -o "${tmpdir}/checksums.txt"

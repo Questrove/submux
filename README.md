@@ -11,10 +11,12 @@ submux 生成并交付可用的 Mihomo / sing-box 配置；Submux Runtime 独立
 
 | 产品 | 当前版本 | 状态 |
 |---|---|---|
-| submux 控制面 | [`v1.0.2`](https://github.com/Questrove/submux/releases/tag/v1.0.2) | Stable |
+| submux 控制面 | [`v2.0.1`](https://github.com/Questrove/submux/releases/tag/submux-v2.0.1) | Stable |
 | Submux Runtime | [`v2.0.0`](https://github.com/Questrove/submux/releases/tag/v2.0.0) | Preview |
 
 Runtime 的功能、三平台安装包和发行门禁已经实现，但 Windows、macOS 和 Linux 尚未完成全部原生系统验收，因此目前都属于 Preview。Windows MSI 尚未进行 Authenticode 签名，会显示 Unknown Publisher；macOS PKG 尚未使用 Developer ID Installer 签名，也未公证。具体证据和缺项见 [Runtime 支持矩阵](docs/RUNTIME-SUPPORT.md)。
+
+控制面和 Runtime 独立发版。控制面使用 `submux-vX.Y.Z` Release 标签，程序报告的版本仍为 `vX.Y.Z`；Runtime 使用 `vX.Y.Z` 标签。这样控制面的稳定安装通道不会受到 Runtime 预览状态影响。
 
 ## submux 控制面
 
@@ -50,28 +52,29 @@ Runtime 的功能、三平台安装包和发行门禁已经实现，但 Windows�
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh |
-  bash -s -- --version v1.0.2
+  bash -s -- --version submux-v2.0.1
 ```
 
 Linux 可以同时安装并启动 systemd 服务：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh |
-  bash -s -- --version v1.0.2 --service
+  bash -s -- --version submux-v2.0.1 --service
 ```
 
-安装器还支持 `--upgrade`、`--rollback` 和 `--uninstall`。Windows 用户可以从 [v1.0.2 Release](https://github.com/Questrove/submux/releases/tag/v1.0.2) 下载 `submux-windows-amd64.exe` 和 `checksums.txt`，完成 SHA-256 校验后直接运行。
+不指定 `--version` 时，安装器使用 GitHub 的最新稳定 Release。它还支持 `--upgrade`、`--rollback` 和 `--uninstall`。Windows 用户可以从 [v2.0.1 Release](https://github.com/Questrove/submux/releases/tag/submux-v2.0.1) 下载 `submux-windows-amd64.exe` 和 `checksums.txt`，完成 SHA-256 校验后直接运行。
 
 ### 手动或离线安装控制面
 
 在能够访问 GitHub 的机器上下载目标系统的单二进制和 `checksums.txt`，校验后把两者转移到离线机器。下面以 Linux amd64 为例；`OS` 也可以是 `darwin`，`ARCH` 可以是 `arm64`：
 
 ```sh
-VERSION=v1.0.2
+VERSION=v2.0.1
+RELEASE_TAG="submux-${VERSION}"
 OS=linux
 ARCH=amd64
 ASSET="submux-${OS}-${ARCH}"
-BASE_URL="https://github.com/Questrove/submux/releases/download/${VERSION}"
+BASE_URL="https://github.com/Questrove/submux/releases/download/${RELEASE_TAG}"
 
 curl -fLO "${BASE_URL}/${ASSET}"
 curl -fLO "${BASE_URL}/checksums.txt"
@@ -400,6 +403,7 @@ server {
 | 控制面领域模型与发布语义 | [docs/DESIGN.md](docs/DESIGN.md) |
 | 支持的节点协议 | [docs/PROTOCOLS.md](docs/PROTOCOLS.md) |
 | 机场生命周期 | [docs/LIFECYCLE.md](docs/LIFECYCLE.md) |
+| 控制面发行 | [docs/RELEASING-SUBMUX.md](docs/RELEASING-SUBMUX.md) |
 | Runtime 总体设计 | [docs/RUNTIME.md](docs/RUNTIME.md) |
 | Runtime 本机 IPC | [docs/RUNTIME-IPC.md](docs/RUNTIME-IPC.md) |
 | TUN、Linux 网关与权限边界 | [docs/RUNTIME-NETWORK.md](docs/RUNTIME-NETWORK.md) |
