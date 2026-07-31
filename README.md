@@ -11,8 +11,8 @@ submux 生成并交付可用的 Mihomo / sing-box 配置；Submux Runtime 独立
 
 | 产品 | 当前版本 | 状态 |
 |---|---|---|
-| submux 控制面 | [`v2.0.1`](https://github.com/Questrove/submux/releases/tag/submux-v2.0.1) | Stable |
-| Submux Runtime | [`v2.0.0`](https://github.com/Questrove/submux/releases/tag/v2.0.0) | Preview |
+| submux 控制面 | [`v2.0.2`](https://github.com/Questrove/submux/releases/tag/submux-v2.0.2) | Stable |
+| Submux Runtime | [`v2.0.1`](https://github.com/Questrove/submux/releases/tag/v2.0.1) | Preview |
 
 Runtime 的功能、三平台安装包和发行门禁已经实现，但 Windows、macOS 和 Linux 尚未完成全部原生系统验收，因此目前都属于 Preview。Windows MSI 尚未进行 Authenticode 签名，会显示 Unknown Publisher；macOS PKG 尚未使用 Developer ID Installer 签名，也未公证。具体证据和缺项见 [Runtime 支持矩阵](docs/RUNTIME-SUPPORT.md)。
 
@@ -52,46 +52,41 @@ Runtime 的功能、三平台安装包和发行门禁已经实现，但 Windows�
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh |
-  bash -s -- --version submux-v2.0.1
+  bash -s -- --version submux-v2.0.2
 ```
 
 Linux 可以同时安装并启动 systemd 服务：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/install.sh |
-  bash -s -- --version submux-v2.0.1 --service
+  bash -s -- --version submux-v2.0.2 --service
 ```
 
-不指定 `--version` 时，安装器使用 GitHub 的最新稳定 Release。它还支持 `--upgrade`、`--rollback` 和 `--uninstall`。Windows 用户可以从 [v2.0.1 Release](https://github.com/Questrove/submux/releases/tag/submux-v2.0.1) 下载 `submux-windows-amd64.exe` 和 `checksums.txt`，完成 SHA-256 校验后直接运行。
+不指定 `--version` 时，安装器使用 GitHub 的最新稳定 Release。它还支持 `--upgrade`、`--rollback` 和 `--uninstall`。Windows 用户可以从 [v2.0.2 Release](https://github.com/Questrove/submux/releases/tag/submux-v2.0.2) 下载 `submux-windows-amd64.exe` 和 `checksums.txt`，完成 SHA-256 校验后直接运行。
 
 ### 手动或离线安装控制面
 
-在能够访问 GitHub 的机器上下载目标系统的单二进制和 `checksums.txt`，校验后把两者转移到离线机器。下面以 Linux amd64 为例；`OS` 也可以是 `darwin`，`ARCH` 可以是 `arm64`：
+从 v2.0.2 开始，控制面 Release 同时提供 `install-submux.sh`。在能够访问 GitHub 的机器上下载安装脚本、目标系统的单二进制和 `checksums.txt`，校验后把这几个文件放在同一个目录并转移到目标机器。下面以 Linux amd64 为例；把 `RELEASE_TAG` 换成实际包含该安装脚本的控制面版本：
 
 ```sh
-VERSION=v2.0.1
-RELEASE_TAG="submux-${VERSION}"
-OS=linux
-ARCH=amd64
-ASSET="submux-${OS}-${ARCH}"
-BASE_URL="https://github.com/Questrove/submux/releases/download/${RELEASE_TAG}"
-
-curl -fLO "${BASE_URL}/${ASSET}"
-curl -fLO "${BASE_URL}/checksums.txt"
-grep "  ${ASSET}$" checksums.txt | sha256sum --check
+RELEASE_TAG=submux-vX.Y.Z
+gh release download "$RELEASE_TAG" --repo Questrove/submux \
+  --pattern install-submux.sh \
+  --pattern submux-linux-amd64 \
+  --pattern checksums.txt
+grep '  submux-linux-amd64$' checksums.txt | sha256sum --check
 ```
 
-转移后在目标机器再次执行同一条 SHA-256 校验，再安装并运行：
+转移后在目标机器再次执行 SHA-256 校验。Linux 可以用一个安装入口创建专用账户、安装或更新二进制、写入 systemd 服务并完成健康检查；整个过程不访问网络：
 
 ```sh
-ASSET=submux-linux-amd64
-grep "  ${ASSET}$" checksums.txt | sha256sum --check
-sudo install -m 0755 "${ASSET}" /usr/local/bin/submux
-submux --version
-SUBMUX_DB=submux.db submux
+RELEASE_TAG=submux-vX.Y.Z
+grep '  submux-linux-amd64$' checksums.txt | sha256sum --check
+sudo bash ./install-submux.sh \
+  --version "$RELEASE_TAG" --offline-dir . --service
 ```
 
-macOS 把校验命令换成 `shasum -a 256 -c -`。Windows 使用 `Get-FileHash -Algorithm SHA256` 核对 `checksums.txt` 中的 `submux-windows-amd64.exe` 摘要。手动方式只安装控制面单二进制；Linux systemd 服务及其专用账户由前述联网安装器创建。
+安装器默认保留 `/var/lib/submux/submux.db`。重装、修复或升级不会清空管理员、来源、模板和输出订阅；需要全新数据库时必须在服务停止后单独处理。macOS 把校验命令换成 `shasum -a 256 -c -`。Windows 使用 `Get-FileHash -Algorithm SHA256` 核对 `checksums.txt` 中的 `submux-windows-amd64.exe` 摘要，然后直接运行二进制。
 
 ### 从源码运行
 
@@ -120,15 +115,15 @@ Runtime 由以下程序组成：
 
 ### 选择在线包或离线包
 
-所有安装包都在 [Submux Runtime v2.0.0 Release](https://github.com/Questrove/submux/releases/tag/v2.0.0) 中。
+所有安装包都在 [Submux Runtime v2.0.1 Release](https://github.com/Questrove/submux/releases/tag/v2.0.1) 中。
 
 | 系统 | 在线包 | 完整离线包 |
 |---|---|---|
-| Debian / Ubuntu | `submux-runtime_2.0.0_<arch>_online.deb` | `submux-runtime_2.0.0_<arch>_offline.deb` |
-| Fedora / RHEL | `submux-runtime_2.0.0_<arch>_online.rpm` | `submux-runtime_2.0.0_<arch>_offline.rpm` |
-| 其他 systemd / glibc Linux | `submux-runtime_2.0.0_<arch>_online.tar.zst` | `submux-runtime_2.0.0_<arch>_offline.tar.zst` |
-| Windows | `submux-runtime_2.0.0_<arch>_online.msi` | `submux-runtime_2.0.0_<arch>_offline.msi` |
-| macOS 13+ | `submux-runtime_2.0.0_universal_online_unsigned.pkg` | `submux-runtime_2.0.0_universal_offline_unsigned.pkg` |
+| Debian / Ubuntu | `submux-runtime_2.0.1_<arch>_online.deb` | `submux-runtime_2.0.1_<arch>_offline.deb` |
+| Fedora / RHEL | `submux-runtime_2.0.1_<arch>_online.rpm` | `submux-runtime_2.0.1_<arch>_offline.rpm` |
+| 其他 systemd / glibc Linux | `submux-runtime_2.0.1_<arch>_online.tar.zst` | `submux-runtime_2.0.1_<arch>_offline.tar.zst` |
+| Windows | `submux-runtime_2.0.1_<arch>_online.msi` | `submux-runtime_2.0.1_<arch>_offline.msi` |
+| macOS 13+ | `submux-runtime_2.0.1_universal_online_unsigned.pkg` | `submux-runtime_2.0.1_universal_offline_unsigned.pkg` |
 
 Linux 和 Windows 的 `<arch>` 为 `amd64` 或 `arm64`；macOS PKG 同时包含 Intel 和 Apple Silicon 程序。
 
@@ -141,7 +136,7 @@ Release 中的产品 ZIP、裸二进制、`.wixpdb`、SBOM 和独立 TUF 元数�
 联网环境还可以使用 GitHub CLI 核对安装包的构建来源。把示例文件名换成实际下载的包；这项检查用于补充 SHA-256 与 Runtime 内部的 TUF 验证：
 
 ```sh
-gh attestation verify ./submux-runtime_2.0.0_amd64_online.deb \
+gh attestation verify ./submux-runtime_2.0.1_amd64_online.deb \
   --repo Questrove/submux
 ```
 
@@ -150,7 +145,7 @@ gh attestation verify ./submux-runtime_2.0.0_amd64_online.deb \
 以下示例安装 amd64 在线 DEB。离线安装时把 `KIND` 改为 `offline`；arm64 机器把 `ARCH` 改为 `arm64`。
 
 ```sh
-VERSION=2.0.0
+VERSION=2.0.1
 ARCH=amd64
 KIND=online
 BASE_URL="https://github.com/Questrove/submux/releases/download/v${VERSION}"
@@ -207,7 +202,7 @@ sudo submux-runtime-authorize-user --confirm "$USER"
 在 PowerShell 中选择架构和包类型：
 
 ```powershell
-$Version = '2.0.0'
+$Version = '2.0.1'
 $Arch = 'amd64'       # 或 arm64
 $Kind = 'online'      # 无法联网时使用 offline
 $BaseUrl = "https://github.com/Questrove/submux/releases/download/v$Version"
@@ -247,7 +242,7 @@ Windows MSI 当前未签名。只有在从本项目 Release 下载、SHA-256 校
 macOS 使用同一个 Universal PKG 支持 Intel 和 Apple Silicon：
 
 ```sh
-VERSION=2.0.0
+VERSION=2.0.1
 KIND=online
 BASE_URL="https://github.com/Questrove/submux/releases/download/v${VERSION}"
 PACKAGE="submux-runtime_${VERSION}_universal_${KIND}_unsigned.pkg"
@@ -270,7 +265,7 @@ PKG 当前未签名且未公证，macOS 可能阻止安装。不要全局关闭 
 
 ### 完全离线安装
 
-为了让首次核心安装与在线路径使用同一套 TUF 验证，v2.0.0 的完全离线流程还需要 Release 中的 `offline-verification-bundle.zip`。安装包负责安装机器服务并携带离线内容，Runtime 首次激活 Mihomo 时把该 ZIP 作为签名验证输入。
+为了让首次核心安装与在线路径使用同一套 TUF 验证，v2.0.1 的完全离线流程还需要 Release 中的 `offline-verification-bundle.zip`。安装包负责安装机器服务并携带离线内容，Runtime 首次激活 Mihomo 时把该 ZIP 作为签名验证输入。
 
 在能够访问 GitHub 的机器上完成以下准备：
 
@@ -305,7 +300,7 @@ if ($Actual -ne $Expected) { throw 'Offline verification bundle checksum mismatc
 安装完成后，通过同一套 TUF 验证器导入离线验证包。第一条命令会返回一次性 `plan_id`：
 
 ```sh
-submux-runtime mihomo import ./offline-verification-bundle.zip --json
+submux-runtime mihomo import --json ./offline-verification-bundle.zip
 submux-runtime mihomo install \
   --plan <plan_id> --trust tuf --confirm --wait --json
 ```
@@ -315,13 +310,33 @@ Windows PowerShell 中使用 `& "$env:ProgramFiles\Submux Runtime\submux-runtime
 没有可用网络时，Runtime 配置来源也应使用本机导入副本：
 
 ```sh
-submux-runtime source import --name local-config ./config.yaml --wait --json
+submux-runtime source import --name local-config --wait --json ./config.yaml
 submux-runtime source list --json
-submux-runtime source apply <source_id> --wait --json
+submux-runtime source apply --wait --json <source_id>
 submux-runtime proxy start --wait --json
 ```
 
 离线文件来自 U 盘或局域网并不会绕过验证。Runtime 仍会检查 TUF 签名、元数据版本和有效期、目标平台、架构、文件大小与 SHA-256。
+
+### Linux airgap kit
+
+从 v2.0.1 开始，Runtime Release 提供按架构生成的 `submux-airgap_<version>_linux_<arch>.tar.gz`。它是便于整机离线部署的标准归档，包含归档元数据声明的控制面版本、完整 Runtime 机器包、特权网络进程、固定的官方 Mihomo 核心、离线 TUF 验证包、SBOM、许可证、源码材料和统一安装入口。它不替代 DEB、RPM 或独立控制面 Release；只是把 Linux 无网机器需要转移的材料放在一处。
+
+在联网机器校验归档及其 `.sha256` 后，只需把归档上传到目标机。目标机不需要 zstd：
+
+```sh
+tar -xzf submux-airgap_<version>_linux_amd64.tar.gz
+cd submux-airgap_<version>_linux_amd64
+sudo ./install.sh all
+```
+
+`all` 依次安装控制面和 Runtime；只安装其中一个时改为 `control` 或 `runtime`。安装命令会重复验证归档内全部文件、创建并检查服务，并通过 Runtime 的 TUF 验证器激活包内官方 Mihomo。它不会删除 `/var/lib/submux` 或 Runtime 状态，不会创建 Runtime 配置来源，也不会自动启动代理。服务器默认只允许 root 管理；桌面机器可以显式授权一个本机操作员：
+
+```sh
+sudo ./install.sh runtime --authorize-desktop "$USER"
+```
+
+同版本 Runtime 重新安装需要 `--repair`。降级必须同时给出 `--allow-downgrade --database-compatible`。可先以普通用户运行 `./install.sh verify`，但实际安装也会执行相同校验。
 
 ### 在线首次配置
 
@@ -345,7 +360,7 @@ submux-runtime source add \
   --wait --json
 
 submux-runtime source list --json
-submux-runtime source apply <source_id> --wait --json
+submux-runtime source apply --wait --json <source_id>
 submux-runtime proxy start --wait --json
 submux-runtime proxy verify --json
 ```

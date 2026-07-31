@@ -5,6 +5,10 @@
 Runtime GUI executable for the target architecture.
 Offline packages additionally require the fixed Mihomo executable, its signed
 provenance JSON, GPLv3 text, matching source archive, and complete TUF metadata.
+The Linux airgap kit is assembled separately by `packaging/airgap/build.sh`
+from an extracted offline tar bundle. It adds a separately released and
+attested stable control plane plus the complete offline TUF verification bundle
+without changing the native Runtime package.
 The server form authorizes only root by default. A desktop installation must
 name the user explicitly:
 

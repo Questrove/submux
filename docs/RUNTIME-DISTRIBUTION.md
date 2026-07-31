@@ -77,9 +77,10 @@ Runtime 是机器服务，不依赖桌面登录。每台机器只允许一份 Ru
 
 ### Linux
 
-- OpenPGP 签名的 DEB 仓库与包；
-- OpenPGP 签名的 RPM 仓库与包；
+- Debian/Ubuntu 使用 DEB 包；
+- Fedora/RHEL 系使用 RPM 包；
 - 其他受支持 systemd 发行版使用 tar.zst 加安装脚本；
+- 需要同时部署控制面和 Runtime 的无网机器，可以使用按架构发布的 airgap tar.gz；
 - 桌面 GUI 需要单独系统 WebKitGTK 依赖，缺少 GUI 依赖时 TUI 和 CLI 仍可使用。
 
 所有平台同时发布 SHA-256、SBOM、TUF 元数据和 GitHub Artifact Attestation。
@@ -113,6 +114,16 @@ Runtime 是机器服务，不依赖桌面登录。每台机器只允许一份 Ru
 - TUF 元数据、摘要、许可证和 SBOM。
 
 离线包不捆绑 Windows WebView2、Linux WebKitGTK、系统内核模块或包管理器等 OS 级依赖。安装前检查依赖并给出离线准备清单。
+
+Linux airgap kit 是标准、可展开审计的 tar.gz，不是自解压程序。控制面和 Runtime 版本分别记录在归档元数据中；Runtime 发布工作流只接受已经独立发布、通过摘要和 Artifact Attestation 核验的稳定控制面。归档内包含控制面离线安装器、当前架构的完整 Runtime tar 内容、离线 TUF 验证 bundle 和顶层文件清单。用户在联网机器校验归档及其伴随的 `.sha256` 后，只需转移这个归档，在目标机器执行：
+
+```sh
+tar -xzf submux-airgap_<version>_linux_<arch>.tar.gz
+cd submux-airgap_<version>_linux_<arch>
+sudo ./install.sh all
+```
+
+同一入口接受 `verify`、`control`、`runtime` 和 `all`。`all` 只是依次调用两个独立安装器；控制面安装失败时不会开始 Runtime，Runtime 安装失败时不会卸载已经成功安装的控制面。安装器重复校验归档内的完整文件清单，保留两种产品的状态，并通过 Runtime 的 TUF 验证器激活归档内固定的官方 Mihomo。它不创建配置来源，不自动启用 TUN 或网关，也不自动启动代理。修复同版本 Runtime 需要 `--repair`；降级还必须同时提供 `--allow-downgrade --database-compatible`。
 
 第一份远程配置无法直连时，用户可以在其他机器下载后作为本机副本导入。Runtime 成功运行后，后续来源和更新才可以选择经过当前 Mihomo 下载。
 
@@ -217,6 +228,7 @@ Runtime 不声明或强制 Mihomo 兼容版本范围。普通界面只安装已�
 | 普通在线安装包 | 不超过 15 MiB |
 | Linux AppImage（若提供） | 约 25–30 MiB |
 | 包含 Mihomo 的完整离线包 | 约 30–40 MiB |
+| Linux airgap kit | 目标不超过 220 MiB；预览阶段绝对上限 256 MiB |
 
 CI 对每个目标架构记录未压缩和压缩体积，超过预算时失败或要求明确批准。不得为追求单一数字删除符号化崩溃信息、许可证、SBOM、回滚程序或安全验证。
 

@@ -13,6 +13,7 @@ REQUESTED_VERSION="${VERSION:-}"
 CHANNEL="stable"
 WITH_SERVICE=0
 MODE="install"
+OFFLINE_DIR=""
 
 usage() {
   cat <<'EOF'
@@ -20,6 +21,7 @@ Usage: install.sh [options]
 
   --version TAG       install an exact release tag (for example submux-v2.0.1)
   --channel CHANNEL   stable (default) or alpha
+  --offline-dir DIR   install from a transferred asset directory without network access
   --service           install or update the Linux systemd service
   --upgrade           require an existing installation and upgrade it
   --rollback          restore the previous verified binary
@@ -41,6 +43,9 @@ while [ "$#" -gt 0 ]; do
     --channel)
       [ "$#" -ge 2 ] || die "--channel requires stable or alpha"
       CHANNEL="$2"; shift 2 ;;
+    --offline-dir)
+      [ "$#" -ge 2 ] || die "--offline-dir requires a directory"
+      OFFLINE_DIR="$2"; shift 2 ;;
     --service) WITH_SERVICE=1; shift ;;
     --upgrade) [ "$MODE" = install ] || die "choose only one operation"; MODE=upgrade; shift ;;
     --rollback) [ "$MODE" = install ] || die "choose only one operation"; MODE=rollback; shift ;;
@@ -67,6 +72,41 @@ readonly UNIT_PATH="/etc/systemd/system/${UNIT}"
 service_exists() { [ -f "$UNIT_PATH" ] && command -v systemctl >/dev/null 2>&1; }
 service_active() { service_exists && systemctl is-active --quiet "$UNIT"; }
 
+probe_health() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null
+    return
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    wget --quiet --timeout=2 --tries=1 --output-document=/dev/null "$HEALTH_URL"
+    return
+  fi
+
+  case "$HEALTH_URL" in
+    http://127.0.0.1/* | http://127.0.0.1:*/* | http://localhost/* | http://localhost:*/*) ;;
+    *) die "curl or wget is required to check a non-loopback HEALTH_URL" ;;
+  esac
+  local target authority host port path status code
+  target="${HEALTH_URL#http://}"
+  authority="${target%%/*}"
+  path="/${target#*/}"
+  if [ "$authority" = "$target" ]; then path=/; fi
+  case "$authority" in
+    *:*) host="${authority%:*}"; port="${authority##*:}" ;;
+    *) host="$authority"; port=80 ;;
+  esac
+  printf '%s' "$port" | grep -Eq '^[0-9]{1,5}$' ||
+    die "HEALTH_URL has an invalid port"
+  if ! exec 3<>"/dev/tcp/${host}/${port}"; then return 1; fi
+  printf 'GET %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n' \
+    "$path" "$host" >&3
+  if ! IFS= read -r -t 2 status <&3; then status=; fi
+  exec 3<&-
+  exec 3>&-
+  code="$(printf '%s\n' "$status" | awk '{print $2}')"
+  case "$code" in [23][0-9][0-9]) return 0 ;; *) return 1 ;; esac
+}
+
 assert_managed_unit_if_present() {
   if [ -e "$UNIT_PATH" ] || [ -L "$UNIT_PATH" ]; then
     [ -f "$UNIT_PATH" ] && [ ! -L "$UNIT_PATH" ] || die "refusing to manage a non-regular systemd unit"
@@ -86,10 +126,9 @@ restart_and_verify() {
   run_as_root systemctl daemon-reload
   run_as_root systemctl restart "$UNIT"
   run_as_root systemctl is-active --quiet "$UNIT" || return 1
-  command -v curl >/dev/null 2>&1 || die "curl is required for the service health check"
   attempts=0
   while [ "$attempts" -lt 20 ]; do
-    if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null; then return 0; fi
+    if probe_health; then return 0; fi
     attempts=$((attempts + 1))
     sleep 1
   done
@@ -126,13 +165,27 @@ uninstall() {
 
 assert_managed_binary_paths
 case "$MODE" in
-  rollback) rollback_binary; exit 0 ;;
-  uninstall) uninstall; exit 0 ;;
+  rollback)
+    [ -z "$OFFLINE_DIR" ] || die "--offline-dir is not accepted with --rollback"
+    rollback_binary
+    exit 0
+    ;;
+  uninstall)
+    [ -z "$OFFLINE_DIR" ] || die "--offline-dir is not accepted with --uninstall"
+    uninstall
+    exit 0
+    ;;
 esac
 
 [ "$MODE" != upgrade ] || [ -x "$TARGET" ] || die "--upgrade requires an existing $TARGET"
-command -v curl >/dev/null 2>&1 || die "curl is required"
-
+if [ -n "$OFFLINE_DIR" ]; then
+  [ -n "$REQUESTED_VERSION" ] || die "--offline-dir requires an exact --version"
+  [ -d "$OFFLINE_DIR" ] && [ ! -L "$OFFLINE_DIR" ] ||
+    die "--offline-dir must be a real directory"
+  OFFLINE_DIR="$(cd -- "$OFFLINE_DIR" && pwd -P)"
+else
+  command -v curl >/dev/null 2>&1 || die "curl is required"
+fi
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
 case "$arch" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) die "unsupported architecture: $arch" ;; esac
@@ -172,10 +225,20 @@ fi
 tmpdir="$(mktemp -d)"
 cleanup() { rm -rf "$tmpdir"; }
 trap cleanup EXIT INT TERM
-base_url="https://github.com/${REPO}/releases/download/${release_tag}"
-say "downloading submux ${version} (${os}/${arch})"
-curl -fsSL "${base_url}/${asset}" -o "${tmpdir}/${asset}"
-curl -fsSL "${base_url}/checksums.txt" -o "${tmpdir}/checksums.txt"
+if [ -n "$OFFLINE_DIR" ]; then
+  for source in "$OFFLINE_DIR/$asset" "$OFFLINE_DIR/checksums.txt"; do
+    [ -f "$source" ] && [ ! -L "$source" ] ||
+      die "offline asset must be a regular non-linked file: $source"
+  done
+  say "installing submux ${version} (${os}/${arch}) from $OFFLINE_DIR"
+  cp "$OFFLINE_DIR/$asset" "${tmpdir}/${asset}"
+  cp "$OFFLINE_DIR/checksums.txt" "${tmpdir}/checksums.txt"
+else
+  base_url="https://github.com/${REPO}/releases/download/${release_tag}"
+  say "downloading submux ${version} (${os}/${arch})"
+  curl -fsSL "${base_url}/${asset}" -o "${tmpdir}/${asset}"
+  curl -fsSL "${base_url}/checksums.txt" -o "${tmpdir}/checksums.txt"
+fi
 
 expected="$(awk -v file="$asset" '$2==file || $2=="*"file {print $1}' "${tmpdir}/checksums.txt")"
 [ -n "$expected" ] || die "checksums.txt has no entry for $asset"

@@ -20,6 +20,10 @@ EOF
 cat >"$work/bin/curl" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+[ "${FAKE_CURL_FORBIDDEN:-0}" != "1" ] || {
+  echo "curl must not be used during an offline installation" >&2
+  exit 99
+}
 output=""
 url=""
 while [ "$#" -gt 0 ]; do
@@ -70,4 +74,40 @@ if [ -e /etc/systemd/system/submux.service ]; then
 else
   run_installer_cycle "$repo_root/scripts/install.sh" "$work/control" submux 0
 fi
+
+offline="$work/offline"
+offline_install="$work/offline-install"
+mkdir -p "$offline" "$offline_install"
+cat >"$offline/submux-linux-amd64" <<'EOF'
+#!/usr/bin/env bash
+printf 'submux v3.4.5 (offline-installer-test)\n'
+EOF
+chmod 0755 "$offline/submux-linux-amd64"
+(
+  cd "$offline"
+  sha256sum submux-linux-amd64 >checksums.txt
+)
+PATH="$work/bin:$PATH" FAKE_CURL_FORBIDDEN=1 INSTALL_DIR="$offline_install" \
+  bash "$repo_root/scripts/install.sh" \
+  --version submux-v3.4.5 --offline-dir "$offline"
+"$offline_install/submux" --version | grep -F 'v3.4.5' >/dev/null
+
+if PATH="$work/bin:$PATH" FAKE_CURL_FORBIDDEN=1 INSTALL_DIR="$work/missing-version" \
+  bash "$repo_root/scripts/install.sh" --offline-dir "$offline" 2>/dev/null; then
+  echo "offline installation without an exact version was accepted" >&2
+  exit 1
+fi
+
+cp "$offline/checksums.txt" "$offline/checksums.valid"
+printf '%064d  submux-linux-amd64\n' 0 >"$offline/checksums.txt"
+if PATH="$work/bin:$PATH" FAKE_CURL_FORBIDDEN=1 INSTALL_DIR="$work/bad-offline" \
+  bash "$repo_root/scripts/install.sh" \
+  --version submux-v3.4.5 --offline-dir "$offline" 2>/dev/null; then
+  echo "offline installation accepted a bad checksum" >&2
+  exit 1
+fi
+mv "$offline/checksums.valid" "$offline/checksums.txt"
+
+PATH="$work/bin:$PATH" FAKE_CURL_FORBIDDEN=1 INSTALL_DIR="$offline_install" \
+  bash "$repo_root/scripts/install.sh" --uninstall
 printf 'installer lifecycle smoke tests passed\n'

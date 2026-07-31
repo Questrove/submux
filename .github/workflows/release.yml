@@ -19,6 +19,9 @@ env:
 jobs:
   policy:
     runs-on: ubuntu-24.04
+    outputs:
+      control_release_tag: ${{ steps.validate.outputs.control_release_tag }}
+      control_version: ${{ steps.validate.outputs.control_version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -35,13 +38,45 @@ jobs:
           GITLEAKS_CONFIG: .gitleaks.toml
           GITLEAKS_VERSION: 8.30.1
       - name: Validate tag, tests, support claims and fixed Mihomo provenance
+        id: validate
         run: |
           set -euo pipefail
           [[ "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          jq -e '
+            .schema == 1 and
+            (.control_release_tag | test("^submux-v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$")) and
+            ((keys | sort) == ["control_release_tag", "schema"])
+          ' release/airgap-components.json >/dev/null
+          control_release_tag="$(jq -r .control_release_tag release/airgap-components.json)"
+          echo "control_release_tag=$control_release_tag" >> "$GITHUB_OUTPUT"
+          echo "control_version=${control_release_tag#submux-}" >> "$GITHUB_OUTPUT"
           go vet ./...
           go test ./... -count=1
+          bash scripts/test-installers.sh
+          bash packaging/airgap/test.sh
+          find packaging -type f -name '*.sh' -print0 | xargs -0 bash -n
           go run ./cmd/submux-release-check matrix --file docs/runtime-support.json
           go run ./cmd/submux-release-check mihomo --file "release/mihomo-${MIHOMO_VERSION}.json"
+      - name: Check the pinned control-plane release before starting platform builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROL_RELEASE_TAG: ${{ steps.validate.outputs.control_release_tag }}
+        run: |
+          set -euo pipefail
+          state="$(
+            gh release view "$CONTROL_RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease \
+              --jq '[.isDraft,.isPrerelease] | @tsv'
+          )"
+          [[ $state == $'false\tfalse' ]]
+          assets="$(
+            gh release view "$CONTROL_RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name'
+          )"
+          for asset in install-submux.sh checksums.txt submux-linux-amd64 submux-linux-arm64; do
+            grep -Fx "$asset" <<<"$assets" >/dev/null
+          done
 
   linux:
     runs-on: ubuntu-24.04
@@ -70,7 +105,7 @@ jobs:
           build_date="$(git show -s --format=%cI HEAD)"
           ldflags="-s -w -X submux/internal/buildinfo.Version=${VERSION} -X submux/internal/buildinfo.Commit=${COMMIT} -X submux/internal/buildinfo.Date=${build_date}"
           for arch in amd64 arm64; do
-            for command in submux submux-runtime submux-runtime-net; do
+            for command in submux-runtime submux-runtime-net; do
               CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build \
                 -trimpath -buildvcs=false -ldflags="$ldflags" \
                 -o "dist/linux/bin/${command}-linux-${arch}" "./cmd/${command}"
@@ -142,7 +177,7 @@ jobs:
           $env:CGO_ENABLED = '0'
           foreach ($arch in @('amd64','arm64')) {
             $env:GOARCH = $arch
-            foreach ($command in @('submux','submux-runtime','submux-runtime-net')) {
+            foreach ($command in @('submux-runtime','submux-runtime-net')) {
               go build -trimpath -buildvcs=false -ldflags $ldflags -o "dist/windows/bin/$command-windows-$arch.exe" "./cmd/$command"
             }
           }
@@ -211,7 +246,7 @@ jobs:
           build_date="$(git show -s --format=%cI HEAD)"
           ldflags="-s -w -X submux/internal/buildinfo.Version=${VERSION} -X submux/internal/buildinfo.Commit=${COMMIT} -X submux/internal/buildinfo.Date=${build_date}"
           for arch in amd64 arm64; do
-            for command in submux submux-runtime submux-runtime-net; do
+            for command in submux-runtime submux-runtime-net; do
               CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build \
                 -trimpath -buildvcs=false -ldflags="$ldflags" \
                 -o "dist/darwin/bin/${command}-darwin-${arch}" "./cmd/${command}"
@@ -396,9 +431,11 @@ jobs:
 
   linux-offline:
     runs-on: ubuntu-24.04
-    needs: [linux, mihomo, tuf]
+    needs: [policy, linux, mihomo, tuf]
     env:
       VERSION: ${{ github.ref_name }}
+      CONTROL_RELEASE_TAG: ${{ needs.policy.outputs.control_release_tag }}
+      CONTROL_VERSION: ${{ needs.policy.outputs.control_version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v7
@@ -413,6 +450,28 @@ jobs:
         with:
           name: tuf-publication
           path: tuf
+      - name: Download and verify the pinned stable control-plane release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p control-release
+          gh release download "$CONTROL_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir control-release \
+            --pattern install-submux.sh \
+            --pattern checksums.txt \
+            --pattern submux-linux-amd64 \
+            --pattern submux-linux-arm64
+          (
+            cd control-release
+            for asset in install-submux.sh submux-linux-amd64 submux-linux-arm64; do
+              grep "  ${asset}$" checksums.txt | sha256sum --strict --check
+            done
+          )
+          for asset in install-submux.sh submux-linux-amd64 submux-linux-arm64; do
+            gh attestation verify "control-release/$asset" --repo "$GITHUB_REPOSITORY"
+          done
       - name: Build complete Linux offline packages
         run: |
           set -euo pipefail
@@ -442,6 +501,25 @@ jobs:
               --mihomo-source "$root/mihomo/mihomo-${MIHOMO_VERSION}-source.tar.gz" \
               --mihomo-license "$root/mihomo/Mihomo-GPL-3.0.txt" \
               --tuf "$root/tuf" --output "$root/offline" --formats deb,rpm,tar
+            runtime_bundle="$RUNNER_TEMP/submux-runtime-${arch}-airgap"
+            rm -rf -- "$runtime_bundle"
+            mkdir -p "$runtime_bundle"
+            tar --zstd -xf \
+              "$root/offline/submux-runtime_${VERSION#v}_${arch}_offline.tar.zst" \
+              -C "$runtime_bundle"
+            packaging/airgap/build.sh \
+              --bundle-version "$VERSION" \
+              --control-version "$CONTROL_VERSION" \
+              --runtime-version "$VERSION" \
+              --mihomo-version "$MIHOMO_VERSION" \
+              --arch "$arch" \
+              --control "$root/control-release/submux-linux-${arch}" \
+              --control-installer "$root/control-release/install-submux.sh" \
+              --runtime-bundle "$runtime_bundle" \
+              --offline-verification-bundle \
+                "$root/tuf/offline-verification-bundle.zip" \
+              --airgap-installer "$root/packaging/airgap/install.sh" \
+              --output "$root/offline"
           done
       - uses: actions/upload-artifact@v6
         with:
@@ -551,7 +629,9 @@ jobs:
 
   release:
     runs-on: ubuntu-24.04
-    needs: [linux, windows, macos, mihomo, tuf, linux-offline, windows-offline, macos-offline]
+    needs: [policy, linux, windows, macos, mihomo, tuf, linux-offline, windows-offline, macos-offline]
+    env:
+      CONTROL_VERSION: ${{ needs.policy.outputs.control_version }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
@@ -577,6 +657,14 @@ jobs:
           find dist -type f -name '*_offline.deb' -print -quit | grep -q .
           find dist -type f -name '*_offline.msi' -print -quit | grep -q .
           find dist -type f -name '*_offline_unsigned.pkg' -print -quit | grep -q .
+          for arch in amd64 arm64; do
+            airgap="dist/submux-airgap_${GITHUB_REF_NAME#v}_linux_${arch}.tar.gz"
+            root="submux-airgap_${GITHUB_REF_NAME#v}_linux_${arch}"
+            test -f "$airgap"
+            test -f "$airgap.sha256"
+            tar -xOzf "$airgap" "$root/AIRGAP-METADATA" |
+              grep -Fx "CONTROL_VERSION=$CONTROL_VERSION"
+          done
           test -d dist/repository/metadata
           test -d dist/repository/targets
           go run ./cmd/submux-release-check scan \
@@ -603,7 +691,8 @@ jobs:
             copy_unique "$source"
           done < <(
             find dist -maxdepth 1 -type f \
-              \( -name 'submux-runtime_*' -o -name 'mihomo-*' -o -name 'Mihomo-*' \) \
+              \( -name 'submux-runtime_*' -o -name 'submux-airgap_*' -o \
+                 -name 'mihomo-*' -o -name 'Mihomo-*' \) \
               -print0 | sort -z
           )
           install -m 0644 dist/linux/sbom/SBOM.spdx.json publish/SBOM-linux.spdx.json
@@ -656,6 +745,10 @@ jobs:
             echo "The TUF repository archive matches the repository published from the \`tuf\` branch."
             echo
             echo "Mihomo ${MIHOMO_VERSION} provenance, GPLv3 license and matching source archive are included."
+            echo
+            echo "Linux airgap kits contain the control plane, Runtime machine services,"
+            echo "the signed offline verification bundle and one auditable install.sh entry point."
+            echo "They pin the independently released stable control plane ${CONTROL_VERSION}."
           } > RELEASE-NOTES.md
       - uses: actions/attest-build-provenance@v3
         with:

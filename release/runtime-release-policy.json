@@ -90,6 +90,12 @@
       "approval": "Issue #25 preview exception: complete offline installers include fixed Mihomo and TUF material"
     },
     {
+      "pattern": "submux-airgap_*",
+      "max_bytes": 230686720,
+      "approved_max_bytes": 268435456,
+      "approval": "Preview airgap kits include one Runtime payload and the complete cross-platform offline TUF verification bundle"
+    },
+    {
       "pattern": "*.submux-runtime-v*.zip",
       "max_bytes": 41943040,
       "approved_max_bytes": 83886080,

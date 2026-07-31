@@ -42,6 +42,7 @@ jobs:
           go vet ./...
           go test ./... -count=1
           bash -n scripts/*.sh
+          find packaging -type f -name '*.sh' -print0 | xargs -0 bash -n
           bash scripts/test-installers.sh
       - name: Build control-plane binaries
         env:
@@ -63,6 +64,7 @@ jobs:
             done
           done
           ./dist/submux-linux-amd64 --version | grep -F " ${VERSION} ("
+          install -m 0755 scripts/install.sh dist/install-submux.sh
       - uses: anchore/sbom-action@v0
         with:
           path: dist
@@ -76,7 +78,7 @@ jobs:
           test "$(find dist -maxdepth 1 -type f -name 'submux-*' | wc -l)" -eq 6
           (
             cd dist
-            sha256sum SBOM.spdx.json submux-* > checksums.txt
+            sha256sum SBOM.spdx.json install-submux.sh submux-* > checksums.txt
             sha256sum -c checksums.txt
           )
           go run ./cmd/submux-release-check scan \
@@ -89,14 +91,15 @@ jobs:
           cat > RELEASE-NOTES.md <<EOF
           # submux ${VERSION}
 
-          This is the stable submux control-plane release. It replaces v1.0.2 on the stable installation channel.
+          This is the stable submux control-plane release.
 
           - Removes the legacy remote Agent, enrollment, heartbeat and remote-job control surfaces.
           - Keeps Runtime local-only: submux publishes configuration; Runtime independently manages one local Mihomo.
           - Improves durable output publication, deletion validation and consistent console snapshots.
           - Provides static Linux, macOS and Windows binaries for amd64 and arm64.
+          - Includes install-submux.sh for verified online or transferred offline service installation.
 
-          Submux Runtime remains a separate Preview product. Its current packages are published in the v2.0.0 prerelease.
+          Submux Runtime remains a separate product with its own \`vX.Y.Z\` release channel and support status.
 
           Verify downloads with \`checksums.txt\` and GitHub Artifact Attestations.
           EOF

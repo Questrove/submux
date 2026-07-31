@@ -61,10 +61,10 @@ jobs:
 
       - name: Installer syntax
         run: |
-          bash -n scripts/install.sh
-          bash -n scripts/test-installers.sh
-          shellcheck -S warning packaging/linux/*.sh packaging/macos/*.sh
+          bash -n scripts/install.sh scripts/test-installers.sh packaging/airgap/*.sh
+          shellcheck -S warning packaging/linux/*.sh packaging/macos/*.sh packaging/airgap/*.sh
           bash scripts/test-installers.sh
+          bash packaging/airgap/test.sh
 
   linux-packages:
     name: Linux package lifecycle
