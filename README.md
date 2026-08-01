@@ -66,21 +66,22 @@ curl -fsSL https://raw.githubusercontent.com/Questrove/submux/main/scripts/insta
 
 ### 手动或离线安装控制面
 
-从 v2.0.2 开始，控制面 Release 同时提供 `install-submux.sh`。在能够访问 GitHub 的机器上下载安装脚本、目标系统的单二进制和 `checksums.txt`，校验后把这几个文件放在同一个目录并转移到目标机器。下面以 Linux amd64 为例；把 `RELEASE_TAG` 换成实际包含该安装脚本的控制面版本：
+从 v2.0.2 开始，控制面 Release 同时提供 `install-submux.sh`。在能够访问 GitHub 的机器上用浏览器、`curl` 或 `wget` 下载安装脚本、目标系统的单二进制和 `checksums.txt`，校验后把这几个文件放在同一个目录并转移到目标机器。下面以当前稳定版和 Linux amd64 为例：
 
 ```sh
-RELEASE_TAG=submux-vX.Y.Z
-gh release download "$RELEASE_TAG" --repo Questrove/submux \
-  --pattern install-submux.sh \
-  --pattern submux-linux-amd64 \
-  --pattern checksums.txt
+RELEASE_TAG=submux-v2.0.2
+BASE_URL="https://github.com/Questrove/submux/releases/download/${RELEASE_TAG}"
+
+curl -fLO "${BASE_URL}/install-submux.sh"
+curl -fLO "${BASE_URL}/submux-linux-amd64"
+curl -fLO "${BASE_URL}/checksums.txt"
 grep '  submux-linux-amd64$' checksums.txt | sha256sum --check
 ```
 
 转移后在目标机器再次执行 SHA-256 校验。Linux 可以用一个安装入口创建专用账户、安装或更新二进制、写入 systemd 服务并完成健康检查；整个过程不访问网络：
 
 ```sh
-RELEASE_TAG=submux-vX.Y.Z
+RELEASE_TAG=submux-v2.0.2
 grep '  submux-linux-amd64$' checksums.txt | sha256sum --check
 sudo bash ./install-submux.sh \
   --version "$RELEASE_TAG" --offline-dir . --service
