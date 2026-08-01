@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"submux/internal/runtimecore"
 )
 
 var (
@@ -94,6 +96,18 @@ func ValidateMihomoProvenance(provenance MihomoProvenance) error {
 			return fmt.Errorf("Mihomo asset target %q is unexpected or duplicated", key)
 		}
 		delete(expected, key)
+		_, expectedName, err := runtimecore.OfficialReleaseCoordinates(
+			provenance.Version,
+			asset.Platform,
+			asset.Arch,
+		)
+		if err != nil || asset.Name != expectedName {
+			return fmt.Errorf(
+				"Mihomo asset %q does not match fixed Runtime platform target %q",
+				asset.Name,
+				expectedName,
+			)
+		}
 		if filepath.Base(asset.Name) != asset.Name ||
 			!strings.Contains(asset.Name, provenance.Version) ||
 			!digestSHA256.MatchString(asset.SHA256) {

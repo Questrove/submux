@@ -160,6 +160,12 @@ func (m *Manager) Preview(
 	}
 
 	var release runtimecore.ReleaseBinary
+	var cleanupBundleID string
+	defer func() {
+		if cleanupBundleID != "" {
+			_ = m.removeBundleLocked(cleanupBundleID)
+		}
+	}()
 	trust := runtimeapi.MihomoUpdateTrustTUF
 	switch request.Source {
 	case runtimeapi.MihomoUpdateSourceOnlineTUF:
@@ -179,6 +185,7 @@ func (m *Manager) Preview(
 		if err != nil {
 			return runtimeapi.MihomoUpdatePlan{}, err
 		}
+		cleanupBundleID = record.Bundle.ID
 		target, archive, err := m.Trust.RefreshOffline(ctx, bundlePath, m.platform(), m.arch(), request.Version)
 		if err != nil {
 			return runtimeapi.MihomoUpdatePlan{}, err
@@ -200,6 +207,7 @@ func (m *Manager) Preview(
 		if err := m.removeBundleLocked(record.Bundle.ID); err != nil {
 			return runtimeapi.MihomoUpdatePlan{}, err
 		}
+		cleanupBundleID = ""
 	case runtimeapi.MihomoUpdateSourceUpstreamOnly:
 		trust = runtimeapi.MihomoUpdateTrustUpstreamOnly
 		var err error

@@ -226,7 +226,11 @@ func releaseCoordinates(version, osName, arch string) (string, string, error) {
 	}
 	switch osName {
 	case "linux":
-		return version, fmt.Sprintf("mihomo-linux-%s-%s.gz", arch, version), nil
+		variant := ""
+		if arch == "amd64" {
+			variant = "-compatible"
+		}
+		return version, fmt.Sprintf("mihomo-linux-%s%s-%s.gz", arch, variant, version), nil
 	case "windows":
 		variant := ""
 		if arch == "amd64" {

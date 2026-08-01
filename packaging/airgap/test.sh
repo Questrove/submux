@@ -130,4 +130,47 @@ if "$repo_root/packaging/airgap/build.sh" \
   exit 1
 fi
 
+mkdir -p "$work/runtime-install/runtime"
+cat >"$work/runtime-install/runtime/install.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 0755 "$work/runtime-install/runtime/install.sh"
+if failure_output=$(
+  (
+    source "$repo_root/packaging/airgap/install.sh"
+    script_dir="$work/runtime-install"
+    runtime_version=v2.0.1
+    mihomo_version=v1.19.29
+    repair=false
+    allow_downgrade=false
+    database_compatible=false
+    authorize_user=
+    installed_runtime_version() { return 0; }
+    runtime_cli() {
+      if [[ $1 == status ]]; then
+        printf '{"mihomo":{"state":"not_installed"}}\n'
+        return 0
+      fi
+      if [[ $1 == mihomo && $2 == import ]]; then
+        printf '{"protocol_version":1,"error":{"code":"invalid_request","message":"asset contract mismatch","retryable":false}}\n'
+        return 1
+      fi
+      return 99
+    }
+    install_runtime
+  ) 2>&1
+); then
+  echo "airgap Runtime failure harness unexpectedly succeeded" >&2
+  exit 1
+fi
+if ! grep -F '"message":"asset contract mismatch"' <<<"$failure_output" >/dev/null; then
+  echo "airgap installer hid the Runtime JSON failure" >&2
+  exit 1
+fi
+if grep -F 'Submux Runtime v2.0.1 is installed' <<<"$failure_output" >/dev/null; then
+  echo "airgap installer reported Runtime success before Mihomo activation" >&2
+  exit 1
+fi
+
 echo "airgap build, reproducibility, verification and tamper tests passed"

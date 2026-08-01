@@ -45,6 +45,16 @@ func (v *acceptingCandidateVerifier) VerifyCandidateCore(
 	return nil
 }
 
+type rejectingCandidateVerifier struct{}
+
+func (rejectingCandidateVerifier) VerifyCandidateCore(
+	context.Context,
+	string,
+	string,
+) error {
+	return errors.New("candidate rejected for test")
+}
+
 type fakeOfficialSource struct {
 	releases map[string]runtimecore.ReleaseBinary
 }
@@ -87,7 +97,7 @@ func TestManagerOfflineInstallUpstreamConfirmationAndRollback(t *testing.T) {
 		"v1.2.4",
 		"linux",
 		"amd64",
-		"mihomo-linux-amd64-v1.2.4.gz",
+		"mihomo-linux-amd64-compatible-v1.2.4.gz",
 		hex.EncodeToString(secondSum[:]),
 		secondArchive,
 	)
@@ -211,7 +221,7 @@ func TestManagerPlanIsBoundToCallerAndTrust(t *testing.T) {
 		"v1.2.3",
 		"linux",
 		"amd64",
-		"mihomo-linux-amd64-v1.2.3.gz",
+		"mihomo-linux-amd64-compatible-v1.2.3.gz",
 		hex.EncodeToString(sum[:]),
 		releaseArchive,
 	)
@@ -251,6 +261,64 @@ func TestManagerPlanIsBoundToCallerAndTrust(t *testing.T) {
 		if _, err := manager.Activate(t.Context(), operation, discardReporter); err == nil {
 			t.Fatal("plan accepted a different caller or trust mode")
 		}
+	}
+}
+
+func TestManagerRemovesOfflineBundleWhenPreviewFails(t *testing.T) {
+	now := time.Now().UTC()
+	archive := gzipBody(t, []byte("mihomo-binary"))
+	repository := newTestRepository(t, now.Add(24*time.Hour), 1)
+	targetPath := addTestTarget(t, repository, archive, "v1.2.3")
+	root, entries := repository.signedEntries(t)
+	bundlePath := writeBundle(t, entries, targetPath, archive)
+	bundleBody, err := os.ReadFile(bundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundleSum := sha256.Sum256(bundleBody)
+	updateRoot := filepath.Join(t.TempDir(), "updates")
+	manager := &Manager{
+		Root:     updateRoot,
+		Platform: "linux",
+		Arch:     "amd64",
+		Trust: &Verifier{
+			InitialRoot: root,
+			StateRoot:   filepath.Join(t.TempDir(), "trust"),
+			Now:         func() time.Time { return now },
+		},
+		Official: fakeOfficialSource{},
+		Core: &runtimecore.Store{
+			Root:       filepath.Join(t.TempDir(), "core"),
+			Verifier:   acceptingCoreVerifier{},
+			Activation: stoppedActivation{},
+		},
+		CandidateVerifier: rejectingCandidateVerifier{},
+		Now:               func() time.Time { return now },
+	}
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	bundle, err := manager.UploadBundle(
+		t.Context(),
+		peer,
+		int64(len(bundleBody)),
+		hex.EncodeToString(bundleSum[:]),
+		bytes.NewReader(bundleBody),
+	)
+	if err != nil {
+		t.Fatalf("upload offline bundle: %v", err)
+	}
+	_, previewErr := manager.Preview(t.Context(), peer, runtimeapi.MihomoUpdatePreviewRequest{
+		Source:   runtimeapi.MihomoUpdateSourceOfflineTUF,
+		BundleID: bundle.ID,
+	})
+	if previewErr == nil {
+		t.Fatal("offline preview unexpectedly accepted the rejected candidate")
+	}
+	uploads, err := os.ReadDir(filepath.Join(updateRoot, "uploads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uploads) != 0 {
+		t.Fatalf("failed offline preview retained %d upload files after %v", len(uploads), previewErr)
 	}
 }
 

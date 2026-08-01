@@ -43,7 +43,7 @@ func TestOfflineVerifierUsesFullTUFWorkflowAndVerifiesTarget(t *testing.T) {
 		t.Fatalf("verify offline bundle: %v", err)
 	}
 	if target.Version != "v1.2.3" || target.Repository != OfficialRepository ||
-		target.AssetName != "mihomo-linux-amd64-v1.2.3.gz" ||
+		target.AssetName != "mihomo-linux-amd64-compatible-v1.2.3.gz" ||
 		string(verified) != string(body) {
 		t.Fatalf("unexpected verified target: %#v %q", target, verified)
 	}
@@ -233,7 +233,7 @@ func addTestTarget(
 	version string,
 ) string {
 	t.Helper()
-	asset := "mihomo-linux-amd64-" + version + ".gz"
+	asset := "mihomo-linux-amd64-compatible-" + version + ".gz"
 	targetPath := "mihomo/" + version + "/linux/amd64/" + asset
 	target, err := metadata.TargetFile().FromBytes(targetPath, body, "sha256")
 	if err != nil {

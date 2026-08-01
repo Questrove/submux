@@ -29,12 +29,12 @@ func TestPublishRepositoryCreatesVerifiableOfflineBundle(t *testing.T) {
 	}
 	removeRootPrivateKeys(t, privateDir)
 	targetBody := []byte("fixed mihomo release bytes")
-	targetSource := filepath.Join(root, "mihomo-linux-amd64-v1.2.3.gz")
+	targetSource := filepath.Join(root, "mihomo-linux-amd64-compatible-v1.2.3.gz")
 	if err := os.WriteFile(targetSource, targetBody, 0644); err != nil {
 		t.Fatal(err)
 	}
 	sum := sha256.Sum256(targetBody)
-	targetPath := "mihomo/v1.2.3/linux/amd64/mihomo-linux-amd64-v1.2.3.gz"
+	targetPath := "mihomo/v1.2.3/linux/amd64/mihomo-linux-amd64-compatible-v1.2.3.gz"
 	custom, err := json.Marshal(map[string]any{
 		"kind":            "mihomo",
 		"version":         "v1.2.3",

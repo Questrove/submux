@@ -212,8 +212,12 @@ installed_runtime_version() {
 }
 
 current_mihomo_version() {
-  /usr/bin/submux-runtime status --json 2>/dev/null |
+  runtime_cli status --json 2>/dev/null |
     sed -n 's/.*"mihomo":{[^}]*"version":"\([^"]*\)".*/\1/p'
+}
+
+runtime_cli() {
+  /usr/bin/submux-runtime "$@"
 }
 
 install_control() {
@@ -245,16 +249,19 @@ activate_mihomo() {
     return 0
   fi
   plan_file=$(mktemp)
-  if ! /usr/bin/submux-runtime mihomo import \
+  if ! runtime_cli mihomo import \
       --json --version "$mihomo_version" \
       "$script_dir/trust/offline-verification-bundle.zip" >"$plan_file"; then
+    if [[ -s $plan_file ]]; then
+      sed -n '1,20p' "$plan_file" >&2
+    fi
     rm -f "$plan_file"
     fail "offline Mihomo verification failed"
   fi
   plan_id=$(sed -n 's/.*"plan_id":"\([^"]*\)".*/\1/p' "$plan_file")
   rm -f "$plan_file"
   [[ $plan_id =~ ^plan_[0-9a-f]{32}$ ]] || fail "Runtime returned an invalid Mihomo plan"
-  /usr/bin/submux-runtime mihomo install \
+  runtime_cli mihomo install \
     --json --plan "$plan_id" --trust tuf --confirm --wait
   status=$(current_mihomo_version)
   [[ $status == "$mihomo_version" ]] ||
@@ -270,7 +277,7 @@ install_runtime() {
       fail "same-version Runtime is unhealthy; rerun with --repair"
     systemctl is-active --quiet submux-runtime-net.service ||
       fail "same-version privileged network process is unhealthy; rerun with --repair"
-    /usr/bin/submux-runtime status --json >/dev/null ||
+    runtime_cli status --json >/dev/null ||
       fail "same-version Runtime IPC is unhealthy; rerun with --repair"
     if [[ -n $authorize_user ]]; then
       /usr/sbin/submux-runtime-authorize-user --confirm "$authorize_user"
@@ -283,12 +290,16 @@ install_runtime() {
     [[ $database_compatible == true ]] && args+=(--database-compatible)
     [[ -z $authorize_user ]] || args+=(--authorize-desktop "$authorize_user")
     "$script_dir/runtime/install.sh" "${args[@]}"
-    /usr/bin/submux-runtime status --json >/dev/null ||
+    runtime_cli status --json >/dev/null ||
       fail "Runtime installation completed without healthy local IPC"
-    say "Submux Runtime $runtime_version is installed"
   fi
   activate_mihomo
+  say "Submux Runtime $runtime_version is installed with official Mihomo core $mihomo_version"
 }
+
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+  return 0
+fi
 
 command=${1:-}
 case "$command" in

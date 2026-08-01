@@ -7,7 +7,7 @@ submux 包含两个可以独立安装的产品：
 | `submux` 控制面 | 管理机场来源、节点、模板和规则，生成 Mihomo / sing-box 输出订阅 |
 | Submux Runtime | 在本机管理一个 Mihomo，提供显式代理、TUN 和 Linux 网关 |
 
-当前控制面版本是 [`v2.0.2`](https://github.com/Questrove/submux/releases/tag/submux-v2.0.2)，属于 Stable；当前 Runtime 版本是 [`v2.0.1`](https://github.com/Questrove/submux/releases/tag/v2.0.1)，仍属于 Preview。
+当前控制面版本是 [`v2.0.2`](https://github.com/Questrove/submux/releases/tag/submux-v2.0.2)，属于 Stable；当前 Runtime 版本是 [`v2.0.2`](https://github.com/Questrove/submux/releases/tag/v2.0.2)，仍属于 Preview。
 
 ## 安装
 
@@ -56,7 +56,7 @@ systemctl status submux
 把 `ARCH` 改为目标架构的 `amd64` 或 `arm64`：
 
 ```sh
-VERSION=2.0.1
+VERSION=2.0.2
 ARCH=amd64
 BASE_URL="https://github.com/Questrove/submux/releases/download/v${VERSION}"
 PACKAGE="submux-runtime_${VERSION}_${ARCH}_online.deb"
@@ -90,7 +90,7 @@ sudo submux-runtime status --json
 #### 在线安装 Runtime：Fedora / RHEL
 
 ```sh
-VERSION=2.0.1
+VERSION=2.0.2
 ARCH=amd64
 BASE_URL="https://github.com/Questrove/submux/releases/download/v${VERSION}"
 PACKAGE="submux-runtime_${VERSION}_${ARCH}_online.rpm"
@@ -109,7 +109,7 @@ sudo rpm -Uvh "${PACKAGE}"
 这种安装方式要求目标系统已经提供支持 zstd 的 GNU tar 和 `zstd`：
 
 ```sh
-VERSION=2.0.1
+VERSION=2.0.2
 ARCH=amd64
 BASE_URL="https://github.com/Questrove/submux/releases/download/v${VERSION}"
 PACKAGE="submux-runtime_${VERSION}_${ARCH}_online.tar.zst"
@@ -133,7 +133,7 @@ Linux 离线安装推荐使用 airgap 包。它包含控制面、完整 Runtime�
 先在能够访问 GitHub 的机器上下载与目标架构对应的两个文件：
 
 ```sh
-VERSION=2.0.1
+VERSION=2.0.2
 ARCH=amd64
 BASE_URL="https://github.com/Questrove/submux/releases/download/v${VERSION}"
 ARCHIVE="submux-airgap_${VERSION}_linux_${ARCH}.tar.gz"
@@ -146,7 +146,7 @@ sha256sum --check "${ARCHIVE}.sha256"
 把这两个文件传到目标机器，然后执行：
 
 ```sh
-VERSION=2.0.1
+VERSION=2.0.2
 ARCH=amd64
 ARCHIVE="submux-airgap_${VERSION}_linux_${ARCH}.tar.gz"
 PACKAGE_DIR="submux-airgap_${VERSION}_linux_${ARCH}"
@@ -201,7 +201,7 @@ if ($Actual -ne $Expected) { throw 'submux checksum mismatch' }
 #### 在线安装 Runtime
 
 ```powershell
-$Version = '2.0.1'
+$Version = '2.0.2'
 $Arch = 'amd64' # 或 arm64
 $BaseUrl = "https://github.com/Questrove/submux/releases/download/v$Version"
 $Package = "submux-runtime_${Version}_${Arch}_online.msi"
@@ -233,7 +233,7 @@ $Plan = (& $Runtime mihomo check --json | Out-String | ConvertFrom-Json)
 先在能够访问 GitHub 的 Windows 机器上下载离线 MSI、它的校验文件、离线验证包和总校验清单：
 
 ```powershell
-$Version = '2.0.1'
+$Version = '2.0.2'
 $Arch = 'amd64' # 或 arm64
 $BaseUrl = "https://github.com/Questrove/submux/releases/download/v$Version"
 $Package = "submux-runtime_${Version}_${Arch}_offline.msi"
@@ -247,7 +247,7 @@ Invoke-WebRequest "$BaseUrl/SHA256SUMS" -OutFile SHA256SUMS
 把这四个文件转移到目标机器，在 PowerShell 中校验并安装：
 
 ```powershell
-$Version = '2.0.1'
+$Version = '2.0.2'
 $Arch = 'amd64'
 $Package = "submux-runtime_${Version}_${Arch}_offline.msi"
 
@@ -299,7 +299,7 @@ submux
 #### 在线安装 Runtime
 
 ```sh
-VERSION=2.0.1
+VERSION=2.0.2
 BASE_URL="https://github.com/Questrove/submux/releases/download/v${VERSION}"
 PACKAGE="submux-runtime_${VERSION}_universal_online_unsigned.pkg"
 
@@ -331,7 +331,7 @@ curl -fLO "${CONTROL_URL}/install-submux.sh"
 curl -fLO "${CONTROL_URL}/submux-darwin-${CONTROL_ARCH}"
 curl -fLO "${CONTROL_URL}/checksums.txt"
 
-RUNTIME_VERSION=2.0.1
+RUNTIME_VERSION=2.0.2
 RUNTIME_URL="https://github.com/Questrove/submux/releases/download/v${RUNTIME_VERSION}"
 RUNTIME_PACKAGE="submux-runtime_${RUNTIME_VERSION}_universal_offline_unsigned.pkg"
 
@@ -351,7 +351,7 @@ grep "  ${CONTROL_PROGRAM}$" checksums.txt | shasum -a 256 -c -
 sudo bash ./install-submux.sh \
   --version "$CONTROL_TAG" --offline-dir .
 
-RUNTIME_VERSION=2.0.1
+RUNTIME_VERSION=2.0.2
 RUNTIME_PACKAGE="submux-runtime_${RUNTIME_VERSION}_universal_offline_unsigned.pkg"
 shasum -a 256 -c "${RUNTIME_PACKAGE}.sha256"
 grep '  ./offline-verification-bundle.zip$' SHA256SUMS |
@@ -428,19 +428,19 @@ submux-runtime proxy start --wait --json
 
 ### 在线包与离线包
 
-Runtime 安装包都在 [v2.0.1 Release](https://github.com/Questrove/submux/releases/tag/v2.0.1)：
+Runtime 安装包都在 [v2.0.2 Release](https://github.com/Questrove/submux/releases/tag/v2.0.2)：
 
 | 系统 | 在线包 | 完整离线包 |
 |---|---|---|
-| Debian / Ubuntu | `submux-runtime_2.0.1_<arch>_online.deb` | `submux-runtime_2.0.1_<arch>_offline.deb` |
-| Fedora / RHEL | `submux-runtime_2.0.1_<arch>_online.rpm` | `submux-runtime_2.0.1_<arch>_offline.rpm` |
-| 其他 systemd / glibc Linux | `submux-runtime_2.0.1_<arch>_online.tar.zst` | `submux-runtime_2.0.1_<arch>_offline.tar.zst` |
-| Windows | `submux-runtime_2.0.1_<arch>_online.msi` | `submux-runtime_2.0.1_<arch>_offline.msi` |
-| macOS 13+ | `submux-runtime_2.0.1_universal_online_unsigned.pkg` | `submux-runtime_2.0.1_universal_offline_unsigned.pkg` |
+| Debian / Ubuntu | `submux-runtime_2.0.2_<arch>_online.deb` | `submux-runtime_2.0.2_<arch>_offline.deb` |
+| Fedora / RHEL | `submux-runtime_2.0.2_<arch>_online.rpm` | `submux-runtime_2.0.2_<arch>_offline.rpm` |
+| 其他 systemd / glibc Linux | `submux-runtime_2.0.2_<arch>_online.tar.zst` | `submux-runtime_2.0.2_<arch>_offline.tar.zst` |
+| Windows | `submux-runtime_2.0.2_<arch>_online.msi` | `submux-runtime_2.0.2_<arch>_offline.msi` |
+| macOS 13+ | `submux-runtime_2.0.2_universal_online_unsigned.pkg` | `submux-runtime_2.0.2_universal_offline_unsigned.pkg` |
 
 在线包不包含 Mihomo。首次配置时，Runtime 通过 TUF 元数据验证并从固定的 `MetaCubeX/mihomo` 官方 Release 下载匹配的核心。
 
-完整离线包包含固定 Mihomo、TUF 元数据、SBOM、许可证和对应源码。当前 v2.0.1 的独立离线包还需要 `offline-verification-bundle.zip` 作为首次激活 Mihomo 的导入文件；Linux airgap 包已经把它包含在归档中，并由顶层安装器自动完成导入和激活。
+完整离线包包含固定 Mihomo、TUF 元数据、SBOM、许可证和对应源码。当前 v2.0.2 的独立离线包还需要 `offline-verification-bundle.zip` 作为首次激活 Mihomo 的导入文件；Linux airgap 包已经把它包含在归档中，并由顶层安装器自动完成导入和激活。
 
 Linux airgap 包包含独立发布的稳定控制面和完整 Runtime，但两个产品仍然分别安装。归档中的 `AIRGAP-METADATA` 会记录各自版本。
 
@@ -475,7 +475,7 @@ sudo ./install.sh runtime --allow-downgrade --database-compatible
 安装示例都会先检查 Release 提供的 SHA-256。联网环境如果已经安装 GitHub CLI，还可以额外核对 GitHub Artifact Attestation：
 
 ```sh
-gh attestation verify ./submux-runtime_2.0.1_amd64_online.deb \
+gh attestation verify ./submux-runtime_2.0.2_amd64_online.deb \
   --repo Questrove/submux
 ```
 

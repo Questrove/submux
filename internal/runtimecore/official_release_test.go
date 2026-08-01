@@ -21,7 +21,7 @@ func TestReleaseCoordinatesUseExactSupportedAssets(t *testing.T) {
 		arch   string
 		asset  string
 	}{
-		{osName: "linux", arch: "amd64", asset: "mihomo-linux-amd64-v1.19.29.gz"},
+		{osName: "linux", arch: "amd64", asset: "mihomo-linux-amd64-compatible-v1.19.29.gz"},
 		{osName: "linux", arch: "arm64", asset: "mihomo-linux-arm64-v1.19.29.gz"},
 		{osName: "windows", arch: "amd64", asset: "mihomo-windows-amd64-compatible-v1.19.29.zip"},
 		{osName: "windows", arch: "arm64", asset: "mihomo-windows-arm64-v1.19.29.zip"},
@@ -55,7 +55,7 @@ func TestOfficialReleaseSourceUsesExactAssetAndDigest(t *testing.T) {
 	binary := []byte("mihomo executable")
 	compressed := gzipValue(t, binary)
 	assetDigest := sha256.Sum256(compressed)
-	assetName := "mihomo-linux-amd64-" + version + ".gz"
+	assetName := "mihomo-linux-amd64-compatible-" + version + ".gz"
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
