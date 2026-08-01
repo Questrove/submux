@@ -173,4 +173,17 @@ if grep -F 'Submux Runtime v2.0.1 is installed' <<<"$failure_output" >/dev/null;
   exit 1
 fi
 
+if ! detected_version=$(
+  (
+    source "$repo_root/packaging/airgap/install.sh"
+    runtime_cli() {
+      printf '%s\n' '{"updates":{"mihomo_available":true,"mihomo_current_version":"v1.19.29"}}'
+    }
+    current_mihomo_version
+  )
+) || [[ $detected_version != v1.19.29 ]]; then
+  echo "airgap installer did not read Mihomo version from Runtime update status" >&2
+  exit 1
+fi
+
 echo "airgap build, reproducibility, verification and tamper tests passed"

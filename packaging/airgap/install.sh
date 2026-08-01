@@ -213,7 +213,7 @@ installed_runtime_version() {
 
 current_mihomo_version() {
   runtime_cli status --json 2>/dev/null |
-    sed -n 's/.*"mihomo":{[^}]*"version":"\([^"]*\)".*/\1/p'
+    sed -n 's/.*"mihomo_current_version":"\([^"]*\)".*/\1/p'
 }
 
 runtime_cli() {
