@@ -146,3 +146,43 @@ func TestFailedMaintenanceOperationDoesNotBlockBrowsingOrSafeRecoveryPreview(t *
 		t.Fatalf("safe recovery preview did not complete: calls=%d preview=%#v", client.backupPreviews, model.backupPreview)
 	}
 }
+
+func TestMaintenanceEditorsShowPurposeSpecificTitlesAndPlaceholders(t *testing.T) {
+	client := &fakeClient{snapshot: shellSnapshot(8, 5)}
+	model, _ := initializeShellModel(t, client)
+	model.openPage(pageMaintenance)
+
+	updated, command := model.Update(keyPress('I'))
+	model = updated.(Model)
+	if command == nil || !model.editing || model.editorMode != editorModeProductImport {
+		t.Fatalf("offline product editor did not open: editing=%t mode=%q command=%v", model.editing, model.editorMode, command != nil)
+	}
+	productView := model.View().Content
+	if !strings.Contains(productView, "导入离线 Runtime 产品更新包") {
+		t.Fatalf("offline product editor has the wrong title:\n%s", productView)
+	}
+	if model.editor.Placeholder != "输入离线产品 TUF 包文件路径" {
+		t.Fatalf("offline product placeholder=%q", model.editor.Placeholder)
+	}
+	if strings.Contains(productView, "粘贴完整的 Mihomo YAML 配置") {
+		t.Fatalf("offline product editor kept configuration placeholder:\n%s", productView)
+	}
+
+	updated, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	model = updated.(Model)
+	updated, command = model.Update(keyPress('L'))
+	model = updated.(Model)
+	if command == nil || !model.editing || model.editorMode != editorModeBackupRestore {
+		t.Fatalf("backup restore editor did not open: editing=%t mode=%q command=%v", model.editing, model.editorMode, command != nil)
+	}
+	restoreView := model.View().Content
+	if !strings.Contains(restoreView, "检查整体恢复备份") {
+		t.Fatalf("backup restore editor has the wrong title:\n%s", restoreView)
+	}
+	if model.editor.Placeholder != "输入 Runtime 完整备份文件路径" {
+		t.Fatalf("backup restore placeholder=%q", model.editor.Placeholder)
+	}
+	if strings.Contains(restoreView, "粘贴完整的 Mihomo YAML 配置") {
+		t.Fatalf("backup restore editor kept configuration placeholder:\n%s", restoreView)
+	}
+}

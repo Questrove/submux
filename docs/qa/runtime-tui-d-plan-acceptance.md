@@ -16,7 +16,7 @@ TUI、GUI 和 CLI 只通过 Runtime 本机 IPC 管理状态。TUI 不直接连�
 | 流量监控 | 监控页显示当前速度、本次运行累计、速度曲线和活动连接；`[`、`]` 切换 1/5/15 分钟范围 | `TestDPlanKeyboardAcceptanceJourney`、`TestRuntimeTUIMonitorLoadsFiveMinuteTrafficHistory`、`TestRuntimeTUIMonitorChangesRangeAndPreservesStaleData` | 通过 |
 | 节点选择 | `Ctrl+N` 打开代理组和节点；切换节点及节点/组/来源延迟测试先进入统一确认 | `TestDPlanKeyboardAcceptanceJourney`、`TestProxyGroupViewerUsesUnifiedConfirmationBeforeSubmittingSelection`、`TestProxyGroupViewerPreparesFixedLatencyScopes` | 通过 |
 | 日志查看 | `l` 打开默认最近 200 条脱敏日志，支持分页、跟随、暂停和筛选 | `TestDPlanKeyboardAcceptanceJourney`、`TestMaintenanceLogViewerLoadsLatestAndOlderPages`、`TestLogViewerFiltersAndKeepsStaleDataOnReadFailure` | 通过 |
-| 备份恢复 | `B` 先预览完整明文备份，再输入新文件；`L` 先检查备份，确认后整体恢复 | `TestDPlanKeyboardAcceptanceJourney`、`TestModelCreatesAndRestoresBackupWithExplicitConfirmation` | 通过 |
+| 备份恢复 | `B` 先预览完整明文备份，再输入新文件；`L` 先检查备份，确认后整体恢复 | `TestDPlanKeyboardAcceptanceJourney`、`TestModelCreatesAndRestoresBackupWithExplicitConfirmation`、`TestMaintenanceEditorsShowPurposeSpecificTitlesAndPlaceholders` | 通过 |
 | 卸载 | 帮助页明确 TUI 不自删除；先备份、恢复直连、`q` 退出，再执行网页列出的平台卸载命令 | `TestDPlanKeyboardAcceptanceJourney`、`TestUserGuideMatchesRuntimeTUIWorkflowAndSafetyBoundary` | 通过 |
 
 ## 故障降级
@@ -41,6 +41,20 @@ TUI、GUI 和 CLI 只通过 Runtime 本机 IPC 管理状态。TUI 不直接连�
 
 人工检查采用测试生成的 120×30、100×24、80×24、70×24 和 59×17 纯文本渲染，逐页核对标题、焦点、操作提示、截断标记和统一确认。检查过程中发现维护页宽屏多出一行，已压缩页面提示并重新运行矩阵；最终所有尺寸通过。
 
+### Windows 实际进程验收
+
+在隔离状态目录和测试专用 Named Pipe 上启动当前工作区构建的真实 `submux-runtime serve`，再从 80×24 PTY 运行同一构建的 `submux-runtime tui`。本次没有启动 Mihomo，也没有连接特权网络进程，因此只提交只读请求和不会落地的表单打开操作。
+
+- 初始 Snapshot 经真实本机 IPC 返回 `service_state=running`、`local_ipc_authorized=true`；状态页正确显示首次运行第 2/6 步和最近失败操作。
+- 数字键依次打开五页；监控页显示当前速度、本次运行累计和活动连接；命令搜索输入“监控”后正确返回监控页。
+- `Ctrl+T` 打开普通 TUN 结构化表单，Esc 取消后没有提交网络操作。
+- `B` 第一次取得真实备份预览，第二次打开完整明文备份输出路径编辑器；`L` 打开整体恢复备份文件编辑器；`I` 打开离线 Runtime 产品更新包编辑器。
+- 首轮检查发现 `L` 和 `I` 仍显示 Mihomo YAML 占位文字，且 `I` 标题错误；修正后重新构建，两个编辑器分别显示 Runtime 备份路径和离线产品 TUF 包路径，新增自动化测试固定该行为。
+- TUI 保持打开时终止 Runtime，界面保留最后 Snapshot 并显示“数据已过期 · 正在重连”；用同一状态目录重新启动 Runtime 后，TUI 自动恢复为“已同步”，revision 从 5 更新为 6。
+- `?` 显示当前快捷键和卸载边界，`q` 正常退出，退出没有停止 Runtime 或提交停止代理操作。
+
+Mihomo 实际启动、真实 TUN/Linux 网关接管和平台安装卸载不在这次 Windows 隔离验收中冒充通过；它们分别由 Runtime 集成测试、Linux network namespace 测试和发布环境的安装包测试负责。
+
 ## 网页使用说明
 
 `web/user-guide.html` 按安装、首次使用、日常操作、更新与备份、卸载和排查的顺序编写，并包含最终五页 TUI、当前快捷键、统一确认和故障处理说明。目录和正文使用同一个布局起点，不再依靠负外边距与重复的 52 像素偏移。
@@ -57,8 +71,13 @@ TUI、GUI 和 CLI 只通过 Runtime 本机 IPC 管理状态。TUI 不直接连�
 
 ```text
 C:/Users/Sdata/sdk/go1.26.1/bin/go.exe test ./internal/runtimetui ./web -count=1    PASS
+C:/Users/Sdata/sdk/go1.26.1/bin/go.exe test ./internal/runtimetui -run TestMaintenanceEditorsShowPurposeSpecificTitlesAndPlaceholders -count=1    PASS
 C:/Users/Sdata/sdk/go1.26.1/bin/go.exe test ./...                                   PASS
 C:/Users/Sdata/sdk/go1.26.1/bin/go.exe vet ./...                                    PASS
+mkdir -p /c/tmp/submux-tui-build-matrix && for platform in windows linux darwin; do for arch in amd64 arm64; do suffix=''; if [ "$platform" = windows ]; then suffix='.exe'; fi; for command in submux-runtime submux-runtime-net; do CGO_ENABLED=0 GOOS="$platform" GOARCH="$arch" /c/Users/Sdata/sdk/go1.26.1/bin/go.exe build -trimpath -buildvcs=false -o "/c/tmp/submux-tui-build-matrix/${command}-${platform}-${arch}${suffix}" "./cmd/${command}" || exit 1; done; done; done    PASS
+bash -n packaging/linux/runtime-lifecycle.sh packaging/linux/tar-install.sh packaging/linux/uninstall.sh packaging/macos/runtime-lifecycle.sh packaging/macos/uninstall.sh packaging/airgap/install.sh    PASS
+pwsh -NoProfile -Command '$files=@("packaging/windows/Install-SubmuxRuntime.ps1","packaging/windows/Uninstall-SubmuxRuntime.ps1","packaging/windows/build.ps1"); foreach($file in $files){$tokens=$null;$errors=$null; [System.Management.Automation.Language.Parser]::ParseFile($file,[ref]$tokens,[ref]$errors)|Out-Null; if($errors.Count -gt 0){exit 1}}'    PASS
+packaging/airgap/test.sh                                                            SKIP（仅支持 Linux 主机）
 git diff --check                                                                    PASS
 ```
 

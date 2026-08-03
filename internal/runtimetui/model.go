@@ -703,6 +703,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.editorMode = editorModeOverride
 		m.err = nil
 		m.sensitiveConfirm = ""
+		m.editor.Placeholder = "输入 Runtime 本机高级覆盖 YAML"
 		m.editor.SetValue(message.document.YAML)
 		m.status = "编辑高级覆盖后按 Ctrl+S 校验并保存，Esc 取消"
 		return m, m.editor.Focus()
@@ -1079,6 +1080,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.editing = true
 			m.editorMode = editorModeConfig
 			m.err = nil
+			m.editor.Placeholder = "粘贴完整的 Mihomo YAML 配置"
 			m.editor.SetValue("")
 			m.status = "粘贴配置后按 Ctrl+S 上传并预览，Esc 取消"
 			return m, m.editor.Focus()
@@ -1096,6 +1098,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.editing = true
 			m.editorMode = editorModeResource
 			m.err = nil
+			m.editor.Placeholder = "输入托管资源 JSON"
 			m.editor.SetValue(defaultResourceDraft())
 			m.status = "编辑资源 JSON 后按 Ctrl+S 添加，Esc 取消"
 			return m, m.editor.Focus()
@@ -1348,6 +1351,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.editing = true
 			m.editorMode = editorModeProductImport
 			m.err = nil
+			m.editor.Placeholder = "输入离线产品 TUF 包文件路径"
 			m.editor.SetValue("")
 			m.status = "输入离线产品 TUF 包路径后按 Ctrl+S 验证；文件路径不会发送给 Runtime"
 			return m, m.editor.Focus()
@@ -1386,6 +1390,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.editing = true
 			m.editorMode = editorModeBackupExport
 			m.err = nil
+			m.editor.Placeholder = "输入新备份文件路径"
 			m.editor.SetValue("submux-runtime-backup.zip")
 			m.status = "输入尚不存在的输出文件后按 Ctrl+S 创建，Esc 取消"
 			return m, m.editor.Focus()
@@ -1411,6 +1416,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.editing = true
 			m.editorMode = editorModeBackupRestore
 			m.err = nil
+			m.editor.Placeholder = "输入 Runtime 完整备份文件路径"
 			m.editor.SetValue("")
 			m.status = "输入备份文件后按 Ctrl+S 检查，Esc 取消；文件路径不会发送给 Runtime"
 			return m, m.editor.Focus()
@@ -1596,6 +1602,9 @@ func (m Model) legacyView() tea.View {
 		} else if m.editorMode == editorModeOverride {
 			editorTitle = "Submux Runtime · 高级覆盖"
 			editorHelp = "Ctrl+P 预览 · Ctrl+S 校验并保存 · Esc 取消；Runtime 保留字段不能覆盖"
+		} else if m.editorMode == editorModeProductImport {
+			editorTitle = "Submux Runtime · 导入离线 Runtime 产品更新包"
+			editorHelp = "Ctrl+S 读取并验证 · Esc 取消；文件内容经本机 IPC 上传，路径不会发送给 Runtime"
 		} else if m.editorMode == editorModeBackupExport {
 			editorTitle = "Submux Runtime · 创建脱敏备份清单"
 			if m.backupPreview.IncludeSecrets {
