@@ -69,10 +69,10 @@ type Model struct {
 	previewSourceID      string
 	sourceForm           *sourceForm
 	sourceDiagnosticOpen bool
+	networkForm          *networkForm
 	networkPreview       runtimeapi.NetworkPreview
 	mihomoUpdate         runtimeapi.MihomoUpdatePlan
 	productUpdate        runtimeapi.ProductUpdatePlan
-	networkEditorMode    string
 	lastOperation        runtimeapi.Operation
 	verification         runtimeapi.ProxyVerification
 	status               string
@@ -106,7 +106,6 @@ const (
 	editorModeConfig        = "config"
 	editorModeResource      = "resource"
 	editorModeOverride      = "override"
-	editorModeNetwork       = "network"
 	editorModeBackupExport  = "backup_export"
 	editorModeBackupRestore = "backup_restore"
 	editorModeProductImport = "product_import"
@@ -551,6 +550,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if m.sourceForm != nil {
 		return m.updateSourceForm(message)
 	}
+	if m.networkForm != nil {
+		return m.updateNetworkForm(message)
+	}
 
 	if m.editing {
 		if key, ok := message.(tea.KeyPressMsg); ok {
@@ -611,30 +613,6 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.status = "正在读取、上传并验证离线产品更新包…"
 					return m, m.previewOfflineProductUpdateCmd(client, strings.TrimSpace(string(body)))
-				}
-				if m.editorMode == editorModeNetwork {
-					var request runtimeapi.NetworkPreviewRequest
-					if err := json.Unmarshal(body, &request); err != nil {
-						m.busy = false
-						m.err = errors.New("网络设置必须是有效 JSON")
-						m.status = m.err.Error()
-						return m, nil
-					}
-					if request.Mode == "" {
-						request.Mode = m.networkEditorMode
-						if request.Mode == "" {
-							request.Mode = runtimeapi.RunModeTUN
-						}
-					}
-					if request.Mode != runtimeapi.RunModeTUN &&
-						request.Mode != runtimeapi.RunModeGateway {
-						m.busy = false
-						m.err = errors.New("网络设置 mode 必须是 tun 或 gateway")
-						m.status = m.err.Error()
-						return m, nil
-					}
-					m.status = "正在生成网络预览…"
-					return m, m.previewNetworkCmd(request)
 				}
 				if m.editorMode == editorModeResource {
 					var draft resourceDraft
@@ -866,22 +844,21 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在生成默认脱敏诊断包…"
 			return m, m.createDiagnosticsCmd()
+		case "ctrl+p":
+			m.networkForm = newNetworkForm(runtimeapi.RunModeExplicit)
+			m.err = nil
+			m.status = "已选择显式代理；Ctrl+S 进入统一确认"
+			return m, m.networkForm.loadActiveField()
 		case "ctrl+t":
-			m.editing = true
-			m.editorMode = editorModeNetwork
-			m.networkEditorMode = runtimeapi.RunModeTUN
+			m.networkForm = newNetworkForm(runtimeapi.RunModeTUN)
 			m.err = nil
-			m.editor.SetValue(defaultNetworkDraft())
-			m.status = "编辑普通 TUN 设置后按 Ctrl+S 预览，Esc 取消"
-			return m, m.editor.Focus()
+			m.status = "填写普通 TUN 设置；Ctrl+S 生成真实网络预览"
+			return m, m.networkForm.loadActiveField()
 		case "ctrl+l":
-			m.editing = true
-			m.editorMode = editorModeNetwork
-			m.networkEditorMode = runtimeapi.RunModeGateway
+			m.networkForm = newNetworkForm(runtimeapi.RunModeGateway)
 			m.err = nil
-			m.editor.SetValue(defaultGatewayDraft())
-			m.status = "编辑 Linux 网关设置后按 Ctrl+S 预览，Esc 取消"
-			return m, m.editor.Focus()
+			m.status = "填写 Linux 网关设置；Ctrl+S 生成真实网络预览"
+			return m, m.networkForm.loadActiveField()
 		case "ctrl+e":
 			if m.networkPreview.PlanID == "" {
 				m.err = errors.New("请先生成网络预览")
@@ -911,8 +888,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		case "ctrl+x":
-			actionKind := runtimeapi.ActionDisableTUN
-			if m.snapshot.Network.Mode == runtimeapi.RunModeGateway {
+			actionKind := runtimeapi.ActionStopProxy
+			switch m.snapshot.Network.Mode {
+			case runtimeapi.RunModeTUN:
+				actionKind = runtimeapi.ActionDisableTUN
+			case runtimeapi.RunModeGateway:
 				actionKind = runtimeapi.ActionDisableGateway
 			}
 			m.prepareAction(runtimeapi.Action{Kind: actionKind})
@@ -1173,12 +1153,6 @@ func (m Model) legacyView() tea.View {
 		} else if m.editorMode == editorModeOverride {
 			editorTitle = "Submux Runtime · 高级覆盖"
 			editorHelp = "Ctrl+P 预览 · Ctrl+S 校验并保存 · Esc 取消；Runtime 保留字段不能覆盖"
-		} else if m.editorMode == editorModeNetwork {
-			editorTitle = "Submux Runtime · 普通 TUN 设置"
-			if m.networkEditorMode == runtimeapi.RunModeGateway {
-				editorTitle = "Submux Runtime · Linux 网关设置"
-			}
-			editorHelp = "Ctrl+S 生成真实网络预览 · Esc 取消；IPv6 必须明确选择 proxy、direct 或 block"
 		} else if m.editorMode == editorModeBackupExport {
 			editorTitle = "Submux Runtime · 创建脱敏备份清单"
 			if m.backupPreview.IncludeSecrets {
@@ -1480,7 +1454,7 @@ func (m Model) legacyView() tea.View {
 		renderStatus(m.status, m.err, m.busy),
 		"",
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
-		mutedStyle.Render("P 检查/确认安装 Runtime 产品更新 · I 验证离线产品包 · O 确认回滚 Runtime 产品 · U 检查/确认安装 Mihomo 更新 · R 确认回滚 Mihomo · b 预览/创建脱敏清单 · B 预览/创建完整备份 · L 检查/确认整体恢复 · Ctrl+T 编辑/预览普通 TUN · Ctrl+L 编辑/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 显示原始地址 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
+		mutedStyle.Render("P 检查/确认安装 Runtime 产品更新 · I 验证离线产品包 · O 确认回滚 Runtime 产品 · U 检查/确认安装 Mihomo 更新 · R 确认回滚 Mihomo · b 预览/创建脱敏清单 · B 预览/创建完整备份 · L 检查/确认整体恢复 · Ctrl+P 选择显式代理 · Ctrl+T 配置/预览普通 TUN · Ctrl+L 配置/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 打开来源只读诊断 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
 	return tea.NewView(strings.Join(lines, "\n"))
 }
@@ -1994,29 +1968,5 @@ func defaultResourceDraft() string {
   "name": "provider",
   "kind": "proxy-provider-yaml",
   "content": "proxies:\n  - name: example\n    type: socks5\n    server: 127.0.0.1\n    port: 1080\n"
-}`
-}
-
-func defaultNetworkDraft() string {
-	return `{
-  "mode": "tun",
-  "ipv6_policy": "proxy",
-  "dns_policy": "hijack",
-  "capture_route_ids": []
-}`
-}
-
-func defaultGatewayDraft() string {
-	return `{
-  "mode": "gateway",
-  "ipv6_policy": "direct",
-  "dns_policy": "hijack",
-  "capture_tcp": true,
-  "capture_udp": true,
-  "proxy_host_traffic": false,
-  "excluded_route_ids": [],
-  "udp_exceptions": [],
-  "dns_direct_cidrs": [],
-  "host_exceptions": []
 }`
 }

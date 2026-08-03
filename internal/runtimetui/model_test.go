@@ -695,13 +695,15 @@ func TestModelPreviewsDisplaysAndControlsOrdinaryTUN(t *testing.T) {
 	model := New(t.Context(), client)
 	updated, _ := model.Update(model.Init()())
 	model = updated.(Model)
-	updated, command := model.Update(ctrlKey('t'))
+	updated, _ = model.Update(ctrlKey('t'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("ordinary TUN editor did not focus")
+	if model.networkForm == nil {
+		t.Fatal("ordinary TUN structured form did not open")
 	}
-	model.editor.SetValue(`{"ipv6_policy":"direct","dns_policy":"off","capture_route_ids":["route_lan"]}`)
-	updated, command = model.Update(ctrlKey('s'))
+	model.networkForm.setValue(networkFieldIPv6Policy, runtimeapi.TUNIPv6Direct)
+	model.networkForm.setValue(networkFieldDNSPolicy, runtimeapi.TUNDNSOff)
+	model.networkForm.setValue(networkFieldCaptureRouteIDs, "route_lan")
+	updated, command := model.Update(ctrlKey('s'))
 	model = updated.(Model)
 	if command == nil {
 		t.Fatal("ordinary TUN preview did not return a command")
@@ -741,6 +743,7 @@ func TestModelPreviewsDisplaysAndControlsOrdinaryTUN(t *testing.T) {
 	}
 	model.busy = false
 	model.lastOperation.State = runtimeapi.OperationSucceeded
+	model.snapshot.Network.Mode = runtimeapi.RunModeTUN
 	updated, command = model.Update(ctrlKey('x'))
 	model = updated.(Model)
 	if command != nil || model.confirmation == nil {
@@ -791,24 +794,22 @@ func TestModelPreviewsDisplaysAndControlsLinuxGateway(t *testing.T) {
 	model := New(t.Context(), client)
 	updated, _ := model.Update(model.Init()())
 	model = updated.(Model)
-	updated, command := model.Update(ctrlKey('l'))
+	updated, _ = model.Update(ctrlKey('l'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("Linux gateway editor did not focus")
+	if model.networkForm == nil {
+		t.Fatal("Linux gateway structured form did not open")
 	}
-	model.editor.SetValue(`{
-		"mode":"gateway",
-		"ipv6_policy":"block",
-		"dns_policy":"hijack",
-		"capture_tcp":true,
-		"capture_udp":false,
-		"proxy_host_traffic":true,
-		"excluded_route_ids":["route_lan"],
-		"udp_exceptions":[{"destination_cidr":"203.0.113.0/24","destination_ports":[{"start":443,"end":443}]}],
-		"dns_direct_cidrs":["10.0.0.53/32"],
-		"host_exceptions":[{"uid":2001}]
-	}`)
-	updated, command = model.Update(ctrlKey('s'))
+	model.networkForm.setValue(networkFieldIPv6Policy, runtimeapi.TUNIPv6Block)
+	model.networkForm.setValue(networkFieldDNSPolicy, runtimeapi.TUNDNSHijack)
+	model.networkForm.setValue(networkFieldCaptureTCP, "true")
+	model.networkForm.setValue(networkFieldCaptureUDP, "false")
+	model.networkForm.setValue(networkFieldProxyHostTraffic, "true")
+	model.networkForm.setValue(networkFieldExcludedRouteIDs, "route_lan")
+	model.networkForm.setValue(networkFieldUDPDirectCIDRs, "203.0.113.0/24")
+	model.networkForm.setValue(networkFieldUDPDirectPorts, "443")
+	model.networkForm.setValue(networkFieldDNSDirectCIDRs, "10.0.0.53/32")
+	model.networkForm.setValue(networkFieldHostExceptionUIDs, "2001")
+	updated, command := model.Update(ctrlKey('s'))
 	model = updated.(Model)
 	if command == nil {
 		t.Fatal("Linux gateway preview did not return a command")
@@ -835,7 +836,7 @@ func TestModelPreviewsDisplaysAndControlsLinuxGateway(t *testing.T) {
 	updated, command = model.Update(ctrlKey('e'))
 	model = updated.(Model)
 	if command != nil || model.confirmation == nil {
-		t.Fatal("Linux gateway enable did not open unified confirmation")
+		t.Fatal("Linux gateway preview did not open unified confirmation")
 	}
 	model, _ = confirmAndSubmit(t, model)
 	if len(client.actions) != 1 ||

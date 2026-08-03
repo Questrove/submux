@@ -134,7 +134,7 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 		description.Interruption = "切换期间网络可能短暂中断"
 		description.Recovery = "失败时撤销 Runtime 创建的状态并执行故障放行"
 	case runtimeapi.ActionDisableTUN, runtimeapi.ActionDisableGateway:
-		description.Impact = "撤销 Runtime 管理的网络接管并恢复直连"
+		description.Impact = "撤销 Runtime 管理的网络接管，切换回显式代理，并保持 Mihomo 原来的运行或停止状态"
 		description.Interruption = "现有代理连接会中断"
 		description.Recovery = "可重新生成网络预览后再次启用"
 	case runtimeapi.ActionUpdateMihomo, runtimeapi.ActionRollbackMihomo:

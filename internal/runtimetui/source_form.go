@@ -41,27 +41,32 @@ const (
 	maximumCustomCABytes    = 1 << 20
 )
 
-type sourceFormField struct {
+type structuredField struct {
 	key         string
 	label       string
 	value       string
 	placeholder string
 	toggle      bool
 	secret      bool
+	options     []string
 }
 
-type sourceForm struct {
-	kind   sourceFormKind
-	fields []sourceFormField
+type structuredForm struct {
+	fields []structuredField
 	index  int
 	input  textinput.Model
 }
 
+type sourceForm struct {
+	kind sourceFormKind
+	*structuredForm
+}
+
 func newRemoteSourceForm() *sourceForm {
-	return newSourceForm(sourceFormRemote, []sourceFormField{
+	return newSourceForm(sourceFormRemote, []structuredField{
 		{key: sourceFieldName, label: "来源名称", value: "primary"},
 		{key: sourceFieldURL, label: "配置地址", value: "https://example.com/config.yaml"},
-		{key: sourceFieldRoute, label: "刷新路线", value: runtimeapi.SourceRouteDirect, placeholder: "direct 或 mihomo"},
+		{key: sourceFieldRoute, label: "刷新路线", value: runtimeapi.SourceRouteDirect, options: []string{runtimeapi.SourceRouteDirect, runtimeapi.SourceRouteMihomo}},
 		{key: sourceFieldRefreshInterval, label: "刷新间隔（秒）", value: "21600"},
 		{key: sourceFieldTimeout, label: "超时（秒）", value: "30"},
 		{key: sourceFieldMaximumBytes, label: "最大响应字节", value: "8388608"},
@@ -77,23 +82,27 @@ func newRemoteSourceForm() *sourceForm {
 }
 
 func newLocalSourceForm() *sourceForm {
-	return newSourceForm(sourceFormLocal, []sourceFormField{
+	return newSourceForm(sourceFormLocal, []structuredField{
 		{key: sourceFieldName, label: "来源名称", value: "local-copy"},
 		{key: sourceFieldPath, label: "本机文件", placeholder: "Mihomo YAML 文件路径"},
 	})
 }
 
-func newSourceForm(kind sourceFormKind, fields []sourceFormField) *sourceForm {
+func newSourceForm(kind sourceFormKind, fields []structuredField) *sourceForm {
+	return &sourceForm{kind: kind, structuredForm: newStructuredForm(fields)}
+}
+
+func newStructuredForm(fields []structuredField) *structuredForm {
 	input := textinput.New()
 	input.Prompt = ""
 	input.CharLimit = 4096
 	input.SetWidth(72)
-	form := &sourceForm{kind: kind, fields: fields, input: input}
+	form := &structuredForm{fields: fields, input: input}
 	form.loadActiveField()
 	return form
 }
 
-func (form *sourceForm) setValue(key string, value string) {
+func (form *structuredForm) setValue(key string, value string) {
 	for index := range form.fields {
 		if form.fields[index].key != key {
 			continue
@@ -106,7 +115,7 @@ func (form *sourceForm) setValue(key string, value string) {
 	}
 }
 
-func (form *sourceForm) value(key string) string {
+func (form *structuredForm) value(key string) string {
 	for _, field := range form.fields {
 		if field.key == key {
 			return field.value
@@ -115,19 +124,19 @@ func (form *sourceForm) value(key string) string {
 	return ""
 }
 
-func (form *sourceForm) commitActiveField() {
-	if len(form.fields) == 0 || form.fields[form.index].toggle {
+func (form *structuredForm) commitActiveField() {
+	if len(form.fields) == 0 || form.fields[form.index].toggle || len(form.fields[form.index].options) > 0 {
 		return
 	}
 	form.fields[form.index].value = form.input.Value()
 }
 
-func (form *sourceForm) loadActiveField() tea.Cmd {
+func (form *structuredForm) loadActiveField() tea.Cmd {
 	if len(form.fields) == 0 {
 		return nil
 	}
 	field := form.fields[form.index]
-	if field.toggle {
+	if field.toggle || len(field.options) > 0 {
 		form.input.Blur()
 		return nil
 	}
@@ -140,7 +149,7 @@ func (form *sourceForm) loadActiveField() tea.Cmd {
 	return form.input.Focus()
 }
 
-func (form *sourceForm) move(offset int) tea.Cmd {
+func (form *structuredForm) move(offset int) tea.Cmd {
 	if len(form.fields) == 0 {
 		return nil
 	}
@@ -149,7 +158,7 @@ func (form *sourceForm) move(offset int) tea.Cmd {
 	return form.loadActiveField()
 }
 
-func (form *sourceForm) toggleActiveField() bool {
+func (form *structuredForm) toggleActiveField() bool {
 	if len(form.fields) == 0 || !form.fields[form.index].toggle {
 		return false
 	}
@@ -158,7 +167,24 @@ func (form *sourceForm) toggleActiveField() bool {
 	return true
 }
 
-func (form *sourceForm) close() {
+func (form *structuredForm) cycleActiveOption(offset int) bool {
+	if len(form.fields) == 0 || len(form.fields[form.index].options) == 0 {
+		return false
+	}
+	field := &form.fields[form.index]
+	optionIndex := 0
+	for index, option := range field.options {
+		if option == field.value {
+			optionIndex = index
+			break
+		}
+	}
+	optionIndex = (optionIndex + offset + len(field.options)) % len(field.options)
+	field.value = field.options[optionIndex]
+	return true
+}
+
+func (form *structuredForm) close() {
 	form.input.Blur()
 	for index := range form.fields {
 		if form.fields[index].secret || form.fields[index].key == sourceFieldPath {
@@ -273,8 +299,19 @@ func (m Model) updateSourceForm(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.sourceForm.move(1)
 		case "shift+tab", "up":
 			return m, m.sourceForm.move(-1)
+		case "left":
+			if m.sourceForm.cycleActiveOption(-1) {
+				return m, nil
+			}
+		case "right":
+			if m.sourceForm.cycleActiveOption(1) {
+				return m, nil
+			}
 		case " ":
 			if m.sourceForm.toggleActiveField() {
+				return m, nil
+			}
+			if m.sourceForm.cycleActiveOption(1) {
 				return m, nil
 			}
 		case "ctrl+s":
@@ -369,13 +406,15 @@ func (m Model) renderSourceForm() string {
 			prefix = "▶ "
 		}
 		value := field.value
-		if index == form.index && !field.toggle {
+		if index == form.index && !field.toggle && len(field.options) == 0 {
 			value = form.input.View()
 		} else if field.toggle {
 			value = "[ ]"
 			if field.value == "true" {
 				value = "[x]"
 			}
+		} else if len(field.options) > 0 {
+			value = "[" + value + "]  ←/→"
 		} else if field.secret && value != "" {
 			value = strings.Repeat("•", len([]rune(value)))
 		} else if value == "" {

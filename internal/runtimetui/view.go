@@ -2,6 +2,7 @@ package runtimetui
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,16 @@ func (m Model) View() tea.View {
 			m.renderTabs(),
 			"",
 			m.renderSourceDiagnostics(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
+	if m.networkForm != nil {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderNetworkForm(),
 			"",
 			m.renderShellFooter(),
 		}, "\n"))
@@ -217,13 +228,21 @@ func (m Model) renderNetworkPage() string {
 
 	lines = append(lines, "", m.focusHeading(1, "网络预览"))
 	if m.networkPreview.PlanID == "" {
-		lines = append(lines, mutedStyle.Render("尚未生成网络预览"))
+		lines = append(lines,
+			fmt.Sprintf("当前实际  %s · %s%s", valueOr(m.snapshot.Network.Mode, "未知"), valueOr(m.snapshot.Network.State, "未知"), networkDeviceSuffix(m.snapshot.Network.Device)),
+			mutedStyle.Render("尚未生成网络预览；选择普通 TUN 或 Linux 网关后先读取真实网络状态"),
+		)
 	} else {
 		previewMode := m.networkPreview.Mode
 		if m.networkPreview.PreviewOnly {
 			previewMode += "（预览）"
 		}
-		lines = append(lines, fmt.Sprintf("%s · %s · %s", previewMode, m.networkPreview.Device, m.networkPreview.PlanID))
+		lines = append(lines,
+			fmt.Sprintf("当前实际  %s · %s%s", valueOr(m.snapshot.Network.Mode, "未知"), valueOr(m.snapshot.Network.State, "未知"), networkDeviceSuffix(m.snapshot.Network.Device)),
+			fmt.Sprintf("预期结果  %s · %s%s", previewMode, runtimeapi.NetworkStateActive, networkDeviceSuffix(m.networkPreview.Device)),
+			fmt.Sprintf("DNS 变化  %s", previewDNSPolicy(m.networkPreview)),
+			fmt.Sprintf("预览计划  %s · 观测 %s · 到期 %s", m.networkPreview.PlanID, formatPreviewTime(m.networkPreview.ObservedAt), formatPreviewTime(m.networkPreview.ExpiresAt)),
+		)
 		for _, route := range m.networkPreview.Routes {
 			disposition := "绕过"
 			if !route.Bypass {
@@ -231,18 +250,36 @@ func (m Model) renderNetworkPage() string {
 			}
 			lines = append(lines, fmt.Sprintf("%s · %s · %s · %s · %s", route.ID, route.CIDR, route.Interface, route.Role, disposition))
 		}
+		if settings := m.networkPreview.GatewaySettings; settings != nil {
+			if len(settings.DNSDirectCIDRs) > 0 {
+				lines = append(lines, "DNS 直连网段 · "+strings.Join(settings.DNSDirectCIDRs, "、"))
+			}
+			for index, exception := range settings.UDPExceptions {
+				lines = append(lines, fmt.Sprintf("UDP 直连例外 %d · %s", index+1, formatGatewayException(exception)))
+			}
+			for index, exception := range settings.HostExceptions {
+				lines = append(lines, fmt.Sprintf("本机直连例外 %d · %s", index+1, formatGatewayException(exception)))
+			}
+		}
 		for _, conflict := range m.networkPreview.Conflicts {
 			lines = append(lines, errorStyle.Render("冲突预览："+conflict.Detail))
 		}
 		for _, warning := range m.networkPreview.Warnings {
 			lines = append(lines, warnStyle.Render("警告："+warning))
 		}
+		for _, residual := range m.snapshot.Network.Residuals {
+			lines = append(lines, errorStyle.Render(fmt.Sprintf("现有残留：%s · %s · %s", residual.Kind, residual.Name, residual.State)))
+		}
+		lines = append(lines, "恢复动作  失败时撤销 Runtime 创建的网络对象并恢复直连")
+		if m.networkPreview.PreviewOnly {
+			lines = append(lines, warnStyle.Render("当前平台实现仍处于预览阶段，确认前请核对真实路由与冲突"))
+		}
 	}
 
 	lines = append(lines,
 		"",
 		m.focusHeading(2, "网络操作"),
-		"Ctrl+T 普通 TUN · Ctrl+L Linux 网关 · Ctrl+E 启用 · Ctrl+X 停用",
+		"Ctrl+P 显式代理 · Ctrl+T 普通 TUN · Ctrl+L Linux 网关 · Ctrl+E 应用已确认预览 · Ctrl+X 停用并恢复直连",
 	)
 	return strings.Join(lines, "\n")
 }
@@ -452,4 +489,46 @@ func (m Model) operationLine() string {
 		return fmt.Sprintf("%s · 队列 %d", m.snapshot.Operations.CurrentOperationID, m.snapshot.Operations.Queued)
 	}
 	return fmt.Sprintf("%s · %s · %s · %d%%", operation.ID, operation.State, operation.Stage, operation.Progress)
+}
+
+func previewDNSPolicy(preview runtimeapi.NetworkPreview) string {
+	if preview.GatewaySettings != nil {
+		return valueOr(preview.GatewaySettings.DNSPolicy, "未改变")
+	}
+	return valueOr(preview.Settings.DNSPolicy, "未改变")
+}
+
+func formatGatewayException(exception runtimeapi.GatewayTrafficException) string {
+	parts := make([]string, 0, 4)
+	if exception.SourceCIDR != "" {
+		parts = append(parts, "来源 "+exception.SourceCIDR)
+	}
+	if exception.DestinationCIDR != "" {
+		parts = append(parts, "目标 "+exception.DestinationCIDR)
+	}
+	if len(exception.DestinationPorts) > 0 {
+		ports := make([]string, 0, len(exception.DestinationPorts))
+		for _, portRange := range exception.DestinationPorts {
+			if portRange.End == 0 || portRange.End == portRange.Start {
+				ports = append(ports, strconv.FormatUint(uint64(portRange.Start), 10))
+				continue
+			}
+			ports = append(ports, fmt.Sprintf("%d-%d", portRange.Start, portRange.End))
+		}
+		parts = append(parts, "端口 "+strings.Join(ports, ","))
+	}
+	if exception.UID != nil {
+		parts = append(parts, fmt.Sprintf("UID %d", *exception.UID))
+	}
+	if len(parts) == 0 {
+		return "未指定条件"
+	}
+	return strings.Join(parts, " · ")
+}
+
+func formatPreviewTime(value time.Time) string {
+	if value.IsZero() {
+		return "未知"
+	}
+	return value.Local().Format("15:04:05")
 }

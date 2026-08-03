@@ -131,6 +131,17 @@ func (m *Model) activateFocus() tea.Cmd {
 			*m = updated.(Model)
 			return command
 		}
+	case pageNetwork:
+		if m.focusIndex == 2 {
+			mode := m.snapshot.RunMode
+			if !validNetworkMode(mode) {
+				mode = runtimeapi.RunModeExplicit
+			}
+			m.networkForm = newNetworkForm(mode)
+			m.err = nil
+			m.status = "编辑运行方式；Ctrl+S 生成预览或进入统一确认"
+			return m.networkForm.loadActiveField()
+		}
 	}
 	m.status = "当前区域为只读；使用 Tab 切换焦点或 / 搜索操作"
 	return nil
@@ -154,6 +165,9 @@ func paletteCommands() []paletteCommand {
 		{label: "启动 Mihomo", keywords: "代理 运行", key: "s"},
 		{label: "停止 Mihomo 并恢复直连", keywords: "代理 停止", key: "x"},
 		{label: "验证显式代理", keywords: "测试 可用性", key: "v"},
+		{label: "选择显式代理运行方式", keywords: "网络 运行方式 直连", key: "ctrl+p"},
+		{label: "配置普通 TUN", keywords: "网络 运行方式 路由 DNS", key: "ctrl+t"},
+		{label: "配置 Linux 网关", keywords: "网络 运行方式 LAN", key: "ctrl+l"},
 		{label: "添加远程配置来源", keywords: "订阅 URL", key: "u"},
 		{label: "导入本机配置来源", keywords: "YAML 文件", key: "n"},
 		{label: "预览所选来源", keywords: "候选 字段来源", key: "y"},
