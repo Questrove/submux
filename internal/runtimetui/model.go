@@ -13,6 +13,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/colorprofile"
 
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimebackupfile"
@@ -79,6 +80,7 @@ type Model struct {
 	busy                  bool
 	width                 int
 	height                int
+	terminal              terminalCapabilities
 	snapshot              runtimeapi.Snapshot
 	selectedSourceID      string
 	preview               runtimeapi.CandidatePreview
@@ -375,6 +377,7 @@ func New(ctx context.Context, client Client) Model {
 		palette:           palette,
 		status:            "正在读取 Runtime 状态…",
 		busy:              true,
+		terminal:          terminalCapabilities{Profile: colorprofile.TrueColor},
 		observeGeneration: 1,
 		trafficRange:      5 * time.Minute,
 		connectionQuery: runtimeapi.ConnectionQuery{
@@ -387,12 +390,15 @@ func Run(ctx context.Context, client Client, input io.Reader, output io.Writer) 
 	if client == nil {
 		return errors.New("Runtime TUI client is required")
 	}
-	program := tea.NewProgram(
-		New(ctx, client),
+	model := New(ctx, client)
+	model.terminal = defaultTerminalCapabilities()
+	options := []tea.ProgramOption{
 		tea.WithContext(ctx),
 		tea.WithInput(input),
 		tea.WithOutput(output),
-	)
+		tea.WithColorProfile(model.terminal.Profile),
+	}
+	program := tea.NewProgram(model, options...)
 	_, err := program.Run()
 	return err
 }
@@ -422,6 +428,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			height = 24
 		}
 		m.editor.SetHeight(height)
+		m.resizeInteractiveControls(message.Width)
 	case snapshotMsg:
 		if message.generation != m.observeGeneration {
 			return m, nil
@@ -807,6 +814,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.err = message.err
 		m.status = publicErrorMessage(message.err)
+	}
+	if resolveTerminalLayout(m.width, m.height) == terminalLayoutMinimum {
+		return m.updateMinimumTerminal(message)
 	}
 
 	if m.sourceDiagnosticOpen {
@@ -1604,7 +1614,7 @@ func (m Model) legacyView() tea.View {
 			"",
 			renderStatus(m.status, m.err, m.busy),
 		}, "\n")
-		return tea.NewView(content)
+		return m.terminalView(content)
 	}
 
 	runtimeVersion := valueOr(m.snapshot.Runtime.Version, "未知")
@@ -1889,7 +1899,7 @@ func (m Model) legacyView() tea.View {
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
 		mutedStyle.Render("P 检查/确认安装 Runtime 产品更新 · I 验证离线产品包 · O 确认回滚 Runtime 产品 · U 检查/确认安装 Mihomo 更新 · R 确认回滚 Mihomo · b 预览/创建脱敏清单 · B 预览/创建完整备份 · L 检查/确认整体恢复 · Ctrl+P 选择显式代理 · Ctrl+T 配置/预览普通 TUN · Ctrl+L 配置/预览 Linux 网关 · Ctrl+E 启用网络接管 · Ctrl+X 停用网络接管 · [/] 选择来源 · u 添加远程来源 · Ctrl+U 打开来源只读诊断 · Ctrl+G 预览/生成诊断包 · n 添加本机来源 · y 预览所选来源 · f/d/m 刷新所选来源 · t 切换 · k 允许缓存切换 · z 删除 · Ctrl+D 确认删除当前来源 · i 临时导入/预览 · e 添加资源 · o 编辑高级覆盖 · p 应用当前来源 · a 应用临时导入 · s 启动 · x 停止 · g 查询 · w 等待 · c 取消 · v 验证 · r 刷新状态 · q 退出"),
 	)
-	return tea.NewView(strings.Join(lines, "\n"))
+	return m.terminalView(strings.Join(lines, "\n"))
 }
 
 func (m *Model) startObserveCmd() tea.Cmd {

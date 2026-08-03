@@ -340,7 +340,12 @@ func (m Model) renderNetworkForm() string {
 			"监听地址和认证来自候选配置，由 Runtime 保留设置管理；此表单不能覆盖地址或路径。",
 		)
 	}
-	for index, field := range form.fields {
+	start, end := m.visibleFormRange(len(form.fields), form.index)
+	if start > 0 {
+		lines = append(lines, mutedStyle.Render(fmt.Sprintf("… 上方还有 %d 个字段", start)))
+	}
+	for index := start; index < end; index++ {
+		field := form.fields[index]
 		if field.key == networkFieldMode {
 			continue
 		}
@@ -363,6 +368,9 @@ func (m Model) renderNetworkForm() string {
 			value = mutedStyle.Render("未填写")
 		}
 		lines = append(lines, fmt.Sprintf("%s%-22s %s", prefix, field.label, value))
+	}
+	if end < len(form.fields) {
+		lines = append(lines, mutedStyle.Render(fmt.Sprintf("… 下方还有 %d 个字段", len(form.fields)-end)))
 	}
 	lines = append(lines, "", renderStatus(m.status, m.err, m.busy))
 	return strings.Join(lines, "\n")

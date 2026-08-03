@@ -400,7 +400,12 @@ func (m Model) renderSourceForm() string {
 		help = "文件只在本机读取并上传内容，路径不会发送给 Runtime · Ctrl+S 进入统一确认"
 	}
 	lines := []string{titleStyle.Render(title), mutedStyle.Render(help), ""}
-	for index, field := range form.fields {
+	start, end := m.visibleFormRange(len(form.fields), form.index)
+	if start > 0 {
+		lines = append(lines, mutedStyle.Render(fmt.Sprintf("… 上方还有 %d 个字段", start)))
+	}
+	for index := start; index < end; index++ {
+		field := form.fields[index]
 		prefix := "  "
 		if index == form.index {
 			prefix = "▶ "
@@ -421,6 +426,9 @@ func (m Model) renderSourceForm() string {
 			value = mutedStyle.Render("未填写")
 		}
 		lines = append(lines, fmt.Sprintf("%s%-22s %s", prefix, field.label, value))
+	}
+	if end < len(form.fields) {
+		lines = append(lines, mutedStyle.Render(fmt.Sprintf("… 下方还有 %d 个字段", len(form.fields)-end)))
 	}
 	lines = append(lines, "", renderStatus(m.status, m.err, m.busy))
 	return strings.Join(lines, "\n")

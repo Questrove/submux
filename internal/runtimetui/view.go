@@ -13,8 +13,11 @@ import (
 )
 
 func (m Model) View() tea.View {
+	if resolveTerminalLayout(m.width, m.height) == terminalLayoutMinimum {
+		return m.terminalView(m.renderMinimumTerminal())
+	}
 	if m.logViewerOpen {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -24,7 +27,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.operationDetailOpen {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -34,7 +37,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.proxyGroupOpen {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -44,7 +47,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.sourceForm != nil {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -54,7 +57,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.sourceDiagnosticOpen {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -64,7 +67,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.networkForm != nil {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -74,7 +77,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.connectionFilter != nil {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -84,7 +87,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.ruleFilter != nil {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -94,7 +97,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.ruleViewerOpen {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -104,7 +107,7 @@ func (m Model) View() tea.View {
 		}, "\n"))
 	}
 	if m.trafficPolicyEditing {
-		return tea.NewView(strings.Join([]string{
+		return m.terminalView(strings.Join([]string{
 			m.renderShellHeader(),
 			m.renderTabs(),
 			"",
@@ -127,18 +130,20 @@ func (m Model) View() tea.View {
 	} else if m.showHelp {
 		lines = append(lines, m.renderHelp())
 	} else {
+		body := ""
 		switch m.page {
 		case pageConfig:
-			lines = append(lines, m.renderConfigPage())
+			body = m.renderConfigPage()
 		case pageNetwork:
-			lines = append(lines, m.renderNetworkPage())
+			body = m.renderNetworkPage()
 		case pageMonitor:
-			lines = append(lines, m.renderMonitorPage())
+			body = m.renderMonitorPage()
 		case pageMaintenance:
-			lines = append(lines, m.renderMaintenancePage())
+			body = m.renderMaintenancePage()
 		default:
-			lines = append(lines, m.renderStatusPage())
+			body = m.renderStatusPage()
 		}
+		lines = append(lines, m.layoutPageBody(body))
 	}
 	if m.confirmation != nil {
 		lines = append(lines, "", m.renderConfirmation())
@@ -147,7 +152,7 @@ func (m Model) View() tea.View {
 		"",
 		m.renderShellFooter(),
 	)
-	return tea.NewView(strings.Join(lines, "\n"))
+	return m.pageTerminalView(strings.Join(lines, "\n"))
 }
 
 func (m Model) renderShellHeader() string {
@@ -167,6 +172,10 @@ func (m Model) renderShellHeader() string {
 }
 
 func (m Model) renderTabs() string {
+	if m.width > 0 && m.width < 80 {
+		definition := definitionFor(m.page)
+		return fmt.Sprintf("[%s %s]   / 搜索   ? 帮助", definition.number, definition.title)
+	}
 	labels := make([]string, 0, len(pageDefinitions)+2)
 	for _, page := range pageDefinitions {
 		label := page.number + " " + page.title
@@ -793,6 +802,13 @@ func (m Model) renderShellFooter() string {
 		region = regions[focus]
 	}
 	status := renderStatus(m.status, m.err, m.busy)
+	if (m.width > 0 && m.width < 120) || (m.height > 0 && m.height <= 24) {
+		return strings.Join([]string{
+			status,
+			m.renderOperationStrip(),
+			fmt.Sprintf("焦点 %d/%d · %s | 1-5 页面 · Tab 焦点 · / 搜索 · ? 帮助 · r 刷新 · q 退出", focus+1, len(regions), region),
+		}, "\n")
+	}
 	return strings.Join([]string{
 		status,
 		m.renderOperationStrip(),
