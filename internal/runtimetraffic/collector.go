@@ -3,6 +3,7 @@ package runtimetraffic
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ type Reading struct {
 	UploadTotal       uint64
 	DownloadTotal     uint64
 	ActiveConnections int
+	Connections       []runtimeapi.Connection
 }
 
 type Reader interface {
@@ -34,6 +36,50 @@ type Collector struct {
 	previousAt      time.Time
 	hasPrevious     bool
 	discontinuityUp bool
+	connections     []runtimeapi.Connection
+	connectionsAt   time.Time
+}
+
+func (c *Collector) Connections(query runtimeapi.ConnectionQuery) runtimeapi.ConnectionPage {
+	if c == nil {
+		return runtimeapi.ConnectionPage{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	page := query.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := query.PageSize
+	if pageSize <= 0 || pageSize > runtimeapi.ConnectionPageMaxSize {
+		pageSize = runtimeapi.ConnectionPageDefaultSize
+	}
+	items := make([]runtimeapi.Connection, 0, len(c.connections))
+	for _, connection := range c.connections {
+		if !connectionMatches(connection, query) {
+			continue
+		}
+		clone := connection
+		clone.OutboundChain = append([]string(nil), connection.OutboundChain...)
+		if !clone.StartedAt.IsZero() && !c.connectionsAt.IsZero() {
+			clone.DurationSeconds = max(0, int64(c.connectionsAt.Sub(clone.StartedAt).Seconds()))
+		}
+		items = append(items, clone)
+	}
+	response := runtimeapi.ConnectionPage{
+		Total:      len(items),
+		Page:       page,
+		PageSize:   pageSize,
+		Available:  c.status.Available,
+		ObservedAt: c.connectionsAt,
+	}
+	start := (page - 1) * pageSize
+	if start >= len(items) {
+		return response
+	}
+	end := min(len(items), start+pageSize)
+	response.Items = items[start:end]
+	return response
 }
 
 func (c *Collector) Run(ctx context.Context) error {
@@ -148,6 +194,8 @@ func (c *Collector) collect(ctx context.Context) error {
 		ActiveConnections: reading.ActiveConnections,
 		ObservedAt:        now,
 	}
+	c.connections = cloneConnections(reading.Connections)
+	c.connectionsAt = now
 	c.appendLocked(runtimeapi.TrafficSample{
 		ObservedAt:        now,
 		UploadSpeed:       uploadSpeed,
@@ -162,6 +210,38 @@ func (c *Collector) collect(ctx context.Context) error {
 	c.discontinuityUp = false
 	c.pruneLocked(now)
 	return nil
+}
+
+func connectionMatches(connection runtimeapi.Connection, query runtimeapi.ConnectionQuery) bool {
+	contains := func(value string, filter string) bool {
+		return filter == "" || strings.Contains(strings.ToLower(value), strings.ToLower(filter))
+	}
+	if !contains(connection.Target, query.Target) || !contains(connection.Process, query.Process) ||
+		(!contains(connection.Rule, query.Rule) && !contains(connection.RulePayload, query.Rule)) {
+		return false
+	}
+	if query.Node != "" {
+		matched := false
+		for _, node := range connection.OutboundChain {
+			if contains(node, query.Node) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+func cloneConnections(source []runtimeapi.Connection) []runtimeapi.Connection {
+	clones := make([]runtimeapi.Connection, len(source))
+	for index, connection := range source {
+		clones[index] = connection
+		clones[index].OutboundChain = append([]string(nil), connection.OutboundChain...)
+	}
+	return clones
 }
 
 func (c *Collector) appendLocked(sample runtimeapi.TrafficSample) {

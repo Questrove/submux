@@ -29,7 +29,7 @@ var pageDefinitions = []pageDefinition{
 	{id: pageStatus, number: "1", title: "状态", regions: []string{"运行状态", "当前来源", "最近运行操作"}},
 	{id: pageConfig, number: "2", title: "配置", regions: []string{"配置来源", "候选配置", "本机配置层", "配置操作"}},
 	{id: pageNetwork, number: "3", title: "网络", regions: []string{"当前网络", "网络预览", "网络操作"}},
-	{id: pageMonitor, number: "4", title: "监控", regions: []string{"实时概况", "速度曲线", "Runtime 事件"}},
+	{id: pageMonitor, number: "4", title: "监控", regions: []string{"实时概况", "速度曲线", "活动连接", "Runtime 事件"}},
 	{id: pageMaintenance, number: "5", title: "维护", regions: []string{"更新与回滚", "备份与恢复", "诊断", "运行操作"}},
 }
 
@@ -81,6 +81,9 @@ func definitionFor(pageID pageID) pageDefinition {
 }
 
 func (m *Model) openPage(page pageID) {
+	m.connectionsGeneration++
+	m.connectionsPolling = false
+	m.connectionFailures = 0
 	m.page = definitionFor(page).id
 	m.focusIndex = 0
 	m.showHelp = false
@@ -108,6 +111,19 @@ func (m *Model) moveSelection(forward bool) tea.Cmd {
 		if source := m.selectedSourceSummary(); source != nil {
 			m.status = "已选择来源：" + source.Name
 		}
+		return nil
+	}
+	if m.page == pageMonitor && m.focusIndex == 2 {
+		if len(m.connectionPage.Items) == 0 {
+			m.status = "当前筛选下没有活动连接"
+			return nil
+		}
+		offset := -1
+		if forward {
+			offset = 1
+		}
+		m.connectionSelected = (m.connectionSelected + offset + len(m.connectionPage.Items)) % len(m.connectionPage.Items)
+		m.status = "已选择活动连接：" + valueOr(m.connectionPage.Items[m.connectionSelected].Target, "未知目标")
 		return nil
 	}
 	m.status = "当前区域没有可选择条目；使用 Tab 切换焦点"

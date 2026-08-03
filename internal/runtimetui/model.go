@@ -58,57 +58,72 @@ type TrafficClient interface {
 	TrafficHistory(context.Context, runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error)
 }
 
+type ConnectionClient interface {
+	Connections(context.Context, runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error)
+}
+
 type Model struct {
-	ctx                  context.Context
-	client               Client
-	editor               textarea.Model
-	editing              bool
-	editorMode           string
-	busy                 bool
-	width                int
-	height               int
-	snapshot             runtimeapi.Snapshot
-	selectedSourceID     string
-	preview              runtimeapi.CandidatePreview
-	previewSourceID      string
-	sourceForm           *sourceForm
-	sourceDiagnosticOpen bool
-	networkForm          *networkForm
-	networkPreview       runtimeapi.NetworkPreview
-	mihomoUpdate         runtimeapi.MihomoUpdatePlan
-	productUpdate        runtimeapi.ProductUpdatePlan
-	lastOperation        runtimeapi.Operation
-	verification         runtimeapi.ProxyVerification
-	status               string
-	err                  error
-	sensitiveConfirm     string
-	revealedURL          string
-	diagnostics          runtimeapi.DiagnosticsPreview
-	diagnosticsFile      runtimeapi.DiagnosticsResult
-	backupPreview        runtimeapi.BackupPreview
-	backupRestore        runtimeapi.BackupRestorePreview
-	backupArchive        runtimeapi.BackupArchive
-	backupFile           string
-	page                 pageID
-	focusIndex           int
-	palette              textinput.Model
-	paletteOpen          bool
-	paletteIndex         int
-	showHelp             bool
-	snapshotStale        bool
-	snapshotFault        error
-	watchingEvents       bool
-	reconnectAttempts    int
-	observeGeneration    uint64
-	confirmation         *actionConfirmation
-	operationUncertain   bool
-	operationFault       error
-	waitingOperationID   string
-	trafficHistory       []runtimeapi.TrafficSample
-	trafficCursor        uint64
-	trafficRange         time.Duration
-	trafficStale         bool
-	trafficFault         error
+	ctx                   context.Context
+	client                Client
+	editor                textarea.Model
+	editing               bool
+	editorMode            string
+	busy                  bool
+	width                 int
+	height                int
+	snapshot              runtimeapi.Snapshot
+	selectedSourceID      string
+	preview               runtimeapi.CandidatePreview
+	previewSourceID       string
+	sourceForm            *sourceForm
+	sourceDiagnosticOpen  bool
+	networkForm           *networkForm
+	networkPreview        runtimeapi.NetworkPreview
+	mihomoUpdate          runtimeapi.MihomoUpdatePlan
+	productUpdate         runtimeapi.ProductUpdatePlan
+	lastOperation         runtimeapi.Operation
+	verification          runtimeapi.ProxyVerification
+	status                string
+	err                   error
+	sensitiveConfirm      string
+	revealedURL           string
+	diagnostics           runtimeapi.DiagnosticsPreview
+	diagnosticsFile       runtimeapi.DiagnosticsResult
+	backupPreview         runtimeapi.BackupPreview
+	backupRestore         runtimeapi.BackupRestorePreview
+	backupArchive         runtimeapi.BackupArchive
+	backupFile            string
+	page                  pageID
+	focusIndex            int
+	palette               textinput.Model
+	paletteOpen           bool
+	paletteIndex          int
+	showHelp              bool
+	snapshotStale         bool
+	snapshotFault         error
+	watchingEvents        bool
+	reconnectAttempts     int
+	observeGeneration     uint64
+	confirmation          *actionConfirmation
+	operationUncertain    bool
+	operationFault        error
+	waitingOperationID    string
+	trafficHistory        []runtimeapi.TrafficSample
+	trafficCursor         uint64
+	trafficRange          time.Duration
+	trafficStale          bool
+	trafficFault          error
+	connectionFilter      *connectionFilterForm
+	connectionQuery       runtimeapi.ConnectionQuery
+	connectionLoadedQuery runtimeapi.ConnectionQuery
+	connectionPage        runtimeapi.ConnectionPage
+	connectionHasData     bool
+	connectionSelected    int
+	connectionStale       bool
+	connectionFault       error
+	connectionsPolling    bool
+	connectionsGeneration uint64
+	connectionFailures    int
 }
 
 const (
@@ -158,6 +173,22 @@ type trafficHistoryErrorMsg struct {
 }
 
 type trafficTickMsg struct{}
+
+type connectionPageMsg struct {
+	page       runtimeapi.ConnectionPage
+	query      runtimeapi.ConnectionQuery
+	generation uint64
+}
+
+type connectionPageErrorMsg struct {
+	err        error
+	query      runtimeapi.ConnectionQuery
+	generation uint64
+}
+
+type connectionTickMsg struct {
+	generation uint64
+}
 
 type preparedActionMsg struct {
 	action runtimeapi.Action
@@ -273,6 +304,9 @@ func New(ctx context.Context, client Client) Model {
 		busy:              true,
 		observeGeneration: 1,
 		trafficRange:      5 * time.Minute,
+		connectionQuery: runtimeapi.ConnectionQuery{
+			Page: 1, PageSize: runtimeapi.ConnectionPageDefaultSize,
+		},
 	}
 }
 
@@ -381,6 +415,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.trafficCursor = message.history.LatestCursor
 		m.trafficStale = false
 		m.trafficFault = nil
+		if !m.connectionsPolling {
+			m.connectionsPolling = true
+			return m, tea.Batch(trafficTickCmd(), m.connectionsCmd())
+		}
 		return m, trafficTickCmd()
 	case trafficHistoryErrorMsg:
 		if m.page != pageMonitor || message.rangeAt != m.trafficRange {
@@ -388,12 +426,55 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.trafficStale = true
 		m.trafficFault = message.err
+		if !m.connectionsPolling {
+			m.connectionsPolling = true
+			return m, tea.Batch(trafficTickCmd(), m.connectionsCmd())
+		}
 		return m, trafficTickCmd()
 	case trafficTickMsg:
 		if m.page != pageMonitor {
 			return m, nil
 		}
 		return m, m.trafficHistoryCmd(false)
+	case connectionPageMsg:
+		if m.page != pageMonitor || message.query != m.connectionQuery || message.generation != m.connectionsGeneration {
+			return m, nil
+		}
+		m.connectionPage = message.page
+		m.connectionLoadedQuery = message.query
+		m.connectionHasData = true
+		if len(message.page.Items) == 0 {
+			m.connectionSelected = 0
+		} else if m.connectionSelected >= len(message.page.Items) {
+			m.connectionSelected = len(message.page.Items) - 1
+		}
+		m.connectionStale = !message.page.Available
+		m.connectionFault = nil
+		m.connectionsPolling = true
+		if message.page.Available {
+			m.connectionFailures = 0
+		} else {
+			m.connectionFailures++
+		}
+		return m, connectionTickCmd(m.connectionsGeneration, m.connectionFailures)
+	case connectionPageErrorMsg:
+		if m.page != pageMonitor || message.query != m.connectionQuery || message.generation != m.connectionsGeneration {
+			return m, nil
+		}
+		m.connectionStale = true
+		m.connectionFault = message.err
+		m.connectionsPolling = true
+		m.connectionFailures++
+		return m, connectionTickCmd(m.connectionsGeneration, m.connectionFailures)
+	case connectionTickMsg:
+		if message.generation != m.connectionsGeneration {
+			return m, nil
+		}
+		if m.page != pageMonitor {
+			m.connectionsPolling = false
+			return m, nil
+		}
+		return m, m.connectionsCmd()
 	case preparedActionMsg:
 		m.editing = false
 		m.editor.Blur()
@@ -601,6 +682,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.networkForm != nil {
 		return m.updateNetworkForm(message)
+	}
+	if m.connectionFilter != nil {
+		return m.updateConnectionFilter(message)
 	}
 
 	if m.editing {
@@ -1103,6 +1187,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "正在生成所选来源的最终候选配置…"
 			return m, m.previewSourceCmd(sourceID)
 		case "f", "d", "m":
+			if key.String() == "f" && m.page == pageMonitor {
+				m.connectionFilter = newConnectionFilterForm(m.connectionQuery)
+				m.err = nil
+				m.status = "填写活动连接筛选；Ctrl+S 应用，Esc 取消"
+				return m, m.connectionFilter.loadActiveField()
+			}
 			sourceID := m.selectedSource()
 			if sourceID == "" {
 				m.err = errors.New("当前没有可刷新的配置来源")
@@ -1124,6 +1214,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				},
 			})
 			return m, nil
+		case ",", ".":
+			if m.page != pageMonitor || m.focusIndex != 2 {
+				return m, nil
+			}
+			if !m.changeConnectionPage(key.String() == ".") {
+				return m, nil
+			}
+			return m, m.connectionsCmd()
 		case "[", "]":
 			if m.page == pageMonitor {
 				m.cycleTrafficRange(key.String() == "]")

@@ -8,8 +8,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
+	"submux/internal/runtimeapi"
 	"submux/internal/runtimeprocess"
 )
 
@@ -55,9 +58,9 @@ func (r MihomoReader) ReadTraffic(ctx context.Context) (Reading, error) {
 		return Reading{}, fmt.Errorf("Mihomo traffic endpoint returned HTTP %d", response.StatusCode)
 	}
 	var payload struct {
-		UploadTotal   uint64            `json:"uploadTotal"`
-		DownloadTotal uint64            `json:"downloadTotal"`
-		Connections   []json.RawMessage `json:"connections"`
+		UploadTotal   uint64                 `json:"uploadTotal"`
+		DownloadTotal uint64                 `json:"downloadTotal"`
+		Connections   []mihomoConnectionWire `json:"connections"`
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, defaultMihomoResponseLimit+1))
 	if err != nil {
@@ -69,9 +72,96 @@ func (r MihomoReader) ReadTraffic(ctx context.Context) (Reading, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return Reading{}, fmt.Errorf("decode Mihomo traffic counters: %w", err)
 	}
+	connections := make([]runtimeapi.Connection, 0, len(payload.Connections))
+	for _, wire := range payload.Connections {
+		connections = append(connections, wire.connection())
+	}
+	sort.Slice(connections, func(left, right int) bool {
+		leftUnknown := connections[left].StartedAt.IsZero()
+		rightUnknown := connections[right].StartedAt.IsZero()
+		if leftUnknown != rightUnknown {
+			return !leftUnknown
+		}
+		if connections[left].StartedAt.Equal(connections[right].StartedAt) {
+			return connections[left].ID < connections[right].ID
+		}
+		return connections[left].StartedAt.After(connections[right].StartedAt)
+	})
 	return Reading{
 		UploadTotal:       payload.UploadTotal,
 		DownloadTotal:     payload.DownloadTotal,
-		ActiveConnections: len(payload.Connections),
+		ActiveConnections: len(connections),
+		Connections:       connections,
 	}, nil
+}
+
+type mihomoConnectionWire struct {
+	ID       string             `json:"id"`
+	Metadata mihomoMetadataWire `json:"metadata"`
+	Upload   uint64             `json:"upload"`
+	Download uint64             `json:"download"`
+	Start    time.Time          `json:"start"`
+	Chains   []string           `json:"chains"`
+	Rule     string             `json:"rule"`
+	Payload  string             `json:"rulePayload"`
+}
+
+type mihomoMetadataWire struct {
+	Network         string `json:"network"`
+	Type            string `json:"type"`
+	SourceIP        string `json:"sourceIP"`
+	SourcePort      string `json:"sourcePort"`
+	DestinationIP   string `json:"destinationIP"`
+	DestinationPort string `json:"destinationPort"`
+	Host            string `json:"host"`
+	Process         string `json:"process"`
+}
+
+func (wire mihomoConnectionWire) connection() runtimeapi.Connection {
+	targetHost := wire.Metadata.Host
+	if targetHost == "" {
+		targetHost = wire.Metadata.DestinationIP
+	}
+	chain := make([]string, 0, min(len(wire.Chains), 16))
+	for _, node := range wire.Chains {
+		if len(chain) == 16 {
+			break
+		}
+		chain = append(chain, boundedText(node, 256))
+	}
+	return runtimeapi.Connection{
+		ID:            boundedText(wire.ID, 128),
+		Source:        boundedText(joinConnectionAddress(wire.Metadata.SourceIP, wire.Metadata.SourcePort), 512),
+		Target:        boundedText(joinConnectionAddress(targetHost, wire.Metadata.DestinationPort), 512),
+		Protocol:      boundedText(wire.Metadata.Network, 32),
+		Inbound:       boundedText(wire.Metadata.Type, 64),
+		Process:       boundedText(wire.Metadata.Process, 256),
+		Rule:          boundedText(wire.Rule, 256),
+		RulePayload:   boundedText(wire.Payload, 512),
+		OutboundChain: chain,
+		StartedAt:     wire.Start.UTC(),
+		Upload:        wire.Upload,
+		Download:      wire.Download,
+	}
+}
+
+func joinConnectionAddress(host string, port string) string {
+	host = strings.TrimSpace(host)
+	port = strings.TrimSpace(port)
+	if host == "" {
+		return "未知"
+	}
+	if port == "" || port == "0" {
+		return host
+	}
+	return net.JoinHostPort(host, port)
+}
+
+func boundedText(value string, maximumRunes int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if len(runes) > maximumRunes {
+		runes = runes[:maximumRunes]
+	}
+	return string(runes)
 }

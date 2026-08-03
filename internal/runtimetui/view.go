@@ -42,6 +42,16 @@ func (m Model) View() tea.View {
 			m.renderShellFooter(),
 		}, "\n"))
 	}
+	if m.connectionFilter != nil {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderConnectionFilter(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
 	if m.editing {
 		return m.legacyView()
 	}
@@ -302,9 +312,6 @@ func (m Model) renderMonitorPage() string {
 		"上传 " + m.renderTrafficSparkline(true),
 		"下载 " + m.renderTrafficSparkline(false),
 		mutedStyle.Render("│ 表示 Mihomo 停止、重启或计数器重置造成的中断"),
-		"",
-		m.focusHeading(2, "Runtime 事件"),
-		fmt.Sprintf("最新游标 %d · Snapshot revision %d · 观测时间 %s", m.snapshot.LatestEventCursor, m.snapshot.Revision, observed),
 	}
 	if !m.snapshot.Traffic.Available {
 		lines = append(lines, warnStyle.Render("Mihomo 流量接口当前不可用；保留最后一次确认的本次运行累计"))
@@ -316,10 +323,103 @@ func (m Model) renderMonitorPage() string {
 		}
 		lines = append(lines, warnStyle.Render(message))
 	}
+
+	loadedQuery := m.connectionQuery
+	if m.connectionHasData {
+		loadedQuery = m.connectionLoadedQuery
+	}
+	page := m.connectionPage.Page
+	if page <= 0 {
+		page = loadedQuery.Page
+	}
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := m.connectionPage.PageSize
+	if pageSize <= 0 {
+		pageSize = loadedQuery.PageSize
+	}
+	if pageSize <= 0 {
+		pageSize = runtimeapi.ConnectionPageDefaultSize
+	}
+	lastPage := 1
+	if m.connectionPage.Total > 0 {
+		lastPage = (m.connectionPage.Total + pageSize - 1) / pageSize
+	}
+	lines = append(lines,
+		"",
+		m.focusHeading(2, "活动连接"),
+		fmt.Sprintf("%s · 第 %d/%d 页 · 共 %d 条 · F 筛选 · ,/. 翻页", connectionFilterSummary(loadedQuery), page, lastPage, m.connectionPage.Total),
+	)
+	if len(m.connectionPage.Items) == 0 {
+		lines = append(lines, mutedStyle.Render("当前筛选下没有活动连接"))
+	}
+	for index, connection := range m.connectionPage.Items {
+		prefix := "  "
+		if index == m.connectionSelected {
+			prefix = "▶ "
+		}
+		lines = append(lines, fmt.Sprintf(
+			"%s%s → %s · %s · %s · ↑ %s ↓ %s",
+			prefix,
+			valueOr(connection.Source, "未知来源"),
+			valueOr(connection.Target, "未知目标"),
+			valueOr(connection.Protocol, "未知协议"),
+			valueOr(connection.Process, "未知进程"),
+			formatTrafficBytes(connection.Upload),
+			formatTrafficBytes(connection.Download),
+		))
+	}
+	if len(m.connectionPage.Items) > 0 {
+		selected := m.connectionSelected
+		if selected < 0 || selected >= len(m.connectionPage.Items) {
+			selected = 0
+		}
+		connection := m.connectionPage.Items[selected]
+		lines = append(lines,
+			fmt.Sprintf("详情 ID %s · 开始 %s · 持续 %s · 入站 %s", valueOr(connection.ID, "未知"), formatConnectionTime(connection.StartedAt), formatConnectionDuration(connection.DurationSeconds), valueOr(connection.Inbound, "未知")),
+			fmt.Sprintf("规则 %s%s · 出站 %s", valueOr(connection.Rule, "未匹配"), connectionRulePayloadSuffix(connection.RulePayload), valueOr(strings.Join(connection.OutboundChain, " → "), "未知")),
+			mutedStyle.Render("↑/↓ 选择连接；详情由 Runtime 本机 IPC 提供，TUI 不直接连接 Mihomo"),
+		)
+	}
+	if m.connectionStale {
+		message := "活动连接数据已过期；保留最近一次结果并继续重试"
+		if m.connectionFault != nil {
+			message += "：" + publicErrorMessage(m.connectionFault)
+		}
+		lines = append(lines, warnStyle.Render(message))
+	}
+
+	lines = append(lines,
+		"",
+		m.focusHeading(3, "Runtime 事件"),
+		fmt.Sprintf("最新游标 %d · Snapshot revision %d · 观测时间 %s", m.snapshot.LatestEventCursor, m.snapshot.Revision, observed),
+	)
 	if m.snapshotFault != nil {
 		lines = append(lines, warnStyle.Render("本机 IPC："+publicErrorMessage(m.snapshotFault)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func formatConnectionTime(value time.Time) string {
+	if value.IsZero() {
+		return "未知"
+	}
+	return value.Local().Format("15:04:05")
+}
+
+func formatConnectionDuration(seconds int64) string {
+	if seconds < 0 {
+		seconds = 0
+	}
+	return (time.Duration(seconds) * time.Second).String()
+}
+
+func connectionRulePayloadSuffix(payload string) string {
+	if strings.TrimSpace(payload) == "" {
+		return ""
+	}
+	return "(" + payload + ")"
 }
 
 func (m Model) renderMaintenancePage() string {

@@ -72,6 +72,24 @@ type BackupService interface {
 type TrafficService interface {
 	Status() runtimeapi.TrafficStatus
 	History(runtimeapi.TrafficHistoryRequest) runtimeapi.TrafficHistory
+	Connections(runtimeapi.ConnectionQuery) runtimeapi.ConnectionPage
+}
+
+func (c *Coordinator) Connections(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	query runtimeapi.ConnectionQuery,
+) (runtimeapi.ConnectionPage, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.ConnectionPage{}, err
+	}
+	if peer.Key() == "" {
+		return runtimeapi.ConnectionPage{}, errors.New("Runtime connection observer identity is required")
+	}
+	if c == nil || c.Traffic == nil {
+		return runtimeapi.ConnectionPage{}, errors.New("Runtime connection viewer is unavailable")
+	}
+	return c.Traffic.Connections(query), nil
 }
 
 type PublicError struct {

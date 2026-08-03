@@ -66,3 +66,36 @@ func TestClientTrafficHistoryEncodesSinceTime(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClientReadsFilteredConnectionPage(t *testing.T) {
+	client := &Client{
+		clientType: "tui",
+		version:    "test",
+		http: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			query := request.URL.Query()
+			if request.URL.Path != "/v1/connections" || query.Get("target") != "api.example" ||
+				query.Get("process") != "browser" || query.Get("rule") != "Domain" ||
+				query.Get("node") != "Tokyo" || query.Get("page") != "2" || query.Get("page_size") != "25" ||
+				request.Header.Get(HeaderClientType) != "tui" {
+				t.Fatalf("request=%s headers=%v", request.URL.String(), request.Header)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"items":[{"id":"connection-1","target":"api.example.com:443","protocol":"tcp","started_at":"2026-08-03T12:00:00Z"}],"total":1,"page":2,"page_size":25,"available":true,"observed_at":"2026-08-03T12:00:10Z"}`,
+				)),
+				Request: request,
+			}, nil
+		})},
+	}
+	page, err := client.Connections(t.Context(), runtimeapi.ConnectionQuery{
+		Target: "api.example", Process: "browser", Rule: "Domain", Node: "Tokyo", Page: 2, PageSize: 25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Available || page.Total != 1 || page.Page != 2 || page.PageSize != 25 || len(page.Items) != 1 || page.Items[0].ID != "connection-1" {
+		t.Fatalf("connection page=%#v", page)
+	}
+}

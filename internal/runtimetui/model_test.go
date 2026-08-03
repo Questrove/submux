@@ -41,6 +41,24 @@ type fakeClient struct {
 	trafficRequests    []runtimeapi.TrafficHistoryRequest
 	trafficHistories   []runtimeapi.TrafficHistory
 	trafficError       error
+	connectionRequests []runtimeapi.ConnectionQuery
+	connectionPages    []runtimeapi.ConnectionPage
+	connectionError    error
+}
+
+func (f *fakeClient) Connections(_ context.Context, query runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error) {
+	index := len(f.connectionRequests)
+	f.connectionRequests = append(f.connectionRequests, query)
+	if f.connectionError != nil {
+		return runtimeapi.ConnectionPage{}, f.connectionError
+	}
+	if len(f.connectionPages) == 0 {
+		return runtimeapi.ConnectionPage{Page: query.Page, PageSize: query.PageSize, Available: true}, nil
+	}
+	if index >= len(f.connectionPages) {
+		index = len(f.connectionPages) - 1
+	}
+	return f.connectionPages[index], nil
 }
 
 func (f *fakeClient) TrafficHistory(_ context.Context, request runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error) {

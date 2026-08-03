@@ -51,12 +51,25 @@ type trafficObserver struct {
 	history func(context.Context, runtimeapi.PeerIdentity, runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error)
 }
 
+type connectionObserver struct {
+	observerFunc
+	connections func(context.Context, runtimeapi.PeerIdentity, runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error)
+}
+
 func (observer trafficObserver) TrafficHistory(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
 	request runtimeapi.TrafficHistoryRequest,
 ) (runtimeapi.TrafficHistory, error) {
 	return observer.history(ctx, peer, request)
+}
+
+func (observer connectionObserver) Connections(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	query runtimeapi.ConnectionQuery,
+) (runtimeapi.ConnectionPage, error) {
+	return observer.connections(ctx, peer, query)
 }
 
 type updateObserver struct {
@@ -334,6 +347,58 @@ func TestTrafficHistoryHandlerUsesBoundedTimeOrCursorQuery(t *testing.T) {
 	recorder = serve("/v1/traffic/history?limit=1025")
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("unbounded traffic limit status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestConnectionHandlerUsesBoundedFiltersAndPagination(t *testing.T) {
+	var received runtimeapi.ConnectionQuery
+	service := connectionObserver{
+		observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		},
+		connections: func(_ context.Context, peer runtimeapi.PeerIdentity, query runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error) {
+			if peer.UID != 1000 {
+				t.Fatalf("peer=%#v", peer)
+			}
+			received = query
+			return runtimeapi.ConnectionPage{
+				Items: []runtimeapi.Connection{{ID: "connection-1", Target: "api.example.com:443"}},
+				Total: 1, Page: query.Page, PageSize: query.PageSize, Available: true,
+			}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set(HeaderRequestID, "request-connections")
+		request.Header.Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+		request.Header.Set(HeaderClientType, "tui")
+		request.Header.Set(HeaderClientVersion, "test")
+		request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	recorder := serve("/v1/connections?target=api.example&process=browser&rule=Domain&node=Tokyo&page=2&page_size=25")
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" ||
+		received.Target != "api.example" || received.Process != "browser" || received.Rule != "Domain" ||
+		received.Node != "Tokyo" || received.Page != 2 || received.PageSize != 25 ||
+		!strings.Contains(recorder.Body.String(), `"id":"connection-1"`) {
+		t.Fatalf("connection status=%d query=%#v body=%s", recorder.Code, received, recorder.Body.String())
+	}
+	for _, path := range []string{
+		"/v1/connections?page=0",
+		"/v1/connections?page_size=101",
+		"/v1/connections?unknown=value",
+		"/v1/connections?target=" + strings.Repeat("a", 257),
+	} {
+		if invalid := serve(path); invalid.Code != http.StatusBadRequest {
+			t.Fatalf("invalid connection query %q status=%d body=%s", path, invalid.Code, invalid.Body.String())
+		}
 	}
 }
 

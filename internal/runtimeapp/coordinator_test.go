@@ -38,8 +38,9 @@ type networkServiceFunc struct {
 }
 
 type trafficServiceStub struct {
-	status  runtimeapi.TrafficStatus
-	history runtimeapi.TrafficHistory
+	status      runtimeapi.TrafficStatus
+	history     runtimeapi.TrafficHistory
+	connections runtimeapi.ConnectionPage
 }
 
 func (service trafficServiceStub) Status() runtimeapi.TrafficStatus {
@@ -48,6 +49,10 @@ func (service trafficServiceStub) Status() runtimeapi.TrafficStatus {
 
 func (service trafficServiceStub) History(runtimeapi.TrafficHistoryRequest) runtimeapi.TrafficHistory {
 	return service.history
+}
+
+func (service trafficServiceStub) Connections(runtimeapi.ConnectionQuery) runtimeapi.ConnectionPage {
+	return service.connections
 }
 
 type productUpdateServiceFunc struct {
@@ -205,6 +210,10 @@ func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
 				Samples:      []runtimeapi.TrafficSample{{Cursor: 7, UploadTotal: 123}},
 				LatestCursor: 7,
 			},
+			connections: runtimeapi.ConnectionPage{
+				Items: []runtimeapi.Connection{{ID: "connection-1", Target: "example.com:443"}},
+				Total: 1, Page: 1, PageSize: 20,
+			},
 		},
 		Version: "test",
 	}
@@ -230,6 +239,10 @@ func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
 	history, err := coordinator.TrafficHistory(t.Context(), peer, runtimeapi.TrafficHistoryRequest{After: 6})
 	if err != nil || history.LatestCursor != 7 || len(history.Samples) != 1 {
 		t.Fatalf("traffic history=%#v err=%v", history, err)
+	}
+	connections, err := coordinator.Connections(t.Context(), peer, runtimeapi.ConnectionQuery{Target: "example"})
+	if err != nil || connections.Total != 1 || connections.Items[0].ID != "connection-1" {
+		t.Fatalf("connections=%#v err=%v", connections, err)
 	}
 }
 

@@ -90,6 +90,16 @@ GET /v1/traffic/history?after={cursor}&limit={1..1024}
 
 Runtime 每秒从 Mihomo 本机控制接口读取累计上传、下载量和活动连接数，在内存中计算当前速度，只保留最近 15 分钟。读取短暂失败时保留最后一次确认的累计值并标记不可用；Mihomo 停止、重启或计数器回退时插入 `discontinuity` 样本，恢复采样后把 Snapshot 累计值切换到新的 Mihomo 运行。Runtime 重启后历史自然清空。流量样本和累计值不写入状态数据库、日志或备份，也不计算跨 Mihomo 运行的长期流量。
 
+### 读取活动连接
+
+```http
+GET /v1/connections?target={text}&process={text}&rule={text}&node={text}&page={n}&page_size={1..100}
+```
+
+该只读接口返回当前活动连接的有界分页结果。每条连接包含稳定连接 ID、来源、目标、协议、入站类型、进程名称、匹配规则及内容、出站链、开始时间、持续时间和上传、下载量。`target`、`process`、`rule`、`node` 均为不区分大小写的包含筛选，留空表示不限；默认每页 20 条，最多 100 条，完整响应不得超过 1 MiB。响应中的 `available` 表示本次 Mihomo 采集是否成功，`observed_at` 表示这些连接最后一次成功采集的时间。
+
+Runtime 与流量采集共用 Mihomo 本机控制连接。客户端只调用 Runtime 本机 IPC，不直接连接 Mihomo，也不会取得 Mihomo secret。Mihomo 读取短暂失败时，Runtime 保留最后一次成功的连接结果并将 `available` 设为 `false`；客户端应只把连接区域标记为过期，使用最长五秒的退避间隔继续重试，其他页面和区域继续可用。接口不返回进程路径，连接明细不进入 Snapshot、状态数据库、日志或备份。
+
 ### 上传导入内容
 
 ```http

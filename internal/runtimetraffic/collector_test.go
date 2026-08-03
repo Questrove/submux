@@ -109,3 +109,47 @@ func TestCollectorPrunesHistoryToFifteenMinutes(t *testing.T) {
 		t.Fatalf("pruned history=%#v", history)
 	}
 }
+
+func TestCollectorFiltersAndPagesConnectionDetailsAndRetainsStaleData(t *testing.T) {
+	now := time.Date(2026, 8, 3, 12, 0, 10, 0, time.UTC)
+	observedAt := now
+	connections := []runtimeapi.Connection{
+		{ID: "1", Target: "api.example.com:443", Process: "browser", Rule: "DomainSuffix", RulePayload: "example.com", OutboundChain: []string{"Proxy", "Tokyo"}, StartedAt: now.Add(-10 * time.Second)},
+		{ID: "2", Target: "dns.example:53", Process: "resolver", Rule: "Match", OutboundChain: []string{"DIRECT"}, StartedAt: now.Add(-5 * time.Second)},
+		{ID: "3", Target: "updates.test:443", Process: "updater", Rule: "Domain", OutboundChain: []string{"Proxy", "Osaka"}, StartedAt: now.Add(-2 * time.Second)},
+	}
+	reader := &scriptedReader{
+		readings: []Reading{{ActiveConnections: len(connections), Connections: connections}},
+		errors:   []error{nil, errors.New("Mihomo unavailable")},
+	}
+	collector := &Collector{Reader: reader, Now: func() time.Time { return now }}
+	if err := collector.collect(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	queries := []runtimeapi.ConnectionQuery{
+		{Target: "API.EXAMPLE"},
+		{Process: "BROWSER"},
+		{Rule: "example.com"},
+		{Node: "tokyo"},
+	}
+	for _, query := range queries {
+		page := collector.Connections(query)
+		if !page.Available || page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != "1" || page.Items[0].DurationSeconds != 10 {
+			t.Fatalf("connection query=%#v page=%#v", query, page)
+		}
+	}
+	page := collector.Connections(runtimeapi.ConnectionQuery{Page: 2, PageSize: 1})
+	if page.Total != 3 || len(page.Items) != 1 || page.Items[0].ID != "2" || page.Page != 2 || page.PageSize != 1 {
+		t.Fatalf("paged connections=%#v", page)
+	}
+
+	now = now.Add(time.Second)
+	if err := collector.collect(t.Context()); err == nil {
+		t.Fatal("collector accepted unavailable Mihomo")
+	}
+	stale := collector.Connections(runtimeapi.ConnectionQuery{Target: "api.example"})
+	if stale.Available || !stale.ObservedAt.Equal(observedAt) || len(stale.Items) != 1 || stale.Items[0].DurationSeconds != 10 {
+		t.Fatalf("stale connections=%#v", stale)
+	}
+}

@@ -31,6 +31,10 @@ type TrafficObserver interface {
 	TrafficHistory(context.Context, runtimeapi.PeerIdentity, runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error)
 }
 
+type ConnectionObserver interface {
+	Connections(context.Context, runtimeapi.PeerIdentity, runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error)
+}
+
 type Operator interface {
 	UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error)
 	GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity, string, string, string, bool) (runtimeapi.AdvancedOverrideDocument, error)
@@ -71,16 +75,17 @@ type BackupOperator interface {
 }
 
 type Server struct {
-	observer        Observer
-	eventObserver   EventObserver
-	trafficObserver TrafficObserver
-	operator        Operator
-	network         NetworkPreviewer
-	updates         MihomoUpdateOperator
-	productUpdates  ProductUpdateOperator
-	backups         BackupOperator
-	authorizer      Authorizer
-	runtimeVersion  string
+	observer           Observer
+	eventObserver      EventObserver
+	trafficObserver    TrafficObserver
+	connectionObserver ConnectionObserver
+	operator           Operator
+	network            NetworkPreviewer
+	updates            MihomoUpdateOperator
+	productUpdates     ProductUpdateOperator
+	backups            BackupOperator
+	authorizer         Authorizer
+	runtimeVersion     string
 }
 
 type peerContextValue struct {
@@ -104,21 +109,23 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	backups, _ := observer.(BackupOperator)
 	eventObserver, _ := observer.(EventObserver)
 	trafficObserver, _ := observer.(TrafficObserver)
+	connectionObserver, _ := observer.(ConnectionObserver)
 	runtimeVersion := ""
 	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
 		runtimeVersion = provider.RuntimeVersion()
 	}
 	return &Server{
-		observer:        observer,
-		eventObserver:   eventObserver,
-		trafficObserver: trafficObserver,
-		operator:        operator,
-		network:         network,
-		updates:         updates,
-		productUpdates:  productUpdates,
-		backups:         backups,
-		authorizer:      authorizer,
-		runtimeVersion:  runtimeVersion,
+		observer:           observer,
+		eventObserver:      eventObserver,
+		trafficObserver:    trafficObserver,
+		connectionObserver: connectionObserver,
+		operator:           operator,
+		network:            network,
+		updates:            updates,
+		productUpdates:     productUpdates,
+		backups:            backups,
+		authorizer:         authorizer,
+		runtimeVersion:     runtimeVersion,
 	}, nil
 }
 
@@ -171,6 +178,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/snapshot", s.handleSnapshot)
 	mux.HandleFunc("/v1/events", s.handleEvents)
 	mux.HandleFunc("/v1/traffic/history", s.handleTrafficHistory)
+	mux.HandleFunc("/v1/connections", s.handleConnections)
 	mux.HandleFunc("/v1/imports", s.handleImport)
 	mux.HandleFunc("/v1/advanced-override", s.handleAdvancedOverride)
 	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
@@ -191,6 +199,78 @@ func (s *Server) Handler() http.Handler {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
 	return mux
+}
+
+func (s *Server) handleConnections(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime connection viewer only accepts GET", false)
+		return
+	}
+	if requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime connection viewer does not accept a request body", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.connectionObserver == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime connection viewer is unavailable", true)
+		return
+	}
+	allowed := map[string]bool{"target": true, "process": true, "rule": true, "node": true, "page": true, "page_size": true}
+	for key := range request.URL.Query() {
+		if !allowed[key] {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime connection query contains an unsupported parameter", false)
+			return
+		}
+	}
+	query := runtimeapi.ConnectionQuery{
+		Target:   strings.TrimSpace(request.URL.Query().Get("target")),
+		Process:  strings.TrimSpace(request.URL.Query().Get("process")),
+		Rule:     strings.TrimSpace(request.URL.Query().Get("rule")),
+		Node:     strings.TrimSpace(request.URL.Query().Get("node")),
+		Page:     1,
+		PageSize: runtimeapi.ConnectionPageDefaultSize,
+	}
+	for _, filter := range []string{query.Target, query.Process, query.Rule, query.Node} {
+		if len(filter) > 256 {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime connection filter is too long", false)
+			return
+		}
+	}
+	var err error
+	if value := request.URL.Query().Get("page"); value != "" {
+		query.Page, err = strconv.Atoi(value)
+		if err != nil || query.Page <= 0 || query.Page > 1_000_000 {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime connection page is invalid", false)
+			return
+		}
+	}
+	if value := request.URL.Query().Get("page_size"); value != "" {
+		query.PageSize, err = strconv.Atoi(value)
+		if err != nil || query.PageSize <= 0 || query.PageSize > runtimeapi.ConnectionPageMaxSize {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime connection page size is invalid", false)
+			return
+		}
+	}
+	page, err := s.connectionObserver.Connections(request.Context(), peer, query)
+	if err != nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime connection viewer is temporarily unavailable", true)
+		return
+	}
+	body, err := json.Marshal(page)
+	if err != nil || len(body) > runtimeapi.ConnectionResponseMaxBytes {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime connection response exceeds the size limit", true)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, page)
 }
 
 func (s *Server) handleTrafficHistory(writer http.ResponseWriter, request *http.Request) {

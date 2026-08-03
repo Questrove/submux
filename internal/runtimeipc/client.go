@@ -73,6 +73,58 @@ func (c *Client) TrafficHistory(ctx context.Context, requestValue runtimeapi.Tra
 	return history, nil
 }
 
+func (c *Client) Connections(ctx context.Context, queryValue runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error) {
+	var page runtimeapi.ConnectionPage
+	query := url.Values{}
+	if queryValue.Target != "" {
+		query.Set("target", queryValue.Target)
+	}
+	if queryValue.Process != "" {
+		query.Set("process", queryValue.Process)
+	}
+	if queryValue.Rule != "" {
+		query.Set("rule", queryValue.Rule)
+	}
+	if queryValue.Node != "" {
+		query.Set("node", queryValue.Node)
+	}
+	if queryValue.Page > 0 {
+		query.Set("page", strconv.Itoa(queryValue.Page))
+	}
+	if queryValue.PageSize > 0 {
+		query.Set("page_size", strconv.Itoa(queryValue.PageSize))
+	}
+	path := "/v1/connections"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return page, err
+	}
+	request, err := c.newRequest(ctx, http.MethodGet, path, nil, requestID)
+	if err != nil {
+		return page, err
+	}
+	response, err := c.do(request)
+	if err != nil {
+		return page, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return page, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, runtimeapi.ConnectionResponseMaxBytes, &page); err != nil {
+		return runtimeapi.ConnectionPage{}, &ClientError{
+			Code:      runtimeapi.ErrorServiceUnavailable,
+			Message:   "Runtime returned an invalid connection page",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	return page, nil
+}
+
 type ClientError struct {
 	Code            string
 	Message         string
