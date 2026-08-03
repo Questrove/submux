@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Submux Runtime TUI 结构原型</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --page: #071019;
+      --terminal: #0b1520;
+      --panel: #101e2c;
+      --panel-2: #132536;
+      --line: #274057;
+      --text: #dce8f2;
+      --muted: #8aa0b4;
+      --cyan: #6ed8ee;
+      --green: #71e6a3;
+      --yellow: #ffd37a;
+      --red: #ff8f97;
+      --blue: #86baff;
+      --shadow: 0 32px 80px rgba(0, 0, 0, .45);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-width: 1020px;
+      min-height: 100vh;
+      padding: 34px 40px 104px;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(58, 127, 177, .18), transparent 36%),
+        radial-gradient(circle at 88% 100%, rgba(46, 143, 108, .12), transparent 34%),
+        var(--page);
+      color: var(--text);
+      font-family: "Cascadia Mono", "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    }
+
+    button { font: inherit; }
+
+    .prototype-note {
+      display: flex;
+      justify-content: space-between;
+      gap: 24px;
+      width: min(1460px, calc(100vw - 80px));
+      margin: 0 auto 14px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    .prototype-note strong { color: var(--text); font-weight: 600; }
+
+    .terminal {
+      width: min(1460px, calc(100vw - 80px));
+      min-height: 770px;
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid #33526d;
+      border-radius: 12px;
+      background: var(--terminal);
+      box-shadow: var(--shadow);
+    }
+
+    .terminal-chrome {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 38px;
+      padding: 0 14px;
+      border-bottom: 1px solid var(--line);
+      background: #0e1a26;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .dots { display: flex; gap: 7px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: #516578; }
+    .dot:nth-child(1) { background: #f08383; }
+    .dot:nth-child(2) { background: #e8c870; }
+    .dot:nth-child(3) { background: #6fd09a; }
+
+    .variant { display: none; min-height: 730px; }
+    .variant.active { display: flex; }
+
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 58px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--line);
+      background: #0c1824;
+    }
+
+    .brand { color: var(--cyan); font-weight: 700; letter-spacing: .01em; }
+    .badge { padding: 3px 8px; border: 1px solid currentColor; border-radius: 999px; font-size: 11px; }
+    .green { color: var(--green); }
+    .yellow { color: var(--yellow); }
+    .red { color: var(--red); }
+    .cyan { color: var(--cyan); }
+    .blue { color: var(--blue); }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+
+    .key {
+      display: inline-flex;
+      min-width: 20px;
+      height: 20px;
+      align-items: center;
+      justify-content: center;
+      padding: 0 5px;
+      border: 1px solid #49637a;
+      border-bottom-color: #243c51;
+      border-radius: 4px;
+      background: #172a3a;
+      color: #d8e7f2;
+      font-size: 11px;
+      line-height: 1;
+    }
+
+    .status-strip { display: flex; gap: 16px; align-items: center; font-size: 12px; }
+
+    /* Variant A — fixed sections and contextual commands. */
+    .variant-a { flex-direction: column; }
+    .a-shell { display: grid; grid-template-columns: 205px minmax(0, 1fr); flex: 1; }
+    .a-sidebar { border-right: 1px solid var(--line); background: #0a151f; padding: 16px 10px; }
+    .a-nav-title { padding: 0 10px 9px; color: #637d92; font-size: 11px; text-transform: uppercase; }
+    .a-nav-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 40px;
+      padding: 0 10px;
+      border-left: 2px solid transparent;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .a-nav-item.active { border-left-color: var(--cyan); background: #132536; color: var(--text); }
+    .a-main { display: flex; flex-direction: column; min-width: 0; }
+    .a-content { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(300px, .8fr); gap: 14px; padding: 16px; flex: 1; }
+    .section { border: 1px solid var(--line); background: #0d1a26; }
+    .section-title { display: flex; align-items: center; justify-content: space-between; min-height: 39px; padding: 0 12px; border-bottom: 1px solid var(--line); color: #a9bed0; font-size: 12px; }
+    .health { display: grid; grid-template-columns: repeat(3, 1fr); border-bottom: 1px solid var(--line); }
+    .health-cell { min-height: 112px; padding: 14px; border-right: 1px solid var(--line); }
+    .health-cell:last-child { border-right: 0; }
+    .health-value { margin: 8px 0 4px; color: var(--text); font-size: 19px; font-weight: 700; }
+    .health-detail { color: var(--muted); font-size: 11px; line-height: 1.6; }
+    .primary-actions { padding: 14px; }
+    .action-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; gap: 10px; align-items: center; min-height: 46px; border-bottom: 1px dashed #20384c; font-size: 13px; }
+    .action-row:last-child { border-bottom: 0; }
+    .action-row.selected { margin: 0 -7px; padding: 0 7px; background: #142a3b; }
+    .a-side-stack { display: flex; flex-direction: column; gap: 14px; }
+    .facts { padding: 11px 12px; }
+    .fact { display: flex; justify-content: space-between; gap: 14px; padding: 7px 0; color: var(--muted); font-size: 12px; }
+    .fact span:last-child { color: var(--text); text-align: right; }
+    .event { padding: 11px 12px; border-bottom: 1px dashed #20384c; font-size: 12px; line-height: 1.55; }
+    .event:last-child { border-bottom: 0; }
+    .context-help { display: flex; justify-content: space-between; padding: 11px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+
+    /* Variant B — command palette as the primary surface. */
+    .variant-b { flex-direction: column; background: #08131d; }
+    .b-header { padding: 20px 24px 14px; }
+    .b-title { margin: 13px 0 6px; font-size: 25px; color: #f0f7fc; }
+    .b-summary { color: var(--muted); font-size: 12px; }
+    .b-stage { position: relative; display: grid; place-items: start center; flex: 1; padding: 34px 20px 20px; }
+    .command-palette { width: min(840px, 78vw); overflow: hidden; border: 1px solid #42627a; border-radius: 9px; background: #101f2c; box-shadow: 0 26px 70px rgba(0, 0, 0, .42); }
+    .command-input { display: flex; align-items: center; gap: 10px; height: 58px; padding: 0 16px; border-bottom: 1px solid var(--line); color: #e7f2f9; font-size: 15px; }
+    .cursor { width: 8px; height: 18px; background: var(--cyan); animation: blink 1.2s step-end infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    .command-group-label { padding: 12px 16px 6px; color: #69869c; font-size: 10px; text-transform: uppercase; letter-spacing: .09em; }
+    .command { display: grid; grid-template-columns: 28px 1fr auto; gap: 11px; align-items: center; min-height: 48px; padding: 0 16px; color: #bbccd9; font-size: 13px; }
+    .command.active { background: #163247; color: white; }
+    .command-icon { color: var(--cyan); }
+    .command-note { color: var(--muted); font-size: 11px; }
+    .b-footer { display: grid; grid-template-columns: 1fr 1fr; border-top: 1px solid var(--line); }
+    .b-footer > div { padding: 13px 18px; border-right: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+    .b-footer > div:last-child { border-right: 0; text-align: right; }
+
+    /* Variant C — source and candidate pipeline. */
+    .variant-c { flex-direction: column; }
+    .c-tabs { display: flex; gap: 4px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: #091520; }
+    .c-tab { padding: 7px 11px; color: var(--muted); font-size: 12px; }
+    .c-tab.active { background: #163047; color: var(--cyan); }
+    .c-shell { display: grid; grid-template-columns: 300px minmax(420px, 1fr) 340px; flex: 1; min-height: 0; }
+    .c-pane { min-width: 0; border-right: 1px solid var(--line); }
+    .c-pane:last-child { border-right: 0; }
+    .pane-head { display: flex; align-items: center; justify-content: space-between; height: 46px; padding: 0 13px; border-bottom: 1px solid var(--line); color: #b4c7d5; font-size: 12px; }
+    .source-item { padding: 13px; border-bottom: 1px solid #1e3446; color: var(--muted); font-size: 11px; line-height: 1.6; }
+    .source-item.selected { border-left: 3px solid var(--cyan); background: #112536; color: var(--text); }
+    .source-name { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 13px; }
+    .pipeline { padding: 18px 18px 10px; }
+    .pipe-step { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 10px; min-height: 80px; }
+    .pipe-dot { display: flex; position: relative; justify-content: center; }
+    .pipe-dot::before { content: ""; position: absolute; top: 21px; bottom: -6px; width: 1px; background: #34536c; }
+    .pipe-step:last-child .pipe-dot::before { display: none; }
+    .pipe-marker { position: relative; z-index: 1; display: grid; place-items: center; width: 22px; height: 22px; border: 1px solid var(--green); border-radius: 50%; background: #0d1c27; color: var(--green); font-size: 11px; }
+    .pipe-title { margin: 2px 0 6px; color: #e0edf5; font-size: 13px; }
+    .pipe-detail { color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .pipe-origin { color: #6f8ba0; font-size: 10px; }
+    .candidate-actions { display: flex; gap: 8px; padding: 14px 18px; border-top: 1px solid var(--line); }
+    .terminal-button { padding: 7px 11px; border: 1px solid #3d5a71; border-radius: 4px; background: #14283a; color: var(--text); font-size: 11px; }
+    .terminal-button.primary { border-color: #42a8bb; background: #155267; color: #e8fdff; }
+    .runtime-card { margin: 13px; padding: 13px; border: 1px solid var(--line); background: #0e1d29; }
+    .runtime-card h3 { margin: 0 0 12px; color: #b9cddb; font-size: 12px; font-weight: 600; }
+    .meter { height: 5px; margin: 9px 0 5px; overflow: hidden; border-radius: 99px; background: #1b3042; }
+    .meter span { display: block; width: 72%; height: 100%; background: var(--green); }
+    .c-help { padding: 11px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+
+    /* Variant D — selected composition: workspace tabs, config flow, command search and monitoring. */
+    .variant-d { flex-direction: column; }
+    .d-tabs { display: flex; align-items: center; gap: 5px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: #091520; }
+    .d-tab { padding: 7px 10px; color: var(--muted); font-size: 12px; }
+    .d-tab.active { background: var(--cyan); color: #071019; font-weight: 700; }
+    .d-search { margin-left: auto; color: var(--muted); font-size: 11px; }
+    .d-body { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(330px, .75fr); flex: 1; min-height: 0; }
+    .d-main { min-width: 0; padding: 18px; border-right: 1px solid var(--line); }
+    .d-side { min-width: 0; padding: 18px; }
+    .d-heading { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 18px; }
+    .d-heading h2 { margin: 0; font-size: 15px; font-weight: 600; }
+    .d-heading span { color: var(--muted); font-size: 11px; }
+    .traffic-line { display: grid; grid-template-columns: 82px 110px minmax(0, 1fr); align-items: center; gap: 12px; min-height: 48px; border-bottom: 1px dashed #20384c; font-size: 12px; }
+    .traffic-line strong { color: var(--text); font-size: 16px; }
+    .spark { color: var(--cyan); font-size: 17px; letter-spacing: 1px; white-space: nowrap; overflow: hidden; }
+    .spark.up { color: var(--green); }
+    .d-stats { display: grid; grid-template-columns: repeat(3, 1fr); margin-top: 18px; border: 1px solid var(--line); }
+    .d-stat { padding: 13px; border-right: 1px solid var(--line); }
+    .d-stat:last-child { border-right: 0; }
+    .d-stat b { display: block; margin-top: 7px; color: var(--text); font-size: 18px; }
+    .flow-list { margin-top: 5px; }
+    .flow-row { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 9px; align-items: start; padding: 12px 0; border-bottom: 1px dashed #20384c; font-size: 12px; }
+    .flow-row:last-child { border-bottom: 0; }
+    .flow-mark { color: var(--green); }
+    .flow-detail { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+    .d-command { display: flex; justify-content: space-between; padding: 11px 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
+
+    .switcher {
+      position: fixed;
+      left: 50%;
+      bottom: 24px;
+      z-index: 10;
+      display: grid;
+      grid-template-columns: 44px minmax(260px, auto) 44px;
+      align-items: center;
+      overflow: hidden;
+      border: 1px solid #607b91;
+      border-radius: 999px;
+      background: #eaf2f7;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, .48);
+      color: #10202d;
+      transform: translateX(-50%);
+    }
+    .switcher button { height: 42px; border: 0; background: transparent; color: #10202d; cursor: pointer; }
+    .switcher button:hover { background: #d5e5ee; }
+    .switcher-label { padding: 0 16px; text-align: center; font-family: system-ui, sans-serif; font-size: 13px; font-weight: 650; }
+  </style>
+</head>
+<body>
+  <!-- Four variants of the Runtime TUI, switchable via ?variant=, on this throwaway prototype route. -->
+  <div class="prototype-note">
+    <span><strong>只读结构原型</strong>　内容取自现有 Runtime 快照；按钮不会执行任何操作。</span>
+    <span>用底部按钮或键盘 ← → 切换方案</span>
+  </div>
+
+  <main class="terminal" aria-live="polite">
+    <div class="terminal-chrome">
+      <span class="dots"><i class="dot"></i><i class="dot"></i><i class="dot"></i></span>
+      <span>submux-runtime tui · 132 × 42</span>
+      <span>local IPC</span>
+    </div>
+
+    <section class="variant variant-a" data-variant="A">
+      <header class="topbar">
+        <div><span class="brand">SUBMUX RUNTIME</span> <span class="badge green">● 运行正常</span></div>
+        <div class="status-strip"><span>v1.2.0</span><span>修订 184</span><span><span class="key">r</span> 刷新</span><span><span class="key">q</span> 退出</span></div>
+      </header>
+      <div class="a-shell">
+        <aside class="a-sidebar">
+          <div class="a-nav-title">页面</div>
+          <div class="a-nav-item active"><span>概览</span><span class="key">1</span></div>
+          <div class="a-nav-item"><span>配置来源</span><span class="key">2</span></div>
+          <div class="a-nav-item"><span>网络</span><span class="key">3</span></div>
+          <div class="a-nav-item"><span>运行操作</span><span class="key">4</span></div>
+          <div class="a-nav-item"><span>维护</span><span class="key">5</span></div>
+          <div class="a-nav-title" style="margin-top:20px">当前选择</div>
+          <div class="small muted" style="padding:0 10px;line-height:1.7">办公室出口<br><span class="green">当前来源 · 已校验</span></div>
+        </aside>
+        <div class="a-main">
+          <div class="a-content">
+            <section class="section">
+              <div class="section-title"><span>运行概况</span><span class="green">没有需要处理的问题</span></div>
+              <div class="health">
+                <div class="health-cell"><div class="muted small">MIHOMO</div><div class="health-value green">运行中</div><div class="health-detail">期望：运行中<br>核心：v1.19.8</div></div>
+                <div class="health-cell"><div class="muted small">运行方式</div><div class="health-value">TUN</div><div class="health-detail">设备：submux0<br>故障放行：就绪</div></div>
+                <div class="health-cell"><div class="muted small">当前来源</div><div class="health-value">办公室出口</div><div class="health-detail">上次刷新：3 分钟前<br>配置：8fd2a94c</div></div>
+              </div>
+              <div class="primary-actions">
+                <div class="action-row selected"><span class="key">Enter</span><span>刷新当前来源并生成候选配置</span><span class="muted">使用保存线路</span></div>
+                <div class="action-row"><span class="key">p</span><span>预览当前来源的最终配置</span><span class="muted">只读</span></div>
+                <div class="action-row"><span class="key">s</span><span>停止 Mihomo</span><span class="yellow">会恢复直连</span></div>
+                <div class="action-row"><span class="key">v</span><span>验证显式代理</span><span class="muted">127.0.0.1:7890</span></div>
+              </div>
+            </section>
+            <div class="a-side-stack">
+              <section class="section">
+                <div class="section-title"><span>当前设置</span><span><span class="key">e</span> 编辑</span></div>
+                <div class="facts">
+                  <div class="fact"><span>监听</span><span>127.0.0.1:7890</span></div>
+                  <div class="fact"><span>网络接管</span><span class="green">已启用</span></div>
+                  <div class="fact"><span>DNS</span><span>接管</span></div>
+                  <div class="fact"><span>下次刷新</span><span>2 小时 41 分</span></div>
+                </div>
+              </section>
+              <section class="section">
+                <div class="section-title"><span>最近活动</span><span><span class="key">4</span> 全部</span></div>
+                <div class="event"><span class="green">✓</span> 来源刷新完成<br><span class="muted">12:41 · 4.2 KiB · 配置未变化</span></div>
+                <div class="event"><span class="green">✓</span> TUN 已启用<br><span class="muted">09:18 · submux0</span></div>
+              </section>
+            </div>
+          </div>
+          <footer class="context-help"><span><span class="key">↑↓</span> 选择　<span class="key">Enter</span> 执行　<span class="key">Tab</span> 切换区域</span><span><span class="key">?</span> 当前页面帮助</span></footer>
+        </div>
+      </div>
+    </section>
+
+    <section class="variant variant-b" data-variant="B">
+      <header class="topbar">
+        <div><span class="brand">SUBMUX</span> <span class="muted">Runtime 运行中 · TUN · 办公室出口</span></div>
+        <div class="status-strip"><span class="green">● 一切正常</span><span><span class="key">:</span> 命令</span><span><span class="key">q</span> 退出</span></div>
+      </header>
+      <div class="b-header">
+        <div class="small cyan">上午好，Runtime 操作员</div>
+        <div class="b-title">你要做什么？</div>
+        <div class="b-summary">直接输入动作、来源或设置名称；不需要记住几十个快捷键。</div>
+      </div>
+      <div class="b-stage">
+        <div class="command-palette">
+          <div class="command-input"><span class="cyan">›</span><span>来源</span><span class="cursor"></span><span class="muted small" style="margin-left:auto">6 个结果</span></div>
+          <div class="command-group-label">常用</div>
+          <div class="command active"><span class="command-icon">↻</span><span>刷新当前来源</span><span class="command-note">办公室出口 · 保存线路</span></div>
+          <div class="command"><span class="command-icon">◎</span><span>预览当前来源的最终配置</span><span class="command-note">只读</span></div>
+          <div class="command"><span class="command-icon">⇄</span><span>切换配置来源…</span><span class="command-note">3 个可用来源</span></div>
+          <div class="command-group-label">管理</div>
+          <div class="command"><span class="command-icon">＋</span><span>添加远程配置来源</span><span class="command-note">HTTPS / submux 输出订阅</span></div>
+          <div class="command"><span class="command-icon">＋</span><span>导入本机配置副本</span><span class="command-note">YAML</span></div>
+          <div class="command"><span class="command-icon">≡</span><span>查看全部配置来源</span><span class="command-note">3 个</span></div>
+          <div class="b-footer"><div><span class="key">↑↓</span> 选择　<span class="key">Enter</span> 打开　<span class="key">Esc</span> 返回状态</div><div>危险动作会先打开确认页</div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="variant variant-c" data-variant="C">
+      <header class="topbar">
+        <div><span class="brand">SUBMUX RUNTIME</span> <span class="badge green">Mihomo 运行中</span></div>
+        <div class="status-strip"><span>TUN · submux0</span><span>修订 184</span><span><span class="key">q</span> 退出</span></div>
+      </header>
+      <nav class="c-tabs"><span class="c-tab active">配置</span><span class="c-tab">网络</span><span class="c-tab">维护</span><span class="c-tab">活动</span><span class="c-tab" style="margin-left:auto"><span class="key">Tab</span> 切换窗格</span></nav>
+      <div class="c-shell">
+        <section class="c-pane">
+          <div class="pane-head"><span>配置来源</span><span><span class="key">a</span> 添加</span></div>
+          <div class="source-item selected">
+            <div class="source-name"><span>办公室出口</span><span class="green">当前</span></div>
+            remote_http · 3 分钟前<br><span class="green">已校验 · 未变化</span>
+          </div>
+          <div class="source-item">
+            <div class="source-name"><span>家中备用</span><span></span></div>
+            submux_output · 昨天 18:20<br><span class="muted">缓存可用</span>
+          </div>
+          <div class="source-item">
+            <div class="source-name"><span>本机调试</span><span></span></div>
+            local_import · 7 月 28 日<br><span class="muted">不可变副本</span>
+          </div>
+          <div class="c-help"><span class="key">↑↓</span> 选择　<span class="key">r</span> 刷新　<span class="key">s</span> 切换　<span class="key">Del</span> 删除</div>
+        </section>
+        <section class="c-pane" style="display:flex;flex-direction:column">
+          <div class="pane-head"><span>最终配置预览</span><span class="green">静态校验通过</span></div>
+          <div class="pipeline" style="flex:1">
+            <div class="pipe-step"><div class="pipe-dot"><span class="pipe-marker">✓</span></div><div><div class="pipe-title">来源原文</div><div class="pipe-detail">办公室出口 · 4.2 KiB · sha256 8fd2a94c</div></div><span class="pipe-origin">来源</span></div>
+            <div class="pipe-step"><div class="pipe-dot"><span class="pipe-marker">✓</span></div><div><div class="pipe-title">本机高级覆盖</div><div class="pipe-detail">规则组与 DNS 上游 · 2 个字段修改</div></div><span class="pipe-origin">本机</span></div>
+            <div class="pipe-step"><div class="pipe-dot"><span class="pipe-marker">✓</span></div><div><div class="pipe-title">本机运行设置</div><div class="pipe-detail">监听、控制端点、TUN 和文件路径由 Runtime 保留</div></div><span class="pipe-origin">Runtime</span></div>
+            <div class="pipe-step"><div class="pipe-dot"><span class="pipe-marker">✓</span></div><div><div class="pipe-title">候选配置</div><div class="pipe-detail">Mihomo v1.19.8 校验通过 · 8fd2a94c · 与当前配置相同</div></div><span class="pipe-origin green">可应用</span></div>
+          </div>
+          <div class="candidate-actions"><button class="terminal-button primary">Enter　应用候选配置</button><button class="terminal-button">v　查看字段来源</button><button class="terminal-button">e　编辑覆盖</button></div>
+        </section>
+        <aside class="c-pane">
+          <div class="pane-head"><span>本机运行状态</span><span class="green">● 正常</span></div>
+          <div class="runtime-card"><h3>Mihomo</h3><div class="fact"><span>实际</span><span class="green">运行中</span></div><div class="fact"><span>期望</span><span>运行中</span></div><div class="fact"><span>核心</span><span>v1.19.8</span></div><div class="meter"><span></span></div><div class="small muted">已稳定运行 7 小时 24 分</div></div>
+          <div class="runtime-card"><h3>网络接管</h3><div class="fact"><span>方式</span><span>TUN</span></div><div class="fact"><span>设备</span><span>submux0</span></div><div class="fact"><span>故障放行</span><span class="green">就绪</span></div></div>
+          <div class="runtime-card"><h3>当前操作</h3><div class="small muted">没有正在执行或排队的操作。</div></div>
+          <div class="c-help"><span class="key">Space</span> 启停　<span class="key">n</span> 网络设置　<span class="key">:</span> 其他命令</div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="variant variant-d" data-variant="D">
+      <header class="topbar">
+        <div><span class="brand">Submux Runtime</span> <span class="badge green">● 正常</span></div>
+        <div class="status-strip"><span>v1.2.0</span><span>revision 184</span><span>local IPC</span></div>
+      </header>
+      <nav class="d-tabs">
+        <span class="d-tab active">1 状态</span><span class="d-tab">2 配置</span><span class="d-tab">3 网络</span><span class="d-tab">4 监控</span><span class="d-tab">5 维护</span>
+        <span class="d-search"><span class="key">/</span> 搜索页面或操作　<span class="key">?</span> 帮助</span>
+      </nav>
+      <div class="d-body">
+        <section class="d-main">
+          <div class="d-heading"><h2>实时网络概况</h2><span>每秒由 Runtime 通过本机 Mihomo 控制端点采样</span></div>
+          <div class="traffic-line"><span class="green">上传</span><strong>2.6 MiB/s</strong><span class="spark up">▁▂▂▃▂▅▆▃▂▁▂▄▆█▅▃▂▄▆▃▂▁▃▅▆▂</span></div>
+          <div class="traffic-line"><span class="cyan">下载</span><strong>18.4 MiB/s</strong><span class="spark">▁▁▂▃▅▇█▅▃▂▁▁▂▆█▇▄▂▃▅▇▆▃▂▁▂</span></div>
+          <div class="d-stats">
+            <div class="d-stat"><span class="muted small">本次累计上传</span><b>1.82 GiB</b></div>
+            <div class="d-stat"><span class="muted small">本次累计下载</span><b>12.46 GiB</b></div>
+            <div class="d-stat"><span class="muted small">活动连接</span><b>69</b></div>
+          </div>
+          <div class="d-heading" style="margin-top:25px"><h2>运行状态</h2><span><span class="key">s</span> 启动　<span class="key">x</span> 停止并恢复直连　<span class="key">v</span> 验证</span></div>
+          <div class="facts">
+            <div class="fact"><span>Mihomo 实际 / 期望</span><span class="green">运行中 / 运行中</span></div>
+            <div class="fact"><span>网络接管</span><span>TUN · submux0</span></div>
+            <div class="fact"><span>故障恢复</span><span class="green">就绪 · 无残留</span></div>
+            <div class="fact"><span>当前来源</span><span>办公室出口 · 已校验</span></div>
+          </div>
+        </section>
+        <aside class="d-side">
+          <div class="d-heading"><h2>配置生成过程</h2><span><span class="key">2</span> 打开配置页</span></div>
+          <div class="flow-list">
+            <div class="flow-row"><span class="flow-mark">●</span><div>来源原文<div class="flow-detail">办公室出口 · submux_output · 8fd2a94c</div></div><span class="green">就绪</span></div>
+            <div class="flow-row"><span class="flow-mark">●</span><div>本机高级覆盖<div class="flow-detail">规则组与 DNS 上游 · 2 个字段</div></div><span class="green">就绪</span></div>
+            <div class="flow-row"><span class="flow-mark">●</span><div>本机运行设置<div class="flow-detail">控制端点、监听和网络字段由 Runtime 保留</div></div><span class="green">就绪</span></div>
+            <div class="flow-row"><span class="flow-mark">●</span><div>候选配置<div class="flow-detail">Mihomo 静态校验通过 · 与当前版本相同</div></div><span class="green">可应用</span></div>
+          </div>
+          <div class="section" style="margin-top:18px">
+            <div class="section-title"><span>最近运行操作</span><span class="green">完成</span></div>
+            <div class="event">来源刷新完成<br><span class="muted">12:41:08 · 保存线路 · 配置未变化</span></div>
+            <div class="event">TUN 状态检查完成<br><span class="muted">12:40:57 · 没有冲突或残留</span></div>
+          </div>
+        </aside>
+      </div>
+      <footer class="d-command"><span><span class="key">1–5</span> 页面　<span class="key">Tab</span> 前后切换　<span class="key">r</span> 立即刷新</span><span>所有客户端只通过 Runtime 本机 IPC 管理</span></footer>
+    </section>
+  </main>
+
+  <div class="switcher" aria-label="原型方案切换">
+    <button type="button" id="prev" aria-label="上一个方案">←</button>
+    <div class="switcher-label" id="variant-label"></div>
+    <button type="button" id="next" aria-label="下一个方案">→</button>
+  </div>
+
+  <script>
+    const variants = [
+      { key: 'A', name: '分区工作台' },
+      { key: 'B', name: '任务启动器' },
+      { key: 'C', name: '来源与候选配置' },
+      { key: 'D', name: '最终组合方案' },
+    ];
+
+    function currentIndex() {
+      const value = new URLSearchParams(location.search).get('variant')?.toUpperCase();
+      const index = variants.findIndex((item) => item.key === value);
+      return index < 0 ? variants.length - 1 : index;
+    }
+
+    function render(index, replace = false) {
+      const item = variants[(index + variants.length) % variants.length];
+      document.querySelectorAll('.variant').forEach((node) => {
+        node.classList.toggle('active', node.dataset.variant === item.key);
+      });
+      document.getElementById('variant-label').textContent = `${item.key} — ${item.name}`;
+      const url = new URL(location.href);
+      url.searchParams.set('variant', item.key);
+      history[replace ? 'replaceState' : 'pushState']({}, '', url);
+      document.title = `${item.key} — ${item.name} · Runtime TUI 原型`;
+    }
+
+    function cycle(delta) { render(currentIndex() + delta); }
+    document.getElementById('prev').addEventListener('click', () => cycle(-1));
+    document.getElementById('next').addEventListener('click', () => cycle(1));
+    addEventListener('popstate', () => render(currentIndex(), true));
+    addEventListener('keydown', (event) => {
+      const tag = event.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || event.target.isContentEditable) return;
+      if (event.key === 'ArrowLeft') cycle(-1);
+      if (event.key === 'ArrowRight') cycle(1);
+    });
+    render(currentIndex(), true);
+  </script>
+</body>
+</html>

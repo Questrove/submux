@@ -64,6 +64,10 @@ _Avoid_: last-good、当前配置
 Submux Runtime 接入流量的方式，只能是显式代理、TUN 或 Linux 网关，任意时刻只使用一种。
 _Avoid_: 模式、档位、profile
 
+**流量策略**:
+Submux Runtime 交给 Mihomo 处理已进入核心的流量时所采用的策略，只能是规则、全局或直连，不能与运行方式混用。
+_Avoid_: 代理模式、运行模式、mode
+
 **Runtime 操作员**:
 经本机管理员明确授权、可以通过本机 IPC 管理 Submux Runtime 的操作系统用户。操作员不能绕过 Runtime 直接调用特权网络进程。
 _Avoid_: Runtime 用户、普通用户
