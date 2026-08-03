@@ -26,6 +26,11 @@ func TestUserGuideIsEmbeddedAndCoversProductLifecycle(t *testing.T) {
 		"data-os=\"macos\"",
 		"submux-runtime source add",
 		"submux-runtime network preview --mode tun",
+		"TUI 的五个页面",
+		"本次运行累计",
+		"Ctrl+N",
+		"Ctrl+X",
+		"submux-runtime backup restore --confirm --wait",
 		"Uninstall-SubmuxRuntime.ps1",
 		"submux-runtime-uninstall --purge",
 	} {
@@ -62,13 +67,48 @@ func TestUserGuideAlignsTheContentsAndOnlyShowsARealControlPlaneLink(t *testing.
 	}
 	page := string(content)
 	for _, required := range []string{
-		"margin-top:52px;backdrop-filter:blur(12px)",
+		"padding:42px 30px 80px;align-items:start",
+		"padding:15px;margin-top:0;backdrop-filter:blur(12px)",
+		"content{min-width:0;padding-top:0}",
+		".step{position:relative;min-width:0;counter-increment:steps",
 		"data-control-plane-link hidden",
+		"仅当本页由 submux 控制面提供时",
+		"仅在本页由同一控制面提供时显示",
 		"fetch('/healthz'",
 		"payload?.status==='ok'",
 	} {
 		if !strings.Contains(page, required) {
 			t.Fatalf("user guide control-plane/layout contract is missing %q", required)
+		}
+	}
+	for _, removed := range []string{
+		"margin:-26px auto 0",
+		"margin-top:-24px",
+		"返回 submux 配置编排台",
+	} {
+		if strings.Contains(page, removed) {
+			t.Fatalf("user guide retained obsolete layout/control-plane text %q", removed)
+		}
+	}
+}
+
+func TestUserGuideMatchesRuntimeTUIWorkflowAndSafetyBoundary(t *testing.T) {
+	content, err := FS.ReadFile("user-guide.html")
+	if err != nil {
+		t.Fatalf("read embedded user guide: %v", err)
+	}
+	page := string(content)
+	for _, required := range []string{
+		"submux-runtime tui",
+		"状态页会根据 Runtime Snapshot 显示六个步骤",
+		"确认前不会修改 Runtime 状态",
+		"首次按键只检查，再按一次才进入统一确认",
+		"卸载不由正在运行的 TUI 执行",
+		"先恢复直连，再卸载程序",
+		"默认卸载会保留配置和状态",
+	} {
+		if !strings.Contains(page, required) {
+			t.Fatalf("user guide TUI workflow is missing %q", required)
 		}
 	}
 }

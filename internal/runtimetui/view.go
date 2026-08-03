@@ -444,7 +444,7 @@ func (m Model) renderMonitorPage() string {
 	lines = append(lines,
 		"",
 		m.focusHeading(2, "活动连接"),
-		fmt.Sprintf("%s · 第 %d/%d 页 · 共 %d 条 · F 筛选 · ,/. 翻页 · Ctrl+R 定位规则 · D 关闭所选 · X 关闭当前范围", connectionFilterSummary(loadedQuery), page, lastPage, m.connectionPage.Total),
+		fmt.Sprintf("%s · 第 %d/%d 页 · 共 %d 条 · f 筛选 · ,/. 翻页 · Ctrl+R 定位规则 · D 关闭所选 · X 关闭当前范围", connectionFilterSummary(loadedQuery), page, lastPage, m.connectionPage.Total),
 	)
 	if len(m.connectionPage.Items) == 0 {
 		lines = append(lines, mutedStyle.Render("当前筛选下没有活动连接"))
@@ -569,7 +569,7 @@ func (m Model) renderMaintenancePage() string {
 			lines = append(lines, warnStyle.Render(m.productUpdate.Warning))
 		}
 	}
-	lines = append(lines, mutedStyle.Render("Enter 检查两类更新 · U/P 确认更新 · R/O 回滚"))
+	lines = append(lines, mutedStyle.Render("Enter 检查 · U/P 再按确认 · R/O 回滚"))
 
 	lines = append(lines, "", m.focusHeading(1, "备份与恢复"))
 	if len(m.backupPreview.Items) == 0 && m.backupRestore.ContentID == "" && m.backupFile == "" {
@@ -782,10 +782,11 @@ func (m Model) renderHelp() string {
 		titleStyle.Render("键盘帮助"),
 		"1–5 切换页面 · Tab/Shift+Tab 移动页内焦点",
 		"↑↓ 选择当前区域条目 · Enter 打开或执行当前区域的安全默认操作",
-		"配置页的本机配置层：Enter 或 Ctrl+Y 选择流量策略并生成候选确认",
+		"配置页的本机配置层：Enter 或 Ctrl+Y 打开流量策略，编辑器内 Enter 生成候选确认",
 		"配置页最终规则：Enter 或 Ctrl+R 打开；监控页活动连接：Ctrl+R 定位命中规则",
 		"状态页主要代理组、配置页代理组与节点：Enter 或 Ctrl+N 打开选择器",
-		"维护页：Enter 打开区域的安全默认操作；Ctrl+G 生成脱敏诊断，G 需单独确认完整内容",
+		"维护页：Enter 打开区域的安全默认操作；U/P 首次检查、再次进入确认；b/B 备份，L 恢复",
+		"卸载由平台卸载器完成：先备份、停止网络接管、退出 TUI；TUI 不会删除自身服务",
 		"/ 或 Ctrl+K 搜索页面和操作 · Esc 返回 · ? 关闭帮助 · q 退出",
 		"现有字母快捷键继续可用，页面底部会显示当前焦点。",
 	}, "\n")
