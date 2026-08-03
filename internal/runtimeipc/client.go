@@ -30,6 +30,38 @@ type Client struct {
 	http       *http.Client
 }
 
+func (c *Client) ProxyGroups(ctx context.Context, queryValue runtimeapi.ProxyGroupQuery) (runtimeapi.ProxyGroupList, error) {
+	var groups runtimeapi.ProxyGroupList
+	query := url.Values{}
+	if queryValue.SourceID != "" {
+		query.Set("source_id", queryValue.SourceID)
+	}
+	path := "/v1/proxy-groups"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return groups, err
+	}
+	request, err := c.newRequest(ctx, http.MethodGet, path, nil, requestID)
+	if err != nil {
+		return groups, err
+	}
+	response, err := c.do(request)
+	if err != nil {
+		return groups, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return groups, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, &groups); err != nil {
+		return runtimeapi.ProxyGroupList{}, invalidResponseError("proxy group response", err)
+	}
+	return groups, nil
+}
+
 func (c *Client) TrafficHistory(ctx context.Context, requestValue runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error) {
 	var history runtimeapi.TrafficHistory
 	query := url.Values{}

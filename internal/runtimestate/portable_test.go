@@ -33,6 +33,9 @@ func TestPortableStateRoundTripReplacesOnlyPortableState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := sourceStore.SetProxySelection(source.ID, "PROXY", "Tokyo", "op_proxy", now); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := sourceStore.CreateManagedResource(
 		"portable-key.pem",
 		runtimeapi.ResourceKindPrivateKey,
@@ -53,7 +56,7 @@ func TestPortableStateRoundTripReplacesOnlyPortableState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.Complete || state.CurrentSourceID != source.ID {
+	if !state.Complete || state.CurrentSourceID != source.ID || len(state.ProxySelections) != 1 {
 		t.Fatalf("portable state = %#v", state)
 	}
 
@@ -97,6 +100,10 @@ func TestPortableStateRoundTripReplacesOnlyPortableState(t *testing.T) {
 	resources, err := targetStore.ManagedResources()
 	if err != nil || len(resources) != 1 {
 		t.Fatalf("restored resources = %#v err=%v", resources, err)
+	}
+	selections, err := targetStore.ProxySelections(restored.ID)
+	if err != nil || len(selections) != 1 || selections[0].Group != "PROXY" || selections[0].Node != "Tokyo" {
+		t.Fatalf("restored proxy selections = %#v err=%v", selections, err)
 	}
 	resourceBody, err := os.ReadFile(resources[0].Path)
 	if err != nil || string(resourceBody) != "managed-resource-secret" {

@@ -67,6 +67,7 @@ func createRuntimeBuckets(transaction *bbolt.Tx) error {
 		eventsBucket,
 		sourcesBucket,
 		managedResourcesBucket,
+		proxySelectionsBucket,
 		auditBucket,
 	} {
 		if _, err := transaction.CreateBucketIfNotExists(name); err != nil {

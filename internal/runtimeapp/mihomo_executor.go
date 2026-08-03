@@ -44,6 +44,7 @@ type MihomoExecutor struct {
 	ProductNetwork  NetworkService
 	Backups         *runtimebackup.Service
 	Connections     *runtimetraffic.ConnectionManager
+	ProxyControl    ProxyControl
 	Now             func() time.Time
 
 	lifecycleMu sync.Mutex
@@ -153,6 +154,8 @@ func (e *MihomoExecutor) Execute(
 		return nil, errors.New("Mihomo Runtime executor is incomplete")
 	}
 	switch operation.Action.Kind {
+	case runtimeapi.ActionSelectProxyNode:
+		return e.selectProxyNode(ctx, operation, report)
 	case runtimeapi.ActionSetTrafficPolicy:
 		return e.setTrafficPolicy(ctx, operation, report)
 	case runtimeapi.ActionCloseConnection:
@@ -732,6 +735,10 @@ func (e *MihomoExecutor) switchSource(
 	deployment, err := deployer.Apply(ctx, operation.ID, prepared.Record.RawSHA256, raw)
 	if err != nil {
 		previousProcess.apply(e.Process)
+		var replayErr error
+		if wasRunning && expectedCurrentID != "" {
+			replayErr = e.replayProxySelections(context.Background(), expectedCurrentID)
+		}
 		if !wasRunning {
 			_ = e.Process.Stop(context.Background())
 		}
@@ -739,21 +746,30 @@ func (e *MihomoExecutor) switchSource(
 			Code:      runtimeapi.ErrorServiceUnavailable,
 			Message:   "The selected source could not be activated; the previous source was retained",
 			Retryable: true,
-			Cause:     err,
+			Cause:     errors.Join(err, replayErr),
+		}
+	}
+	if replayErr := e.replayProxySelections(ctx, prepared.Record.ID); replayErr != nil {
+		rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, expectedCurrentID, wasRunning)
+		return nil, &PublicError{
+			Code:      runtimeapi.ErrorServiceUnavailable,
+			Message:   "The selected source could not restore its saved proxy selection; the previous source was retained",
+			Retryable: true,
+			Cause:     errors.Join(replayErr, rollbackErr),
 		}
 	}
 	if !wasRunning {
 		if err := report("restoring_stopped_state", 85, false); err != nil {
-			rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, false)
+			rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, expectedCurrentID, false)
 			return nil, errors.Join(err, rollbackErr)
 		}
 		if stopErr := e.Process.Stop(ctx); stopErr != nil {
-			rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, false)
+			rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, expectedCurrentID, false)
 			return nil, errors.Join(stopErr, rollbackErr)
 		}
 	}
 	if err := report("committing_source_switch", 92, false); err != nil {
-		rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, wasRunning)
+		rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, expectedCurrentID, wasRunning)
 		return nil, errors.Join(err, rollbackErr)
 	}
 	switched, err := e.State.SwitchCurrentSource(
@@ -763,7 +779,7 @@ func (e *MihomoExecutor) switchSource(
 		e.now(),
 	)
 	if err != nil {
-		rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, wasRunning)
+		rollbackErr := e.rollbackSourceDeployment(deployer, previousProcess, expectedCurrentID, wasRunning)
 		return nil, errors.Join(err, rollbackErr)
 	}
 	targetProcess.apply(e.Process)
@@ -791,6 +807,7 @@ func (e *MihomoExecutor) switchSource(
 func (e *MihomoExecutor) rollbackSourceDeployment(
 	deployer *mihomo.Deployer,
 	previous processConfiguration,
+	previousSourceID string,
 	wasRunning bool,
 ) error {
 	previous.apply(e.Process)
@@ -803,6 +820,8 @@ func (e *MihomoExecutor) rollbackSourceDeployment(
 	previous.apply(e.Process)
 	if !wasRunning {
 		rollbackErr = errors.Join(rollbackErr, e.Process.Stop(context.Background()))
+	} else if previousSourceID != "" {
+		rollbackErr = errors.Join(rollbackErr, e.replayProxySelections(context.Background(), previousSourceID))
 	}
 	return rollbackErr
 }
@@ -1621,7 +1640,9 @@ func (e *MihomoExecutor) start(ctx context.Context, report StageReporter) (*runt
 	}
 	e.Process.BinaryPath = binaryPath
 	e.Process.ConfigPath = filepath.Join(e.ConfigRoot, "current", "config.yaml")
+	currentSourceID := ""
 	if current, currentErr := e.State.CurrentSource(); currentErr == nil {
+		currentSourceID = current.ID
 		sourceDataDir, dataErr := e.State.SourceRuntimeDataDir(current.ID)
 		if dataErr != nil {
 			return nil, dataErr
@@ -1649,6 +1670,12 @@ func (e *MihomoExecutor) start(ctx context.Context, report StageReporter) (*runt
 	}
 	if err := e.Process.Start(ctx); err != nil {
 		return nil, err
+	}
+	if currentSourceID != "" {
+		if err := e.replayProxySelections(ctx, currentSourceID); err != nil {
+			_ = e.Process.Stop(context.Background())
+			return nil, err
+		}
 	}
 	for _, listener := range listeners {
 		if err := e.Verifier.VerifyRuntime(ctx, listener.Address); err != nil {

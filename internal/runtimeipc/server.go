@@ -40,6 +40,10 @@ type RuleObserver interface {
 	Rules(context.Context, runtimeapi.PeerIdentity, runtimeapi.RuleQuery) (runtimeapi.RuleSet, error)
 }
 
+type ProxyGroupObserver interface {
+	ProxyGroups(context.Context, runtimeapi.PeerIdentity, runtimeapi.ProxyGroupQuery) (runtimeapi.ProxyGroupList, error)
+}
+
 type Operator interface {
 	UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error)
 	GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity, string, string, string, bool) (runtimeapi.AdvancedOverrideDocument, error)
@@ -85,6 +89,7 @@ type Server struct {
 	trafficObserver    TrafficObserver
 	connectionObserver ConnectionObserver
 	ruleObserver       RuleObserver
+	proxyGroupObserver ProxyGroupObserver
 	operator           Operator
 	network            NetworkPreviewer
 	updates            MihomoUpdateOperator
@@ -117,6 +122,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	trafficObserver, _ := observer.(TrafficObserver)
 	connectionObserver, _ := observer.(ConnectionObserver)
 	ruleObserver, _ := observer.(RuleObserver)
+	proxyGroupObserver, _ := observer.(ProxyGroupObserver)
 	runtimeVersion := ""
 	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
 		runtimeVersion = provider.RuntimeVersion()
@@ -127,6 +133,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		trafficObserver:    trafficObserver,
 		connectionObserver: connectionObserver,
 		ruleObserver:       ruleObserver,
+		proxyGroupObserver: proxyGroupObserver,
 		operator:           operator,
 		network:            network,
 		updates:            updates,
@@ -188,6 +195,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/traffic/history", s.handleTrafficHistory)
 	mux.HandleFunc("/v1/connections", s.handleConnections)
 	mux.HandleFunc("/v1/rules", s.handleRules)
+	mux.HandleFunc("/v1/proxy-groups", s.handleProxyGroups)
 	mux.HandleFunc("/v1/imports", s.handleImport)
 	mux.HandleFunc("/v1/advanced-override", s.handleAdvancedOverride)
 	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
@@ -208,6 +216,48 @@ func (s *Server) Handler() http.Handler {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
 	return mux
+}
+
+func (s *Server) handleProxyGroups(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime proxy group viewer only accepts GET", false)
+		return
+	}
+	if requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime proxy group viewer does not accept a request body", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.proxyGroupObserver == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime proxy group viewer is unavailable", true)
+		return
+	}
+	for key := range request.URL.Query() {
+		if key != "source_id" {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime proxy group query contains an unsupported parameter", false)
+			return
+		}
+	}
+	sourceID := request.URL.Query().Get("source_id")
+	if utf8.RuneCountInString(sourceID) > runtimeapi.ProxyGroupNameMaxLength || strings.ContainsAny(sourceID, "\r\n\x00") {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime proxy group source ID is invalid", false)
+		return
+	}
+	groups, err := s.proxyGroupObserver.ProxyGroups(request.Context(), peer, runtimeapi.ProxyGroupQuery{SourceID: sourceID})
+	if err != nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime proxy group viewer is temporarily unavailable", true)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, groups)
 }
 
 func (s *Server) handleRules(writer http.ResponseWriter, request *http.Request) {
@@ -1448,6 +1498,18 @@ func validBackupFileName(name string) bool {
 }
 
 func validAction(action runtimeapi.Action) bool {
+	connectionAction := action.Kind == runtimeapi.ActionCloseConnection || action.Kind == runtimeapi.ActionCloseConnections
+	if !connectionAction && (action.Params.ConnectionID != "" || action.Params.ConnectionTarget != "" ||
+		action.Params.ConnectionScope != nil || action.Params.ConnectionScopeToken != "" || action.Params.ConnectionCount != 0) {
+		return false
+	}
+	if action.Kind != runtimeapi.ActionSetTrafficPolicy && action.Params.TrafficPolicy != "" {
+		return false
+	}
+	if action.Kind != runtimeapi.ActionSelectProxyNode &&
+		(action.Params.ProxyGroup != "" || action.Params.ProxyNode != "") {
+		return false
+	}
 	if action.Kind != runtimeapi.ActionUpdateMihomo &&
 		action.Kind != runtimeapi.ActionUpdateProduct &&
 		action.Params.Trust != "" {
@@ -1461,6 +1523,42 @@ func validAction(action runtimeapi.Action) bool {
 		return false
 	}
 	switch action.Kind {
+	case runtimeapi.ActionSetTrafficPolicy:
+		params := action.Params
+		selection := params.TrafficPolicy
+		params.TrafficPolicy = ""
+		return validTrafficPolicySelection(selection) && params == (runtimeapi.ActionParams{})
+	case runtimeapi.ActionCloseConnection:
+		params := action.Params
+		connectionID, target := params.ConnectionID, params.ConnectionTarget
+		params.ConnectionID, params.ConnectionTarget = "", ""
+		return validConnectionActionText(connectionID, 128, false) &&
+			validConnectionActionText(target, 512, true) && params == (runtimeapi.ActionParams{})
+	case runtimeapi.ActionCloseConnections:
+		params := action.Params
+		scope, token, count, confirm := params.ConnectionScope, params.ConnectionScopeToken, params.ConnectionCount, params.Confirm
+		params.ConnectionScope, params.ConnectionScopeToken, params.ConnectionCount, params.Confirm = nil, "", 0, false
+		return scope != nil && validConnectionActionScope(*scope) && validSHA256Hex(token) &&
+			count > 0 && count <= 1_000_000 && confirm && params == (runtimeapi.ActionParams{})
+	case runtimeapi.ActionSelectProxyNode:
+		return validSourceID(action.Params.SourceID) &&
+			validProxyGroupName(action.Params.ProxyGroup) &&
+			validProxyGroupName(action.Params.ProxyNode) &&
+			action.Params.ContentID == "" &&
+			action.Params.SourceName == "" &&
+			action.Params.Route == "" &&
+			!action.Params.UseCached &&
+			!action.Params.Confirm &&
+			action.Params.ResourceKind == "" &&
+			action.Params.ResourceName == "" &&
+			action.Params.PlanID == "" &&
+			action.Params.Trust == "" &&
+			action.Params.ConnectionID == "" &&
+			action.Params.ConnectionTarget == "" &&
+			action.Params.ConnectionScope == nil &&
+			action.Params.ConnectionScopeToken == "" &&
+			action.Params.ConnectionCount == 0 &&
+			action.Params.TrafficPolicy == ""
 	case runtimeapi.ActionApplyImportedConfig:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
@@ -1635,6 +1733,53 @@ func validAction(action runtimeapi.Action) bool {
 	default:
 		return false
 	}
+}
+
+func validTrafficPolicySelection(value string) bool {
+	switch value {
+	case runtimeapi.TrafficPolicyFollowSource, runtimeapi.TrafficPolicyRule,
+		runtimeapi.TrafficPolicyGlobal, runtimeapi.TrafficPolicyDirect:
+		return true
+	default:
+		return false
+	}
+}
+
+func validConnectionActionScope(scope runtimeapi.ConnectionQuery) bool {
+	return scope.Page == 0 && scope.PageSize == 0 &&
+		validConnectionActionText(scope.Target, 256, true) &&
+		validConnectionActionText(scope.Process, 256, true) &&
+		validConnectionActionText(scope.Rule, 256, true) &&
+		validConnectionActionText(scope.Node, 256, true)
+}
+
+func validConnectionActionText(value string, maximum int, optional bool) bool {
+	if (!optional && value == "") || len(value) > maximum || value != strings.TrimSpace(value) {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func validSHA256Hex(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func validProxyGroupName(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || utf8.RuneCountInString(value) > runtimeapi.ProxyGroupNameMaxLength {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func validResourceKind(kind string) bool {

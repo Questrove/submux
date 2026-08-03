@@ -128,3 +128,30 @@ func TestClientReadsFilteredAppliedRules(t *testing.T) {
 		t.Fatalf("rules=%#v", rules)
 	}
 }
+
+func TestClientReadsProxyGroupsForSource(t *testing.T) {
+	const sourceID = "src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	client := &Client{
+		clientType: "tui",
+		version:    "test",
+		http: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Path != "/v1/proxy-groups" || request.URL.Query().Get("source_id") != sourceID {
+				t.Fatalf("request=%s", request.URL.String())
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(
+					`{"source_id":"` + sourceID + `","current_source":true,"available":true,"groups":[{"name":"PROXY","type":"select","main":true,"selectable":true,"current":"Tokyo","nodes":[]}],"observed_at":"2026-08-03T12:00:00Z"}`,
+				)),
+				Request: request,
+			}, nil
+		})},
+	}
+	groups, err := client.ProxyGroups(t.Context(), runtimeapi.ProxyGroupQuery{SourceID: sourceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if groups.SourceID != sourceID || !groups.Available || len(groups.Groups) != 1 || groups.Groups[0].Current != "Tokyo" {
+		t.Fatalf("groups=%#v", groups)
+	}
+}

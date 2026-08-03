@@ -99,6 +99,10 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 	}
 
 	switch action.Kind {
+	case runtimeapi.ActionSelectProxyNode:
+		description.Impact = fmt.Sprintf("把代理组 %s 切换到节点 %s，并按来源保存选择", action.Params.ProxyGroup, action.Params.ProxyNode)
+		description.Interruption = "已有连接通常保持不变；新连接使用新节点"
+		description.Recovery = "目标不存在、Mihomo 拒绝或保存失败时保留原选择"
 	case runtimeapi.ActionSetTrafficPolicy:
 		description.Impact = fmt.Sprintf("把本机流量策略保存为%s；候选配置已通过校验", trafficPolicyLabel(action.Params.TrafficPolicy))
 		description.Interruption = "不会立即切换当前配置或重启 Mihomo；下次应用配置后生效"
@@ -168,6 +172,7 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 func actionTitle(kind string) string {
 	titles := map[string]string{
 		runtimeapi.ActionSetTrafficPolicy:    "设置流量策略",
+		runtimeapi.ActionSelectProxyNode:     "选择代理节点",
 		runtimeapi.ActionCloseConnection:     "关闭活动连接",
 		runtimeapi.ActionCloseConnections:    "关闭当前范围内全部连接",
 		runtimeapi.ActionApplyImportedConfig: "应用导入的候选配置",
@@ -200,6 +205,8 @@ func actionTitle(kind string) string {
 func actionTarget(action runtimeapi.Action) string {
 	params := action.Params
 	switch {
+	case params.ProxyGroup != "":
+		return fmt.Sprintf("%s → %s · 来源 %s", params.ProxyGroup, params.ProxyNode, params.SourceID)
 	case params.TrafficPolicy != "":
 		return trafficPolicyLabel(params.TrafficPolicy)
 	case params.ConnectionID != "":
@@ -246,7 +253,7 @@ func (m Model) actionConflict(action runtimeapi.Action) string {
 
 func actionConflictGroup(kind string) string {
 	switch kind {
-	case runtimeapi.ActionSetTrafficPolicy:
+	case runtimeapi.ActionSetTrafficPolicy, runtimeapi.ActionSelectProxyNode:
 		return "configuration"
 	case runtimeapi.ActionCloseConnection, runtimeapi.ActionCloseConnections:
 		return "connection-control"
@@ -289,7 +296,7 @@ func (m Model) operationIDForControl() string {
 }
 
 func (m *Model) snapshotFollowUpCmd() tea.Cmd {
-	commands := make([]tea.Cmd, 0, 2)
+	commands := make([]tea.Cmd, 0, 3)
 	if !m.watchingEvents {
 		m.watchingEvents = true
 		commands = append(commands, m.watchEventsCmd(m.snapshot.LatestEventCursor))
@@ -301,6 +308,13 @@ func (m *Model) snapshotFollowUpCmd() tea.Cmd {
 	if operationID != "" &&
 		(operationID != m.lastOperation.ID || m.operationUncertain) {
 		commands = append(commands, m.getCmd(operationID))
+	}
+	proxySourceID := m.snapshot.Sources.CurrentSourceID
+	if m.page == pageConfig {
+		proxySourceID = m.selectedSource()
+	}
+	if command := m.startProxyGroupsCmd(proxySourceID); command != nil {
+		commands = append(commands, command)
 	}
 	return tea.Batch(commands...)
 }

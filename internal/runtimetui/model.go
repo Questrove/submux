@@ -137,6 +137,13 @@ type Model struct {
 	ruleSet               runtimeapi.RuleSet
 	ruleSelected          int
 	ruleGeneration        uint64
+	proxyGroupOpen        bool
+	proxyGroups           runtimeapi.ProxyGroupList
+	proxyGroupSelected    int
+	proxyNodeSelected     int
+	proxyGroupLoading     bool
+	proxyGroupFault       error
+	proxyGroupGeneration  uint64
 }
 
 const (
@@ -392,6 +399,22 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.reconnectAttempts = 0
 		m.status = "状态已更新"
 		return m, m.snapshotFollowUpCmd()
+	case proxyGroupListMsg:
+		if !m.acceptProxyGroupList(message) {
+			return m, nil
+		}
+		if m.proxyGroupOpen {
+			m.status = "Tab 切换代理组，↑↓ 选择节点，Enter 进入统一确认"
+		}
+		return m, nil
+	case proxyGroupListErrorMsg:
+		if !m.acceptProxyGroupError(message) {
+			return m, nil
+		}
+		if m.proxyGroupOpen {
+			m.status = publicErrorMessage(message.err)
+		}
+		return m, nil
 	case snapshotErrorMsg:
 		if message.generation != m.observeGeneration {
 			return m, nil
@@ -748,6 +771,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if m.proxyGroupOpen {
+		return m.updateProxyGroups(message)
+	}
 
 	if m.sourceForm != nil {
 		return m.updateSourceForm(message)
@@ -899,6 +925,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if page == pageMonitor {
 				return m, m.trafficHistoryCmd(true)
 			}
+			if page == pageStatus {
+				return m, m.startProxyGroupsCmd(m.snapshot.Sources.CurrentSourceID)
+			}
+			if page == pageConfig {
+				return m, m.startProxyGroupsCmd(m.selectedSource())
+			}
 			return m, nil
 		case "tab":
 			m.moveFocus(1)
@@ -987,6 +1019,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在读取高级覆盖…"
 			return m, m.getOverrideCmd()
+		case "ctrl+n":
+			sourceID := m.snapshot.Sources.CurrentSourceID
+			if m.page == pageConfig {
+				sourceID = m.selectedSource()
+			}
+			return m, m.openProxyGroups(sourceID)
 		case "a":
 			if m.preview.ContentID == "" {
 				m.err = errors.New("请先导入并预览配置")
@@ -2153,6 +2191,8 @@ func operationStatus(operation runtimeapi.Operation) string {
 		return status
 	}
 	switch operation.Action.Kind {
+	case runtimeapi.ActionSelectProxyNode:
+		return fmt.Sprintf("%s；代理组 %s 已选择 %s", status, operation.Result.ProxyGroup, operation.Result.ProxyNode)
 	case runtimeapi.ActionSwitchSource:
 		cache := ""
 		if operation.Result.UsedCachedSource {

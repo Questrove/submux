@@ -298,6 +298,17 @@ func (s *Store) DeleteSource(
 		if err := sources.Delete([]byte(sourceID)); err != nil {
 			return err
 		}
+		selections := transaction.Bucket(proxySelectionsBucket)
+		if selections == nil {
+			return errors.New("Runtime proxy selection state is unavailable")
+		}
+		prefix := []byte(sourceID + "\x00")
+		cursor := selections.Cursor()
+		for key, _ := cursor.Seek(prefix); key != nil && strings.HasPrefix(string(key), string(prefix)); key, _ = cursor.Next() {
+			if err := cursor.Delete(); err != nil {
+				return err
+			}
+		}
 		if currentID == sourceID {
 			if err := metadata.Delete(currentSourceIDKey); err != nil {
 				return err

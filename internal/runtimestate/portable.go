@@ -33,6 +33,7 @@ type PortableState struct {
 	AdvancedOverride      *PortableOverride       `json:"advanced_override,omitempty"`
 	ManagedResources      []PortableResource      `json:"managed_resources"`
 	TrafficPolicy         string                  `json:"traffic_policy,omitempty"`
+	ProxySelections       []ProxySelectionRecord  `json:"proxy_selections,omitempty"`
 	MachineSettings       PortableMachineSettings `json:"machine_settings"`
 	CurrentConfigRevision string                  `json:"current_config_revision,omitempty"`
 	CurrentConfigSHA256   string                  `json:"current_config_sha256,omitempty"`
@@ -79,6 +80,7 @@ func (s *Store) ExportPortableState(includeSecrets bool, exportedAt time.Time) (
 		ExportedAt:       exportedAt,
 		Sources:          []PortableSource{},
 		ManagedResources: []PortableResource{},
+		ProxySelections:  []ProxySelectionRecord{},
 	}
 	var sourceRecords []SourceRecord
 	var resourceRecords []ManagedResourceRecord
@@ -87,7 +89,8 @@ func (s *Store) ExportPortableState(includeSecrets bool, exportedAt time.Time) (
 		metadata := transaction.Bucket(metadataBucket)
 		sources := transaction.Bucket(sourcesBucket)
 		resources := transaction.Bucket(managedResourcesBucket)
-		if metadata == nil || sources == nil || resources == nil {
+		selections := transaction.Bucket(proxySelectionsBucket)
+		if metadata == nil || sources == nil || resources == nil || selections == nil {
 			return errors.New("Runtime portable state is unavailable")
 		}
 		result.SourceInstallationID = string(metadata.Get(installationIDKey))
@@ -122,6 +125,17 @@ func (s *Store) ExportPortableState(includeSecrets bool, exportedAt time.Time) (
 		}); err != nil {
 			return err
 		}
+		if err := selections.ForEach(func(_, value []byte) error {
+			var record ProxySelectionRecord
+			if err := json.Unmarshal(value, &record); err != nil || !validSourceID(record.SourceID) ||
+				!validProxySelectionName(record.Group) || !validProxySelectionName(record.Node) || record.UpdatedAt.IsZero() {
+				return errors.New("Runtime proxy selection record is invalid")
+			}
+			result.ProxySelections = append(result.ProxySelections, record)
+			return nil
+		}); err != nil {
+			return err
+		}
 		return resources.ForEach(func(_, value []byte) error {
 			var record ManagedResourceRecord
 			if err := json.Unmarshal(value, &record); err != nil {
@@ -139,6 +153,12 @@ func (s *Store) ExportPortableState(includeSecrets bool, exportedAt time.Time) (
 	}
 	sort.Slice(sourceRecords, func(left, right int) bool { return sourceRecords[left].ID < sourceRecords[right].ID })
 	sort.Slice(resourceRecords, func(left, right int) bool { return resourceRecords[left].ID < resourceRecords[right].ID })
+	sort.Slice(result.ProxySelections, func(left, right int) bool {
+		if result.ProxySelections[left].SourceID == result.ProxySelections[right].SourceID {
+			return result.ProxySelections[left].Group < result.ProxySelections[right].Group
+		}
+		return result.ProxySelections[left].SourceID < result.ProxySelections[right].SourceID
+	})
 	for _, record := range sourceRecords {
 		portable := PortableSource{Record: record}
 		if includeSecrets {
@@ -256,6 +276,16 @@ func (s *Store) ReplacePortableState(
 		if err := replacePortableBucket(transaction, managedResourcesBucket, func(bucket *bbolt.Bucket) error {
 			for _, resource := range state.ManagedResources {
 				if err := putJSON(bucket, []byte(resource.Record.ID), resource.Record); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if err := replacePortableBucket(transaction, proxySelectionsBucket, func(bucket *bbolt.Bucket) error {
+			for _, selection := range state.ProxySelections {
+				if err := putJSON(bucket, []byte(selection.SourceID+"\x00"+selection.Group), selection); err != nil {
 					return err
 				}
 			}
@@ -388,6 +418,18 @@ func validatePortableState(state PortableState) error {
 	if state.CurrentSourceID != "" {
 		if _, exists := sourceIDs[state.CurrentSourceID]; !exists {
 			return errors.New("Runtime portable current source is unavailable")
+		}
+		selectionKeys := make(map[string]struct{}, len(state.ProxySelections))
+		for _, selection := range state.ProxySelections {
+			if _, exists := sourceIDs[selection.SourceID]; !exists || !validProxySelectionName(selection.Group) ||
+				!validProxySelectionName(selection.Node) || selection.UpdatedAt.IsZero() {
+				return errors.New("Runtime portable proxy selection is invalid")
+			}
+			key := selection.SourceID + "\x00" + selection.Group
+			if _, duplicate := selectionKeys[key]; duplicate {
+				return errors.New("Runtime portable state contains duplicate proxy selections")
+			}
+			selectionKeys[key] = struct{}{}
 		}
 	}
 	resourceIDs := make(map[string]struct{}, len(state.ManagedResources))

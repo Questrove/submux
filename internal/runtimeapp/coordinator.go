@@ -84,6 +84,28 @@ type AppliedRuleObserver interface {
 	AppliedRules(context.Context, runtimeapi.RuleQuery) (runtimeapi.RuleSet, error)
 }
 
+type ProxyGroupObserver interface {
+	ProxyGroups(context.Context, runtimeapi.ProxyGroupQuery) (runtimeapi.ProxyGroupList, error)
+}
+
+func (c *Coordinator) ProxyGroups(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	query runtimeapi.ProxyGroupQuery,
+) (runtimeapi.ProxyGroupList, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.ProxyGroupList{}, err
+	}
+	if peer.Key() == "" {
+		return runtimeapi.ProxyGroupList{}, errors.New("Runtime proxy group observer identity is required")
+	}
+	observer, ok := c.Executor.(ProxyGroupObserver)
+	if !ok {
+		return runtimeapi.ProxyGroupList{}, errors.New("Runtime proxy group viewer is unavailable")
+	}
+	return observer.ProxyGroups(ctx, query)
+}
+
 func (c *Coordinator) Rules(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -977,6 +999,10 @@ func (c *Coordinator) now() time.Time {
 }
 
 func validateAction(action runtimeapi.Action) error {
+	proxySelectionAction := action.Kind == runtimeapi.ActionSelectProxyNode
+	if !proxySelectionAction && (action.Params.ProxyGroup != "" || action.Params.ProxyNode != "") {
+		return errors.New("proxy group parameters are only accepted by a proxy selection action")
+	}
 	trafficPolicyAction := action.Kind == runtimeapi.ActionSetTrafficPolicy
 	if !trafficPolicyAction && action.Params.TrafficPolicy != "" {
 		return errors.New("traffic_policy is only accepted by a traffic policy action")
@@ -1002,6 +1028,17 @@ func validateAction(action runtimeapi.Action) error {
 		return errors.New("plan_id is only accepted by a network enable, Mihomo update, or Runtime product update action")
 	}
 	switch action.Kind {
+	case runtimeapi.ActionSelectProxyNode:
+		if !validSourceID(action.Params.SourceID) || !validProxyActionName(action.Params.ProxyGroup) ||
+			!validProxyActionName(action.Params.ProxyNode) || action.Params.ContentID != "" ||
+			action.Params.SourceName != "" || action.Params.Route != "" || action.Params.UseCached ||
+			action.Params.Confirm || action.Params.ResourceKind != "" || action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" || action.Params.Trust != "" || action.Params.ConnectionID != "" ||
+			action.Params.ConnectionTarget != "" || action.Params.ConnectionScope != nil ||
+			action.Params.ConnectionScopeToken != "" || action.Params.ConnectionCount != 0 ||
+			action.Params.TrafficPolicy != "" {
+			return errors.New("proxy_group.select requires only the current source, proxy group, and node")
+		}
 	case runtimeapi.ActionSetTrafficPolicy:
 		if !validTrafficPolicy(action.Params.TrafficPolicy) ||
 			action.Params.ContentID != "" ||

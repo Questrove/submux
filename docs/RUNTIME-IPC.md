@@ -112,6 +112,16 @@ GET /v1/rules?content={text}&type={text}&target={text}
 
 Runtime 添加的健康检查规则标记为 `runtime`；其余规则标记为 `source`、`advanced_override`，无法从旧配置集确认时标记为 `current_configuration`。规则内容不写入 Snapshot、事件、审计或备份索引。活动连接详情可以用返回的 `rule` 和 `rule_payload` 作为类型和内容筛选，跳转到当前运行规则中的命中项。规则只能通过 Runtime 配置来源、本机高级覆盖或既有控制面流程修改。
 
+### 读取代理组和节点
+
+```http
+GET /v1/proxy-groups?source_id={src_...}
+```
+
+该只读接口返回来源中的全部代理组、当前选择、是否允许手动选择，以及节点类型、可用状态、不可用原因和最近延迟结果。省略 `source_id` 时读取当前来源。非当前来源只从已验证候选配置读取，因此不能选择；当前来源在 Mihomo 运行时还会通过 Runtime 自己持有的本机控制连接补充代理提供者实际加载的节点和即时选择。客户端不会取得 Mihomo 控制端点或 secret，也不能提交任意控制请求。
+
+节点选择使用 `proxy_group.select` Operation，只接受当前 `source_id`、`proxy_group` 和 `proxy_node`。Runtime 必须先确认代理组允许手动选择，并确认目标属于候选配置或当前代理提供者实际加载的成员；验证失败不改变原选择。选择按来源和代理组写入便携状态，Mihomo 启动、重启或来源切换后重新应用仍有效的记录。
+
 关闭活动连接使用运行操作，不增加客户端可直接调用的 Mihomo 控制接口。`connection.close` 只接受稳定连接 ID 和可选的脱敏目标说明；连接已经消失时按幂等成功记录。连接分页结果还包含由当前筛选范围内全部稳定连接 ID 计算的 `scope_token`。`connection.close_scope` 只接受目标、进程、规则和节点筛选、界面显示并经操作员确认的连接数量、该范围令牌，以及 `confirm: true`。Runtime 执行前重新计算令牌；匹配成员或数量发生变化时拒绝操作并要求刷新后再次确认，因此确认后新出现的连接不会被关闭。令牌核验后、实际关闭前消失的连接仍按幂等成功记录。成功、失败、取消和结果未知都由同一套 Operation 状态与审计记录呈现。
 
 ### 上传导入内容
@@ -185,6 +195,7 @@ Action 使用固定 `kind` 和严格参数结构，不能承载 Shell、argv、�
 - `resource.add` 只接受资源内容的 `content_id`、固定 `resource_kind` 和安全 `resource_name`；
 - `override.set` 只接受 YAML 的 `content_id`；
 - `traffic_policy.set` 只接受 `traffic_policy`，值为 `follow_source`、`rule`、`global` 或 `direct`；
+- `proxy_group.select` 只接受当前来源的 `source_id`、`proxy_group` 和 `proxy_node`；
 - `backup.restore` 只接受备份的 `content_id` 和 `confirm: true`。
 
 流量策略默认是 `follow_source`。明确选择 `rule`、`global` 或 `direct` 后，Runtime 把它作为本机运行设置持久化，并在配置来源和本机高级覆盖之后写入候选，因此该字段拥有最终优先级；改回 `follow_source` 会删除持久设置。`global` 候选必须包含至少一个具名策略组。`traffic_policy.set` 在保存前使用当前来源、本机高级覆盖和已安装的 Mihomo 精确版本重新生成并校验候选；保存成功只改变本机运行设置，不立即应用配置或重启 Mihomo。

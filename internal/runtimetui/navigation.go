@@ -26,8 +26,8 @@ type pageDefinition struct {
 }
 
 var pageDefinitions = []pageDefinition{
-	{id: pageStatus, number: "1", title: "状态", regions: []string{"运行状态", "当前来源", "最近运行操作"}},
-	{id: pageConfig, number: "2", title: "配置", regions: []string{"配置来源", "候选配置", "本机配置层", "配置操作", "最终规则"}},
+	{id: pageStatus, number: "1", title: "状态", regions: []string{"运行状态", "当前来源", "最近运行操作", "主要代理组"}},
+	{id: pageConfig, number: "2", title: "配置", regions: []string{"配置来源", "候选配置", "本机配置层", "配置操作", "最终规则", "代理组与节点"}},
 	{id: pageNetwork, number: "3", title: "网络", regions: []string{"当前网络", "网络预览", "网络操作"}},
 	{id: pageMonitor, number: "4", title: "监控", regions: []string{"实时概况", "速度曲线", "活动连接", "Runtime 事件"}},
 	{id: pageMaintenance, number: "5", title: "维护", regions: []string{"更新与回滚", "备份与恢复", "诊断", "运行操作"}},
@@ -53,7 +53,8 @@ func pageForAction(kind string) pageID {
 		runtimeapi.ActionDeleteSource,
 		runtimeapi.ActionAddManagedResource,
 		runtimeapi.ActionSetAdvancedOverride,
-		runtimeapi.ActionSetTrafficPolicy:
+		runtimeapi.ActionSetTrafficPolicy,
+		runtimeapi.ActionSelectProxyNode:
 		return pageConfig
 	case runtimeapi.ActionEnableTUN,
 		runtimeapi.ActionDisableTUN,
@@ -112,7 +113,7 @@ func (m *Model) moveSelection(forward bool) tea.Cmd {
 		if source := m.selectedSourceSummary(); source != nil {
 			m.status = "已选择来源：" + source.Name
 		}
-		return nil
+		return m.startProxyGroupsCmd(m.selectedSource())
 	}
 	if m.page == pageMonitor && m.focusIndex == 2 {
 		if len(m.connectionPage.Items) == 0 {
@@ -142,6 +143,9 @@ func (m *Model) activateFocus() tea.Cmd {
 			*m = updated.(Model)
 			return command
 		}
+		if m.focusIndex == 3 {
+			return m.openProxyGroups(m.snapshot.Sources.CurrentSourceID)
+		}
 	case pageConfig:
 		if m.focusIndex == 0 && m.selectedSource() != "" {
 			updated, command := m.Update(commandKey("y"))
@@ -155,6 +159,9 @@ func (m *Model) activateFocus() tea.Cmd {
 		}
 		if m.focusIndex == 4 {
 			return m.openAppliedRules(runtimeapi.RuleQuery{})
+		}
+		if m.focusIndex == 5 {
+			return m.openProxyGroups(m.selectedSource())
 		}
 	case pageNetwork:
 		if m.focusIndex == 2 {
@@ -196,6 +203,7 @@ func paletteCommands() []paletteCommand {
 		{label: "添加远程配置来源", keywords: "订阅 URL", key: "u"},
 		{label: "导入本机配置来源", keywords: "YAML 文件", key: "n"},
 		{label: "预览所选来源", keywords: "候选 字段来源", key: "y"},
+		{label: "查看或选择代理节点", keywords: "代理组 节点 延迟", key: "ctrl+n"},
 		{label: "刷新所选来源", keywords: "下载", key: "f"},
 		{label: "切换到所选来源", keywords: "应用", key: "t"},
 		{label: "编辑本机高级覆盖", keywords: "YAML 敏感", key: "o"},
@@ -249,6 +257,12 @@ func (m Model) updatePalette(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.openPage(command.page)
 				if command.page == pageMonitor {
 					return m, m.trafficHistoryCmd(true)
+				}
+				if command.page == pageStatus {
+					return m, m.startProxyGroupsCmd(m.snapshot.Sources.CurrentSourceID)
+				}
+				if command.page == pageConfig {
+					return m, m.startProxyGroupsCmd(m.selectedSource())
 				}
 				return m, nil
 			}

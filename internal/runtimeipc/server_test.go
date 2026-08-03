@@ -61,6 +61,19 @@ type ruleObserver struct {
 	rules func(context.Context, runtimeapi.PeerIdentity, runtimeapi.RuleQuery) (runtimeapi.RuleSet, error)
 }
 
+type proxyGroupObserver struct {
+	observerFunc
+	groups func(context.Context, runtimeapi.PeerIdentity, runtimeapi.ProxyGroupQuery) (runtimeapi.ProxyGroupList, error)
+}
+
+func (observer proxyGroupObserver) ProxyGroups(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	query runtimeapi.ProxyGroupQuery,
+) (runtimeapi.ProxyGroupList, error) {
+	return observer.groups(ctx, peer, query)
+}
+
 func (observer trafficObserver) TrafficHistory(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -460,6 +473,64 @@ func TestRuleHandlerReturnsOnlyFilteredAppliedRules(t *testing.T) {
 	} {
 		if invalid := serve(path); invalid.Code != http.StatusBadRequest {
 			t.Fatalf("invalid rule query %q status=%d body=%s", path, invalid.Code, invalid.Body.String())
+		}
+	}
+}
+
+func TestProxyGroupHandlerUsesSourceQueryAndRejectsUnknownParameters(t *testing.T) {
+	const sourceID = "src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var received runtimeapi.ProxyGroupQuery
+	service := proxyGroupObserver{
+		observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		},
+		groups: func(_ context.Context, peer runtimeapi.PeerIdentity, query runtimeapi.ProxyGroupQuery) (runtimeapi.ProxyGroupList, error) {
+			if peer.UID != 1000 {
+				t.Fatalf("peer=%#v", peer)
+			}
+			received = query
+			return runtimeapi.ProxyGroupList{SourceID: query.SourceID, Groups: []runtimeapi.ProxyGroupStatus{{Name: "PROXY", Current: "Tokyo"}}}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set(HeaderRequestID, "request-proxy-groups")
+		request.Header.Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+		request.Header.Set(HeaderClientType, "tui")
+		request.Header.Set(HeaderClientVersion, "test")
+		request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	recorder := serve("/v1/proxy-groups?source_id=" + sourceID)
+	if recorder.Code != http.StatusOK || received.SourceID != sourceID || !strings.Contains(recorder.Body.String(), `"current":"Tokyo"`) {
+		t.Fatalf("status=%d query=%#v body=%s", recorder.Code, received, recorder.Body.String())
+	}
+	if invalid := serve("/v1/proxy-groups?unknown=value"); invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status=%d body=%s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestProxySelectionActionAcceptsOnlyStrictSourceGroupAndNode(t *testing.T) {
+	valid := runtimeapi.Action{Kind: runtimeapi.ActionSelectProxyNode, Params: runtimeapi.ActionParams{
+		SourceID: "src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ProxyGroup: "PROXY", ProxyNode: "Tokyo",
+	}}
+	if !validAction(valid) {
+		t.Fatalf("valid proxy selection rejected: %#v", valid)
+	}
+	for _, invalid := range []runtimeapi.Action{
+		{Kind: runtimeapi.ActionSelectProxyNode, Params: runtimeapi.ActionParams{SourceID: valid.Params.SourceID, ProxyGroup: "PROXY", ProxyNode: ""}},
+		{Kind: runtimeapi.ActionSelectProxyNode, Params: runtimeapi.ActionParams{SourceID: valid.Params.SourceID, ProxyGroup: "bad\nname", ProxyNode: "Tokyo"}},
+		{Kind: runtimeapi.ActionSelectProxyNode, Params: runtimeapi.ActionParams{SourceID: valid.Params.SourceID, ProxyGroup: "PROXY", ProxyNode: "Tokyo", Confirm: true}},
+		{Kind: runtimeapi.ActionStartProxy, Params: runtimeapi.ActionParams{ProxyGroup: "PROXY", ProxyNode: "Tokyo"}},
+	} {
+		if validAction(invalid) {
+			t.Fatalf("invalid proxy selection accepted: %#v", invalid)
 		}
 	}
 }

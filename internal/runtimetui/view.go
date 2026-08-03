@@ -12,6 +12,16 @@ import (
 )
 
 func (m Model) View() tea.View {
+	if m.proxyGroupOpen {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderProxyGroupViewer(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
 	if m.sourceForm != nil {
 		return tea.NewView(strings.Join([]string{
 			m.renderShellHeader(),
@@ -178,7 +188,11 @@ func (m Model) renderStatusPage() string {
 		lines = append(lines, mutedStyle.Render("尚未选择 Runtime 配置来源"))
 	}
 
-	lines = append(lines, "", m.focusHeading(2, "最近运行操作"), m.operationLine())
+	lines = append(lines,
+		"", m.focusHeading(2, "最近运行操作"), m.operationLine(),
+		"", m.focusHeading(3, "主要代理组"),
+	)
+	lines = append(lines, m.renderMainProxyGroupSummary(m.snapshot.Sources.CurrentSourceID)...)
 	return strings.Join(lines, "\n")
 }
 
@@ -258,7 +272,10 @@ func (m Model) renderConfigPage() string {
 		m.focusHeading(4, "最终规则"),
 		fmt.Sprintf("当前运行配置可通过 Runtime 读取 · 尚未应用候选 %s", candidateRuleSummary(m.preview)),
 		"Enter 或 Ctrl+R 打开只读查看器；支持内容、类型、目标筛选以及当前/候选切换",
+		"",
+		m.focusHeading(5, "代理组与节点"),
 	)
+	lines = append(lines, m.renderConfigProxyGroupSummary(m.selectedSource())...)
 	return strings.Join(lines, "\n")
 }
 
@@ -543,6 +560,7 @@ func (m Model) renderHelp() string {
 		"↑↓ 选择当前区域条目 · Enter 打开或执行当前区域的安全默认操作",
 		"配置页的本机配置层：Enter 或 Ctrl+Y 选择流量策略并生成候选确认",
 		"配置页最终规则：Enter 或 Ctrl+R 打开；监控页活动连接：Ctrl+R 定位命中规则",
+		"状态页主要代理组、配置页代理组与节点：Enter 或 Ctrl+N 打开选择器",
 		"/ 或 Ctrl+K 搜索页面和操作 · Esc 返回 · ? 关闭帮助 · q 退出",
 		"现有字母快捷键继续可用，页面底部会显示当前焦点。",
 	}, "\n")

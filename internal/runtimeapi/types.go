@@ -209,6 +209,8 @@ type ActionParams struct {
 	ConnectionScopeToken string           `json:"connection_scope_token,omitempty"`
 	ConnectionCount      int              `json:"connection_count,omitempty"`
 	TrafficPolicy        string           `json:"traffic_policy,omitempty"`
+	ProxyGroup           string           `json:"proxy_group,omitempty"`
+	ProxyNode            string           `json:"proxy_node,omitempty"`
 }
 
 type CreateOperationRequest struct {
@@ -291,6 +293,8 @@ type OperationResult struct {
 	ConnectionAlreadyClosed  bool           `json:"connection_already_closed,omitempty"`
 	TrafficPolicySelected    string         `json:"traffic_policy_selected,omitempty"`
 	TrafficPolicyEffective   string         `json:"traffic_policy_effective,omitempty"`
+	ProxyGroup               string         `json:"proxy_group,omitempty"`
+	ProxyNode                string         `json:"proxy_node,omitempty"`
 }
 
 type OperationResponse struct {
@@ -555,6 +559,7 @@ const (
 	ActionAddManagedResource  = "resource.add"
 	ActionSetAdvancedOverride = "override.set"
 	ActionSetTrafficPolicy    = "traffic_policy.set"
+	ActionSelectProxyNode     = "proxy_group.select"
 	ActionEnableTUN           = "network.enable_tun"
 	ActionDisableTUN          = "network.disable_tun"
 	ActionEnableGateway       = "network.enable_gateway"
