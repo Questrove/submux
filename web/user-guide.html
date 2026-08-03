@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="submux 控制面和 Submux Runtime 的安装、首次使用、日常操作、升级、备份与卸载说明。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="submux 软件使用说明">
+<meta property="og:description" content="覆盖 Windows、Linux、macOS 的安装、使用、更新、备份和卸载流程。">
+<meta property="og:image" content="/user-guide-og.png">
+<meta name="twitter:card" content="summary_large_image">
+<title>submux 软件使用说明</title>
+<style>
+:root{color-scheme:light;--paper:#f5f3ee;--surface:#fffdf8;--ink:#192537;--muted:#647083;--line:#d8d8d2;--blue:#174c8f;--blue-deep:#10355f;--blue-soft:#e7f0fa;--orange:#d8662b;--orange-soft:#fff0e5;--green:#247254;--green-soft:#e5f3eb;--yellow-soft:#fff6d9;--code:#132033;--shadow:0 18px 50px rgba(30,42,58,.09)}
+*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:28px}body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.75 ui-sans-serif,system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}a{color:var(--blue);text-underline-offset:3px}button{font:inherit}.skip{position:fixed;left:12px;top:-60px;z-index:20;background:#fff;padding:10px 14px;border-radius:8px;color:var(--ink)}.skip:focus{top:12px}
+.hero{position:relative;overflow:hidden;background:linear-gradient(132deg,#0e2948 0%,#174c8f 61%,#2b6b9f 100%);color:#fff}.hero:before,.hero:after{content:"";position:absolute;border:1px solid rgba(255,255,255,.13);border-radius:50%}.hero:before{width:420px;height:420px;right:-90px;top:-210px}.hero:after{width:250px;height:250px;right:110px;bottom:-190px}.hero-inner{position:relative;z-index:1;max-width:1180px;margin:auto;padding:34px 30px 62px}.brandbar{display:flex;justify-content:space-between;align-items:center;gap:18px;margin-bottom:52px}.brand{display:flex;align-items:center;gap:12px;color:#fff;text-decoration:none}.brand-mark{display:grid;place-items:center;width:40px;height:40px;border:1px solid rgba(255,255,255,.3);border-radius:12px;background:rgba(255,255,255,.11);font-weight:800;font-size:18px}.brand strong{font-size:17px;letter-spacing:.02em}.brand span{display:block;font-size:12px;color:#c9dbec}.top-links{display:flex;align-items:center;gap:16px}.top-links a{color:#e8f2fb;text-decoration:none}.top-links a:hover{text-decoration:underline}.eyebrow{display:inline-flex;align-items:center;gap:8px;margin-bottom:14px;color:#dceafa;font-size:13px;font-weight:650;letter-spacing:.08em;text-transform:uppercase}.eyebrow:before{content:"";width:24px;height:2px;background:#ef8c4b}h1{max-width:760px;margin:0;font-size:clamp(36px,6vw,66px);line-height:1.08;letter-spacing:-.045em}.lead{max-width:720px;margin:20px 0 26px;color:#d7e6f4;font-size:17px;line-height:1.8}.badges{display:flex;flex-wrap:wrap;gap:9px}.badge{display:inline-flex;align-items:center;gap:7px;border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:6px 11px;background:rgba(255,255,255,.08);color:#f7fbff;font-size:12px}.badge i{width:7px;height:7px;border-radius:50%;background:#76d6a9}.badge.preview i{background:#f5b16f}
+.layout{display:grid;grid-template-columns:248px minmax(0,1fr);gap:34px;max-width:1180px;margin:-26px auto 0;padding:0 30px 80px;align-items:start}.toc{position:sticky;top:18px;z-index:3;border:1px solid var(--line);border-radius:16px;background:rgba(255,253,248,.95);box-shadow:var(--shadow);padding:15px;margin-top:52px;backdrop-filter:blur(12px)}.toc-title{margin:2px 8px 9px;color:var(--muted);font-size:12px;font-weight:750;letter-spacing:.1em}.toc a{display:block;border-radius:9px;padding:8px 10px;color:#4d5b6d;text-decoration:none;font-size:13px}.toc a:hover,.toc a.active{background:var(--blue-soft);color:var(--blue);font-weight:650}.toc .back{margin-top:10px;padding-top:12px;border-top:1px solid var(--line)}.content{min-width:0;padding-top:52px}.section{margin-bottom:68px}.section-kicker{display:block;margin-bottom:7px;color:var(--orange);font-weight:750;font-size:12px;letter-spacing:.1em;text-transform:uppercase}h2{margin:0 0 12px;font-size:clamp(27px,4vw,40px);line-height:1.2;letter-spacing:-.025em}h3{margin:0 0 8px;font-size:19px;line-height:1.4}p{margin:8px 0 15px}.muted{color:var(--muted)}
+.intro-grid,.product-grid,.card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.product{position:relative;overflow:hidden;min-height:218px;border:1px solid var(--line);border-radius:16px;background:var(--surface);padding:24px;box-shadow:0 8px 28px rgba(30,42,58,.05)}.product:after{content:attr(data-letter);position:absolute;right:-5px;bottom:-38px;color:rgba(23,76,143,.07);font-size:150px;font-weight:900;line-height:1}.product-type{display:inline-block;margin-bottom:28px;border-radius:999px;padding:4px 9px;background:var(--blue-soft);color:var(--blue);font-size:12px;font-weight:700}.product.runtime .product-type{background:var(--orange-soft);color:#a34518}.product p{position:relative;z-index:1;color:var(--muted)}.product ul{position:relative;z-index:1;margin:12px 0 0;padding-left:19px}.flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:22px}.flow div{position:relative;border-top:3px solid var(--blue);border-radius:4px 4px 10px 10px;background:var(--surface);padding:14px 12px;border-left:1px solid var(--line);border-right:1px solid var(--line);border-bottom:1px solid var(--line)}.flow b{display:block;color:var(--blue);font-size:12px}.flow span{display:block;margin-top:5px;font-size:13px;line-height:1.45}.notice{border:1px solid #e4d5ac;border-left:4px solid #d49a28;border-radius:11px;background:var(--yellow-soft);padding:13px 16px;color:#5f4b22}.notice.info{border-color:#cbdced;border-left-color:var(--blue);background:var(--blue-soft);color:#304d69}.notice.danger{border-color:#edcabc;border-left-color:var(--orange);background:var(--orange-soft);color:#673b2a}.checklist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:18px}.check{display:flex;gap:10px;border:1px solid var(--line);border-radius:11px;background:var(--surface);padding:13px 14px}.check:before{content:"✓";display:grid;place-items:center;flex:0 0 22px;height:22px;border-radius:50%;background:var(--green-soft);color:var(--green);font-weight:800}.check span{color:var(--muted);font-size:13px}
+.tabs{display:flex;gap:6px;margin:22px 0 16px;border-bottom:1px solid var(--line);overflow:auto}.tabs button{border:0;border-bottom:3px solid transparent;background:transparent;padding:10px 16px;color:var(--muted);cursor:pointer;white-space:nowrap}.tabs button:hover{color:var(--ink)}.tabs button.active{border-color:var(--orange);color:var(--ink);font-weight:750}.os-panel{display:none}.os-panel.active{display:block}.step-list{display:grid;gap:13px;counter-reset:steps}.step{position:relative;counter-increment:steps;border:1px solid var(--line);border-radius:14px;background:var(--surface);padding:20px 20px 20px 66px}.step:before{content:counter(steps);position:absolute;left:20px;top:20px;display:grid;place-items:center;width:30px;height:30px;border-radius:50%;background:var(--blue);color:#fff;font-weight:800}.step p:last-child{margin-bottom:0}.command{position:relative;margin:12px 0 4px;border-radius:11px;background:var(--code);color:#e7eef7;overflow:auto}.command pre{margin:0;padding:15px 76px 15px 16px;min-width:max-content;font:12px/1.65 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre}.copy{position:absolute;right:8px;top:8px;border:1px solid #3f5168;border-radius:7px;background:#23334a;color:#e7eef7;padding:5px 9px;font-size:11px;cursor:pointer}.copy:hover{background:#31445f}.subtle{font-size:12px;color:var(--muted)}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:13px;background:var(--surface)}table{width:100%;border-collapse:collapse;min-width:650px}th,td{text-align:left;vertical-align:top;border-bottom:1px solid var(--line);padding:13px 15px}th{background:#f0eee8;color:#4e5a68;font-size:12px;letter-spacing:.03em}tr:last-child td{border-bottom:0}td code{font-size:12px}.path{font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#31445d;overflow-wrap:anywhere}.command-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px}.mini-card{border:1px solid var(--line);border-radius:13px;background:var(--surface);padding:18px}.mini-card p{color:var(--muted);font-size:13px}.mini-card .command{margin-top:11px}.mini-card .command pre{white-space:pre-wrap;min-width:0}details{border:1px solid var(--line);border-radius:12px;background:var(--surface);margin:10px 0}summary{cursor:pointer;padding:14px 17px;font-weight:700}details>div{padding:0 17px 17px;color:var(--muted)}.danger-zone{border-top:1px solid var(--line);padding-top:22px;margin-top:28px}.footer{border-top:1px solid var(--line);padding:30px 0 10px;color:var(--muted);font-size:13px}.footer strong{color:var(--ink)}.print-only{display:none}
+@media(max-width:900px){.layout{grid-template-columns:1fr;margin-top:0;padding:0 20px 60px}.toc{position:relative;top:auto;margin-top:-24px;display:flex;gap:4px;overflow:auto;padding:10px}.toc-title,.toc .back{display:none}.toc a{white-space:nowrap}.content{padding-top:38px}.flow{grid-template-columns:1fr 1fr}}
+@media(max-width:650px){.hero-inner{padding:24px 20px 46px}.brandbar{margin-bottom:38px}.top-links a:first-child{display:none}.intro-grid,.product-grid,.card-grid,.checklist,.command-grid{grid-template-columns:1fr}.flow{grid-template-columns:1fr}.step{padding-left:58px}.step:before{left:15px}}
+@media print{body{background:#fff;font-size:11pt}.hero{background:#fff;color:#000;border-bottom:2px solid #000}.hero-inner{padding:20px 0}.hero:before,.hero:after,.brand-mark,.top-links,.toc,.copy,.tabs{display:none!important}.brand,.lead,.badge{color:#000}.layout{display:block;max-width:none;margin:0;padding:0}.content{padding:20px 0}.section{break-inside:avoid;margin-bottom:32px}.os-panel{display:block!important}.os-panel:before{content:attr(data-label);display:block;margin:22px 0 8px;font-size:16pt;font-weight:700}.product,.mini-card,.step,.notice,.table-wrap{box-shadow:none;break-inside:avoid}.command{background:#f3f3f3;color:#111;border:1px solid #bbb}.command pre{white-space:pre-wrap;min-width:0}a{color:#000;text-decoration:none}.print-only{display:block}}
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="hero"><div class="hero-inner">
+  <div class="brandbar"><div class="brand"><span class="brand-mark">S</span><span><strong>submux</strong><span>配置生成与本机代理运行</span></span></div><nav class="top-links" aria-label="页头链接"><a href="https://github.com/Questrove/submux/releases" target="_blank" rel="noreferrer">下载发行版</a><a data-control-plane-link hidden href="/">返回配置编排台</a></nav></div>
+  <span class="eyebrow">用户手册 · v2.0.2</span><h1>从安装到卸载，按实际操作顺序说明</h1>
+  <p class="lead">这份说明同时覆盖 submux 控制面和 Submux Runtime。你可以只安装其中一个，也可以组合使用：先由控制面生成输出订阅，再交给 Runtime 在本机运行。</p>
+  <div class="badges"><span class="badge"><i></i>控制面 v2.0.2 · Stable</span><span class="badge preview"><i></i>Runtime v2.0.2 · Preview</span><span class="badge">Windows · Linux · macOS</span></div>
+</div></header>
+<div class="layout">
+<aside class="toc" aria-label="本页目录"><div class="toc-title">本页目录</div><a href="#choose">先选安装内容</a><a href="#prepare">安装前准备</a><a href="#install">安装软件</a><a href="#first-run">首次使用</a><a href="#daily">日常操作</a><a href="#maintain">更新与备份</a><a href="#uninstall">卸载与清理</a><a href="#troubleshoot">常见问题</a><a class="back" data-control-plane-link hidden href="/">返回 submux 配置编排台</a></aside>
+<main id="main" class="content">
+
+<section id="choose" class="section"><span class="section-kicker">01 · 选择产品</span><h2>先确定你需要安装什么</h2><p class="muted">两个产品可以独立安装。控制面负责整理和发布配置，Runtime 负责在一台机器上管理 Mihomo 和网络接管。</p>
+  <div class="product-grid"><article class="product" data-letter="C"><span class="product-type">submux 控制面</span><h3>生成输出订阅</h3><p>适合管理机场来源、自建节点、模板与规则，并为不同设备生成 Mihomo 或 sing-box 配置。</p><ul><li>提供浏览器管理页面</li><li>不运行代理核心</li><li>可部署在服务器，也可在本机使用</li></ul></article>
+  <article class="product runtime" data-letter="R"><span class="product-type">Submux Runtime</span><h3>在本机运行代理</h3><p>适合管理一个官方 Mihomo，接收完整配置，并提供显式代理、TUN 和 Linux 网关。</p><ul><li>GUI、TUI、CLI 都通过本机 IPC 管理</li><li>支持配置校验和失败恢复</li><li>不会接受控制面远程操作</li></ul></article></div>
+  <div class="flow" aria-label="完整使用过程"><div><b>1</b><span>添加机场来源或自建节点</span></div><div><b>2</b><span>选择模板与规则</span></div><div><b>3</b><span>生成输出订阅</span></div><div><b>4</b><span>Runtime 添加该地址</span></div><div><b>5</b><span>校验后启动 Mihomo</span></div></div>
+</section>
+
+<section id="prepare" class="section"><span class="section-kicker">02 · 安装前</span><h2>准备系统、权限和安装包</h2>
+  <div class="checklist"><div class="check"><div><strong>确认系统支持</strong><br><span>Linux 需要 systemd 与 glibc；macOS 需要 13 或更高版本；Windows 需要受支持版本和 WebView2。</span></div></div><div class="check"><div><strong>选择正确架构</strong><br><span>Windows 和 Linux 选择 amd64 或 arm64。macOS Runtime 使用 Universal 安装包。</span></div></div><div class="check"><div><strong>保留校验文件</strong><br><span>安装前用发行页提供的 SHA-256 检查下载文件，校验不一致时不要继续。</span></div></div><div class="check"><div><strong>准备管理员权限</strong><br><span>Runtime 是机器服务。安装、授权桌面用户和网络接管都需要管理员确认。</span></div></div></div>
+  <div class="notice danger" style="margin-top:18px"><strong>当前签名状态：</strong>Windows Runtime MSI 尚未签名，可能显示 Unknown Publisher；macOS PKG 尚未签名和公证。Runtime 仍处于 Preview，请先在可恢复的环境中使用。</div>
+</section>
+
+<section id="install" class="section"><span class="section-kicker">03 · 安装</span><h2>按操作系统安装</h2><p class="muted">下面默认安装 v2.0.2。在线 Runtime 包不含 Mihomo，安装服务后还要执行“安装 Mihomo”步骤；完整离线包已经包含固定版本的官方 Mihomo。</p>
+  <div class="tabs" role="tablist" aria-label="选择操作系统"><button type="button" class="active" role="tab" aria-selected="true" data-os="linux">Linux</button><button type="button" role="tab" aria-selected="false" data-os="windows">Windows</button><button type="button" role="tab" aria-selected="false" data-os="macos">macOS</button></div>
+  <div id="os-linux" class="os-panel active" data-label="Linux"><div class="step-list">
+    <article class="step"><h3>安装控制面</h3><p>安装固定版本并创建 <code>submux.service</code>。</p><div class="command"><button class="copy" type="button">复制</button><pre>curl -fsSL \
+  https://github.com/Questrove/submux/releases/download/submux-v2.0.2/install-submux.sh | \
+  bash -s -- --version submux-v2.0.2 --service
+systemctl status submux</pre></div></article>
+    <article class="step"><h3>安装 Runtime</h3><p>桌面机器建议安装时授权当前用户，服务器可以不加授权变量。</p><div class="command"><button class="copy" type="button">复制</button><pre># Debian / Ubuntu
+sudo env SUBMUX_RUNTIME_AUTHORIZE_USER="$USER" \
+  dpkg -i submux-runtime_2.0.2_amd64_online.deb
+
+# Fedora / RHEL
+sudo env SUBMUX_RUNTIME_AUTHORIZE_USER="$USER" \
+  rpm -Uvh submux-runtime_2.0.2_amd64_online.rpm</pre></div><p class="subtle">其他 systemd / glibc 发行版可解压 online.tar.zst，然后执行其中的 <code>sudo ./install.sh --authorize-desktop "$USER"</code>。</p></article>
+    <article class="step"><h3>在线安装 Mihomo</h3><div class="command"><button class="copy" type="button">复制</button><pre>PLAN_ID="$(sudo submux-runtime mihomo check --json | \
+  sed -n 's/.*"plan_id":"\([^"]*\)".*/\1/p')"
+test -n "$PLAN_ID"
+sudo submux-runtime mihomo install \
+  --plan "$PLAN_ID" --trust tuf --confirm --wait --json</pre></div></article>
+    <article class="step"><h3>检查服务</h3><div class="command"><button class="copy" type="button">复制</button><pre>systemctl status submux-runtime submux-runtime-net
+sudo submux-runtime status --json</pre></div><p>安装后才授权桌面用户时，执行 <code>sudo submux-runtime-authorize-user --confirm "$USER"</code>，然后重新登录。</p></article>
+  </div><details><summary>完全离线：使用 Linux airgap 包</summary><div><p>airgap 包可以只装控制面、只装 Runtime 或全部安装，目标机器不需要访问网络。</p><div class="command"><button class="copy" type="button">复制</button><pre>sha256sum --check submux-airgap_2.0.2_linux_amd64.tar.gz.sha256
+tar -xzf submux-airgap_2.0.2_linux_amd64.tar.gz
+cd submux-airgap_2.0.2_linux_amd64
+./install.sh verify
+sudo ./install.sh all
+# 或：sudo ./install.sh control
+# 或：sudo ./install.sh runtime --authorize-desktop "$USER"</pre></div></div></details></div>
+
+  <div id="os-windows" class="os-panel" data-label="Windows"><div class="step-list">
+    <article class="step"><h3>下载并运行控制面</h3><p>从 <a href="https://github.com/Questrove/submux/releases/tag/submux-v2.0.2" target="_blank" rel="noreferrer">控制面发行页</a>下载对应架构的 exe 与 <code>checksums.txt</code>。校验后直接运行；当前不会注册为 Windows Service。</p><div class="command"><button class="copy" type="button">复制</button><pre>$Program = 'submux-windows-amd64.exe'
+$Line = (Get-Content checksums.txt | Select-String \
+  ('  ' + [regex]::Escape($Program) + '$')).Line
+$Expected = ($Line -split '\s+')[0]
+$Actual = (Get-FileHash $Program -Algorithm SHA256).Hash
+if ($Actual.ToLower() -ne $Expected.ToLower()) { throw 'checksum mismatch' }
+& ".\$Program"</pre></div></article>
+    <article class="step"><h3>安装 Runtime MSI</h3><p>下载 online MSI 和对应的 <code>.sha256</code>，核对后以管理员权限安装。参数会授权当前用户。</p><div class="command"><button class="copy" type="button">复制</button><pre>$Package = 'submux-runtime_2.0.2_amd64_online.msi'
+$Expected = ((Get-Content "$Package.sha256") -split '\s+')[0]
+$Actual = (Get-FileHash $Package -Algorithm SHA256).Hash
+if ($Actual.ToLower() -ne $Expected.ToLower()) { throw 'checksum mismatch' }
+$MsiPath = (Resolve-Path $Package).Path
+Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @(
+  '/i', "`"$MsiPath`"", 'AUTHORIZE_CURRENT_USER=1'
+)</pre></div></article>
+    <article class="step"><h3>在线安装 Mihomo</h3><div class="command"><button class="copy" type="button">复制</button><pre>$Runtime = "$env:ProgramFiles\Submux Runtime\submux-runtime.exe"
+$Plan = (& $Runtime mihomo check --json | Out-String | ConvertFrom-Json)
+& $Runtime mihomo install \
+  --plan $Plan.plan_id --trust tuf --confirm --wait --json
+& $Runtime status --json</pre></div></article>
+  </div><details><summary>完全离线：使用 offline MSI</summary><div><p>还要下载 <code>offline-verification-bundle.zip</code> 和 <code>SHA256SUMS</code>。分别校验后安装 MSI，再执行：</p><div class="command"><button class="copy" type="button">复制</button><pre>$Runtime = "$env:ProgramFiles\Submux Runtime\submux-runtime.exe"
+$Plan = (& $Runtime mihomo import --json .\offline-verification-bundle.zip |
+  Out-String | ConvertFrom-Json)
+& $Runtime mihomo install \
+  --plan $Plan.plan_id --trust tuf --confirm --wait --json</pre></div></div></details></div>
+
+  <div id="os-macos" class="os-panel" data-label="macOS"><div class="step-list">
+    <article class="step"><h3>安装控制面</h3><p>程序安装到 <code>/usr/local/bin/submux</code>，不会创建 LaunchDaemon。</p><div class="command"><button class="copy" type="button">复制</button><pre>curl -fsSL \
+  https://github.com/Questrove/submux/releases/download/submux-v2.0.2/install-submux.sh | \
+  bash -s -- --version submux-v2.0.2
+submux</pre></div></article>
+    <article class="step"><h3>安装 Runtime PKG 并授权用户</h3><div class="command"><button class="copy" type="button">复制</button><pre>PACKAGE="submux-runtime_2.0.2_universal_online_unsigned.pkg"
+shasum -a 256 -c "${PACKAGE}.sha256"
+sudo installer -pkg "$PACKAGE" -target /
+sudo /usr/local/sbin/submux-runtime-authorize-user --confirm "$USER"</pre></div></article>
+    <article class="step"><h3>在线安装 Mihomo</h3><div class="command"><button class="copy" type="button">复制</button><pre>PLAN_ID="$(submux-runtime mihomo check --json | \
+  sed -n 's/.*"plan_id":"\([^"]*\)".*/\1/p')"
+test -n "$PLAN_ID"
+submux-runtime mihomo install \
+  --plan "$PLAN_ID" --trust tuf --confirm --wait --json
+submux-runtime status --json</pre></div></article>
+  </div><details><summary>完全离线：使用 offline PKG</summary><div><p>下载 Universal offline PKG、摘要、<code>offline-verification-bundle.zip</code> 与 <code>SHA256SUMS</code>，全部校验后安装并授权当前用户。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime mihomo import --json ./offline-verification-bundle.zip
+# 从上一步 JSON 中取得 plan_id 后执行：
+submux-runtime mihomo install \
+  --plan PLAN_ID --trust tuf --confirm --wait --json</pre></div></div></details></div>
+</section>
+
+<section id="first-run" class="section"><span class="section-kicker">04 · 首次使用</span><h2>先生成配置，再明确启动代理</h2>
+  <div class="intro-grid"><article class="mini-card"><h3>控制面：创建输出订阅</h3><p>Linux 服务默认监听 <code>127.0.0.1:8080</code>。第一次打开时设置管理员密码，然后按页面顺序完成：</p><ol><li>添加机场来源或导入自建节点</li><li>检查统一节点库</li><li>选择或发布模板</li><li>建立规则方案</li><li>生成输出订阅并复制地址</li></ol><div class="notice info"><strong>注意：</strong>输出订阅 token 相当于访问凭据。对外提供地址时请使用 HTTPS，不要公开粘贴到日志或截图。</div></article>
+  <article class="mini-card"><h3>Runtime：添加配置来源</h3><p>Runtime 可以保存多个来源，但任意时刻只有一个当前来源。</p><ol><li>添加远程地址或导入本机副本</li><li>应用并检查候选配置</li><li>选择显式代理、TUN 或 Linux 网关</li><li>预览网络改动</li><li>明确启动代理</li></ol><div class="notice"><strong>默认状态：</strong>Mihomo 停止，路由和 DNS 不会改变。添加、刷新或导入来源不会自动启动代理。</div></article></div>
+  <h3 style="margin-top:24px">把控制面输出订阅交给 Runtime</h3><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime source add \
+  --type submux_output \
+  --name submux-main \
+  --url 'https://sub.example.com/sub/replace-with-token' \
+  --wait --json
+submux-runtime source list --json
+SOURCE_ID='把 source add 输出中的 source_id 填在这里'
+submux-runtime source apply --wait --json "$SOURCE_ID"
+submux-runtime proxy start --wait --json
+submux-runtime proxy verify --json</pre></div>
+  <details><summary>没有远程地址：导入本机 Mihomo 配置</summary><div><p>导入后 Runtime 保存自己的副本，不会继续监视原文件。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime source import --name local-config --wait --json ./config.yaml
+submux-runtime source list --json
+SOURCE_ID='把 source import 输出中的 source_id 填在这里'
+submux-runtime source apply --wait --json "$SOURCE_ID"
+submux-runtime proxy start --wait --json</pre></div></div></details>
+</section>
+
+<section id="daily" class="section"><span class="section-kicker">05 · 日常使用</span><h2>常用入口和操作</h2><p>在交互式终端直接运行 <code>submux-runtime</code> 会进入 TUI，也可以使用 GUI。GUI、TUI 和 CLI 的管理能力相同；退出 GUI 不会停止 Runtime、Mihomo、TUN 或网关。</p>
+  <div class="command-grid"><article class="mini-card"><h3>查看整体状态</h3><p>检查当前来源、Mihomo、期望运行状态、网络接管和最近故障。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime status
+submux-runtime status --json</pre></div></article>
+  <article class="mini-card"><h3>启动、验证和停止</h3><p>停止代理时，Runtime 会先撤销自己创建的网络设置。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime proxy start --wait
+submux-runtime proxy verify
+submux-runtime proxy stop --wait</pre></div></article>
+  <article class="mini-card"><h3>预览并启用 TUN</h3><p>先查看计划和冲突，再使用返回的 plan ID。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime network preview --mode tun
+submux-runtime network enable \
+  --mode tun --plan-id PLAN_ID --wait
+submux-runtime network disable --mode tun --wait</pre></div></article>
+  <article class="mini-card"><h3>刷新当前来源</h3><p>刷新失败时继续使用最近可用配置，不会自动切换来源。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime source list
+submux-runtime source refresh --wait SOURCE_ID
+submux-runtime source apply --wait SOURCE_ID</pre></div></article></div>
+  <div class="notice info" style="margin-top:16px"><strong>运行方式：</strong>显式代理不修改系统网络。TUN 适合桌面机器；Linux 网关用于接管指定局域网流量，第一版不代理 IPv6，正式使用前必须完成真实网络验收。</div>
+  <h3 style="margin-top:26px">状态目录与管理入口</h3><div class="table-wrap"><table><thead><tr><th>系统</th><th>管理入口</th><th>Runtime 状态</th><th>默认管理权限</th></tr></thead><tbody><tr><td>Linux</td><td class="path">/run/submux-runtime/runtime.sock</td><td class="path">/var/lib/submux-runtime</td><td>root；桌面用户需加入操作员组</td></tr><tr><td>Windows</td><td class="path">\\.\pipe\submux-runtime</td><td class="path">%ProgramData%\SubmuxRuntime</td><td>管理员；MSI 可授权当前用户</td></tr><tr><td>macOS</td><td class="path">/var/run/submux-runtime/runtime.sock</td><td class="path">/Library/Application Support/SubmuxRuntime</td><td>管理员；桌面用户需明确授权</td></tr></tbody></table></div>
+</section>
+
+<section id="maintain" class="section"><span class="section-kicker">06 · 维护</span><h2>更新、诊断和备份</h2><div class="card-grid">
+  <article class="mini-card"><h3>更新与修复</h3><p>Runtime 可以检查更新，但不会在后台自动安装。升级默认保留状态；同版本重装需要明确选择“修复”。</p><div class="command"><button class="copy" type="button">复制</button><pre>sudo ./install.sh runtime --repair
+sudo ./install.sh runtime \
+  --allow-downgrade --database-compatible</pre></div></article>
+  <article class="mini-card"><h3>本机诊断包</h3><p>诊断包只在本机生成，不会上传。默认内容已经脱敏。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime diagnostics preview
+submux-runtime diagnostics create</pre></div><p class="subtle">Runtime 与 Mihomo 日志默认保留 7 天或 50 MiB。</p></article>
+  <article class="mini-card"><h3>创建可恢复备份</h3><p>可恢复备份会包含凭据，是未加密的明文文件。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime backup preview --include-secrets
+submux-runtime backup export --include-secrets \
+  --confirm-plaintext ./submux-runtime.backup</pre></div></article>
+  <article class="mini-card"><h3>检查并恢复备份</h3><p>恢复会整体替换可迁移状态，不和当前配置合并。</p><div class="command"><button class="copy" type="button">复制</button><pre>submux-runtime backup inspect ./submux-runtime.backup
+submux-runtime backup restore --confirm \
+  ./submux-runtime.backup</pre></div></article>
+</div></section>
+
+<section id="uninstall" class="section"><span class="section-kicker">07 · 卸载</span><h2>先恢复直连，再卸载程序</h2><p>Runtime 卸载器会先停止主 Runtime，再停止特权网络进程，并检查路由、DNS、防火墙、TUN、服务和 Socket 是否有残留。发现残留时卸载会失败，也不会继续清除状态。</p><div class="notice danger"><strong>清除数据无法撤销。</strong>默认卸载会保留配置和状态。只有确认不再需要来源、凭据、覆盖和最近可用配置时，才使用 purge。</div>
+  <div class="tabs" role="tablist" aria-label="选择卸载系统"><button type="button" class="active" role="tab" aria-selected="true" data-uninstall-os="linux">Linux</button><button type="button" role="tab" aria-selected="false" data-uninstall-os="windows">Windows</button><button type="button" role="tab" aria-selected="false" data-uninstall-os="macos">macOS</button></div>
+  <div id="uninstall-linux" class="os-panel active" data-label="Linux"><div class="table-wrap"><table><thead><tr><th>安装方式</th><th>保留状态</th><th>同时清除状态</th></tr></thead><tbody><tr><td>DEB</td><td><code>sudo dpkg -r submux-runtime</code></td><td><code>sudo dpkg -P submux-runtime</code></td></tr><tr><td>RPM</td><td><code>sudo rpm -e submux-runtime</code></td><td><code>sudo env SUBMUX_RUNTIME_PURGE=1 rpm -e submux-runtime</code></td></tr><tr><td>tar.zst</td><td><code>sudo ./install.sh --uninstall</code></td><td><code>sudo ./install.sh --uninstall --purge</code></td></tr></tbody></table></div><p class="subtle">默认保留 <code>/etc/submux-runtime</code>、<code>/var/lib/submux-runtime</code> 和 <code>/var/lib/submux-runtime-privileged</code>。</p></div>
+  <div id="uninstall-windows" class="os-panel" data-label="Windows"><div class="command"><button class="copy" type="button">复制</button><pre>powershell -File .\Uninstall-SubmuxRuntime.ps1
+# 同时清除 %ProgramData%\SubmuxRuntime
+powershell -File .\Uninstall-SubmuxRuntime.ps1 -Purge</pre></div><p class="subtle">控制面不是 Windows Service。关闭程序后删除 exe；若使用自定义数据库路径，请自行决定是否保留数据库文件。</p></div>
+  <div id="uninstall-macos" class="os-panel" data-label="macOS"><div class="command"><button class="copy" type="button">复制</button><pre>sudo /usr/local/sbin/submux-runtime-uninstall
+# 同时清除 Runtime 状态
+sudo /usr/local/sbin/submux-runtime-uninstall --purge</pre></div></div>
+  <div class="danger-zone"><h3>卸载控制面</h3><p>Linux 或 macOS 使用同一个安装脚本。Linux 会移除由安装器管理的 systemd unit，但保留 <code>/var/lib/submux</code>。</p><div class="command"><button class="copy" type="button">复制</button><pre>curl -fsSL \
+  https://github.com/Questrove/submux/releases/download/submux-v2.0.2/install-submux.sh | \
+  bash -s -- --uninstall</pre></div></div>
+</section>
+
+<section id="troubleshoot" class="section"><span class="section-kicker">08 · 排查</span><h2>常见问题</h2>
+  <details open><summary>添加来源后为什么没有代理？</summary><div>添加、刷新和导入来源都不会自动启动 Mihomo。先执行 <code>source apply</code>，再执行 <code>proxy start --wait</code>，最后用 <code>proxy verify</code> 检查。</div></details>
+  <details><summary>CLI 提示无权限或无法连接 Runtime</summary><div>先确认服务正在运行。Linux 用户加入操作员组后需要重新登录；macOS 执行授权命令；Windows 安装 MSI 时使用 <code>AUTHORIZE_CURRENT_USER=1</code>。</div></details>
+  <details><summary>在线安装包中找不到 Mihomo</summary><div>online 包只安装 Runtime，之后需要执行 <code>mihomo check</code> 和 <code>mihomo install</code>。无法访问官方发行位置时改用完整离线包。</div></details>
+  <details><summary>启用 TUN 或网关时报冲突</summary><div>重新执行 <code>network preview</code>，检查已有 VPN、其他代理、DNS 管理程序和默认路由。只有预览符合预期时才使用对应 plan ID 启用。</div></details>
+  <details><summary>Runtime 连续崩溃后不再自动重启 Mihomo</summary><div>十分钟内自动重试达到上限后会进入“需要处理”状态，并保持直连。查看 <code>submux-runtime status</code> 和诊断包，修正问题后再手动启动。</div></details>
+  <details><summary>卸载失败并提示网络残留</summary><div>卸载器会停止清理，避免删除状态后留下不可追踪的网络修改。先确认 Runtime 创建的服务、路由、DNS、防火墙、TUN 和 Socket 已撤销，再重试。</div></details>
+</section>
+
+<footer class="footer"><p><strong>说明依据：</strong>本页按仓库中的 README、Runtime 设计、安装与发行说明及三平台安装脚本编写，版本为 v2.0.2。具体平台支持状态以发行包内说明和 Runtime 支持矩阵为准。</p><p class="print-only">打印提示：网页中的 Linux、Windows 和 macOS 内容会全部展开。</p></footer>
+</main></div>
+<script>
+function activatePanels(buttonSelector,panelPrefix,dataName){const buttons=[...document.querySelectorAll(buttonSelector)];buttons.forEach(button=>button.addEventListener('click',()=>{buttons.forEach(item=>{item.classList.toggle('active',item===button);item.setAttribute('aria-selected',String(item===button))});document.querySelectorAll(`[id^="${panelPrefix}"]`).forEach(panel=>panel.classList.toggle('active',panel.id===panelPrefix+button.dataset[dataName]))}))}
+activatePanels('[data-os]','os-','os');activatePanels('[data-uninstall-os]','uninstall-','uninstallOs');
+document.querySelectorAll('.copy').forEach(button=>button.addEventListener('click',async()=>{const text=button.nextElementSibling.textContent;try{await navigator.clipboard.writeText(text);const old=button.textContent;button.textContent='已复制';setTimeout(()=>button.textContent=old,1400)}catch{button.textContent='请手动复制'}}));
+const controlPlaneLinks=[...document.querySelectorAll('[data-control-plane-link]')];fetch('/healthz',{headers:{Accept:'application/json'},cache:'no-store'}).then(response=>response.ok&&response.headers.get('content-type')?.includes('application/json')?response.json():null).then(payload=>{if(payload?.status==='ok'&&payload?.build&&typeof payload.build==='object')controlPlaneLinks.forEach(link=>link.hidden=false)}).catch(()=>{});
+const tocLinks=[...document.querySelectorAll('.toc a[href^="#"]')],sections=tocLinks.map(link=>document.querySelector(link.getAttribute('href'))).filter(Boolean);if('IntersectionObserver' in window){const observer=new IntersectionObserver(entries=>{const visible=entries.filter(entry=>entry.isIntersecting).sort((a,b)=>b.intersectionRatio-a.intersectionRatio)[0];if(!visible)return;tocLinks.forEach(link=>link.classList.toggle('active',link.getAttribute('href')==='#'+visible.target.id))},{rootMargin:'-15% 0px -70%',threshold:[0,.2,.5]});sections.forEach(section=>observer.observe(section))}
+</script>
+</body>
+</html>

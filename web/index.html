@@ -24,19 +24,19 @@
     <h2>初始化 submux</h2>
     <p class="muted">设置管理员密码，然后从来源开始建立自己的订阅。</p>
     <div class="field"><label>管理员密码（至少 6 位）</label><input id="init-password" type="password" autocomplete="new-password"></div>
-    <button class="primary" onclick="initialize()">开始使用</button>
+    <div class="actions"><button class="primary" onclick="initialize()">开始使用</button><a href="/user-guide.html" target="_blank" rel="noreferrer">阅读软件使用说明</a></div>
   </section>
 
   <section id="auth-login" class="panel auth hidden">
     <h2>登录</h2>
     <div class="field"><label>管理员密码</label><input id="login-password" type="password" autocomplete="current-password"></div>
-    <button class="primary" onclick="login()">登录</button>
+    <div class="actions"><button class="primary" onclick="login()">登录</button><a href="/user-guide.html" target="_blank" rel="noreferrer">阅读软件使用说明</a></div>
   </section>
 
   <section id="app" class="hidden">
     <header class="topbar">
       <div class="brand"><div class="logo">S</div><div><h1>submux 配置编排台</h1><p>来源 → 节点库 → 模板与规则 → 订阅</p></div></div>
-      <button class="ghost" onclick="logout()">退出</button>
+      <div class="actions"><a href="/user-guide.html" target="_blank" rel="noreferrer">使用说明</a><button class="ghost" onclick="logout()">退出</button></div>
     </header>
     <nav class="tabs" id="tabs">
       <button data-page="sources" class="active">1. 来源</button>
