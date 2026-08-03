@@ -1186,6 +1186,56 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在生成所选来源的最终候选配置…"
 			return m, m.previewSourceCmd(sourceID)
+		case "D":
+			if m.page != pageMonitor || m.focusIndex != 2 {
+				m.status = "关闭连接只在监控页的活动连接区域可用"
+				return m, nil
+			}
+			if len(m.connectionPage.Items) == 0 || m.connectionSelected < 0 || m.connectionSelected >= len(m.connectionPage.Items) {
+				m.status = "当前没有可关闭的活动连接"
+				return m, nil
+			}
+			connection := m.connectionPage.Items[m.connectionSelected]
+			if connection.ID == "" {
+				m.err = errors.New("所选连接没有稳定连接标识，无法关闭")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.prepareAction(runtimeapi.Action{
+				Kind: runtimeapi.ActionCloseConnection,
+				Params: runtimeapi.ActionParams{
+					ConnectionID:     connection.ID,
+					ConnectionTarget: connection.Target,
+				},
+			})
+			return m, nil
+		case "X":
+			if m.page != pageMonitor || m.focusIndex != 2 {
+				m.status = "批量关闭连接只在监控页的活动连接区域可用"
+				return m, nil
+			}
+			if !m.connectionHasData || m.connectionStale || !m.connectionPage.Available || m.connectionPage.ScopeToken == "" {
+				m.err = errors.New("活动连接数据未同步或已过期，请刷新后再确认范围")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			if m.connectionPage.Total <= 0 {
+				m.status = "当前筛选范围内没有可关闭的活动连接"
+				return m, nil
+			}
+			scope := m.connectionLoadedQuery
+			scope.Page = 0
+			scope.PageSize = 0
+			m.prepareAction(runtimeapi.Action{
+				Kind: runtimeapi.ActionCloseConnections,
+				Params: runtimeapi.ActionParams{
+					ConnectionScope:      &scope,
+					ConnectionScopeToken: m.connectionPage.ScopeToken,
+					ConnectionCount:      m.connectionPage.Total,
+					Confirm:              true,
+				},
+			})
+			return m, nil
 		case "f", "d", "m":
 			if key.String() == "f" && m.page == pageMonitor {
 				m.connectionFilter = newConnectionFilterForm(m.connectionQuery)

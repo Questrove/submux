@@ -349,7 +349,7 @@ func (m Model) renderMonitorPage() string {
 	lines = append(lines,
 		"",
 		m.focusHeading(2, "活动连接"),
-		fmt.Sprintf("%s · 第 %d/%d 页 · 共 %d 条 · F 筛选 · ,/. 翻页", connectionFilterSummary(loadedQuery), page, lastPage, m.connectionPage.Total),
+		fmt.Sprintf("%s · 第 %d/%d 页 · 共 %d 条 · F 筛选 · ,/. 翻页 · D 关闭所选 · X 关闭当前范围", connectionFilterSummary(loadedQuery), page, lastPage, m.connectionPage.Total),
 	)
 	if len(m.connectionPage.Items) == 0 {
 		lines = append(lines, mutedStyle.Render("当前筛选下没有活动连接"))
@@ -573,6 +573,14 @@ func (m Model) renderOperationStrip() string {
 	}
 	if operation.Error != nil {
 		state += " · " + operation.Error.Code + ": " + operation.Error.Message
+	}
+	if operation.Result != nil && (operation.Action.Kind == runtimeapi.ActionCloseConnection || operation.Action.Kind == runtimeapi.ActionCloseConnections) {
+		if operation.Result.ClosedConnections > 0 {
+			state += fmt.Sprintf(" · 已关闭 %d 条", operation.Result.ClosedConnections)
+		}
+		if operation.Result.AlreadyClosedConnections > 0 {
+			state += fmt.Sprintf(" · 已消失 %d 条", operation.Result.AlreadyClosedConnections)
+		}
 	}
 	return state
 }

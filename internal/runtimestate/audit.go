@@ -167,6 +167,10 @@ func auditForOperation(
 
 func auditObjectID(action runtimeapi.Action) string {
 	switch {
+	case action.Params.ConnectionID != "":
+		return action.Params.ConnectionID
+	case action.Params.ConnectionScope != nil:
+		return "current_connection_scope"
 	case action.Params.SourceID != "":
 		return action.Params.SourceID
 	case action.Params.ResourceName != "":

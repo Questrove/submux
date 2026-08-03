@@ -2,6 +2,7 @@ package runtimeapp
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -943,6 +944,14 @@ func (c *Coordinator) now() time.Time {
 }
 
 func validateAction(action runtimeapi.Action) error {
+	connectionAction := action.Kind == runtimeapi.ActionCloseConnection || action.Kind == runtimeapi.ActionCloseConnections
+	if !connectionAction && (action.Params.ConnectionID != "" ||
+		action.Params.ConnectionTarget != "" ||
+		action.Params.ConnectionScope != nil ||
+		action.Params.ConnectionScopeToken != "" ||
+		action.Params.ConnectionCount != 0) {
+		return errors.New("connection parameters are only accepted by a connection close action")
+	}
 	if action.Kind != runtimeapi.ActionUpdateMihomo &&
 		action.Kind != runtimeapi.ActionUpdateProduct &&
 		action.Params.Trust != "" {
@@ -956,6 +965,44 @@ func validateAction(action runtimeapi.Action) error {
 		return errors.New("plan_id is only accepted by a network enable, Mihomo update, or Runtime product update action")
 	}
 	switch action.Kind {
+	case runtimeapi.ActionCloseConnection:
+		if !validConnectionID(action.Params.ConnectionID) ||
+			!validOptionalConnectionText(action.Params.ConnectionTarget, 512) ||
+			action.Params.ConnectionScope != nil ||
+			action.Params.ConnectionScopeToken != "" ||
+			action.Params.ConnectionCount != 0 ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" ||
+			action.Params.Trust != "" {
+			return errors.New("connection.close requires only a stable connection_id and optional target")
+		}
+	case runtimeapi.ActionCloseConnections:
+		if action.Params.ConnectionID != "" ||
+			action.Params.ConnectionTarget != "" ||
+			action.Params.ConnectionScope == nil ||
+			!validConnectionScopeToken(action.Params.ConnectionScopeToken) ||
+			action.Params.ConnectionCount <= 0 ||
+			action.Params.ConnectionCount > 1_000_000 ||
+			!action.Params.Confirm ||
+			!validConnectionScope(*action.Params.ConnectionScope) ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" ||
+			action.Params.Trust != "" {
+			return errors.New("connection.close_scope requires a bounded scope, confirmed count, and explicit confirmation")
+		}
 	case runtimeapi.ActionApplyImportedConfig:
 		if !validContentID(action.Params.ContentID) {
 			return errors.New("proxy.apply_import requires a valid content_id")
@@ -1180,6 +1227,35 @@ func validateAction(action runtimeapi.Action) error {
 	return nil
 }
 
+func validConnectionID(id string) bool {
+	return id != "" && len(id) <= 128 && validOptionalConnectionText(id, 128) && strings.TrimSpace(id) == id
+}
+
+func validConnectionScope(scope runtimeapi.ConnectionQuery) bool {
+	return scope.Page == 0 && scope.PageSize == 0 &&
+		validOptionalConnectionText(scope.Target, 256) &&
+		validOptionalConnectionText(scope.Process, 256) &&
+		validOptionalConnectionText(scope.Rule, 256) &&
+		validOptionalConnectionText(scope.Node, 256)
+}
+
+func validConnectionScopeToken(token string) bool {
+	decoded, err := hex.DecodeString(token)
+	return err == nil && len(decoded) == sha256.Size
+}
+
+func validOptionalConnectionText(value string, maximum int) bool {
+	if len(value) > maximum || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
 func validSourceID(id string) bool {
 	suffix, ok := strings.CutPrefix(id, "src_")
 	if !ok || len(suffix) != 32 {
@@ -1242,6 +1318,10 @@ func validResourceName(name string) bool {
 
 func publicExecutionMessage(kind string) string {
 	switch kind {
+	case runtimeapi.ActionCloseConnection:
+		return "Runtime could not close the selected Mihomo connection"
+	case runtimeapi.ActionCloseConnections:
+		return "Runtime could not close the confirmed Mihomo connection scope"
 	case runtimeapi.ActionApplyImportedConfig:
 		return "Mihomo rejected or could not activate the imported configuration"
 	case runtimeapi.ActionStartProxy:

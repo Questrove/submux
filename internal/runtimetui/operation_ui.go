@@ -99,6 +99,14 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 	}
 
 	switch action.Kind {
+	case runtimeapi.ActionCloseConnection:
+		description.Impact = "关闭所选 Mihomo 活动连接"
+		description.Interruption = "现有会话立即中断，应用可能自行重新连接"
+		description.Recovery = "连接无法恢复；需要时由应用重新建立连接"
+	case runtimeapi.ActionCloseConnections:
+		description.Impact = fmt.Sprintf("关闭当前确认范围内最多 %d 条 Mihomo 活动连接", action.Params.ConnectionCount)
+		description.Interruption = "当前范围内的现有会话立即中断，应用可能自行重新连接"
+		description.Recovery = "连接无法恢复；需要时由应用重新建立连接"
 	case runtimeapi.ActionStartProxy:
 		description.Impact = "启动 Mihomo，使用当前来源和运行方式"
 		description.Recovery = "启动失败时保持停止，并保留最近可用配置"
@@ -155,6 +163,8 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 
 func actionTitle(kind string) string {
 	titles := map[string]string{
+		runtimeapi.ActionCloseConnection:     "关闭活动连接",
+		runtimeapi.ActionCloseConnections:    "关闭当前范围内全部连接",
 		runtimeapi.ActionApplyImportedConfig: "应用导入的候选配置",
 		runtimeapi.ActionStartProxy:          "启动 Mihomo",
 		runtimeapi.ActionStopProxy:           "停止 Mihomo 并恢复直连",
@@ -185,6 +195,10 @@ func actionTitle(kind string) string {
 func actionTarget(action runtimeapi.Action) string {
 	params := action.Params
 	switch {
+	case params.ConnectionID != "":
+		return valueOr(params.ConnectionTarget, "未知目标") + " · " + params.ConnectionID
+	case params.ConnectionScope != nil:
+		return fmt.Sprintf("%s · 已确认 %d 条", connectionFilterSummary(*params.ConnectionScope), params.ConnectionCount)
 	case params.SourceName != "":
 		return params.SourceName
 	case params.SourceID != "":
@@ -225,6 +239,8 @@ func (m Model) actionConflict(action runtimeapi.Action) string {
 
 func actionConflictGroup(kind string) string {
 	switch kind {
+	case runtimeapi.ActionCloseConnection, runtimeapi.ActionCloseConnections:
+		return "connection-control"
 	case runtimeapi.ActionAddRemoteSource,
 		runtimeapi.ActionAddImportedSource,
 		runtimeapi.ActionRefreshSource,

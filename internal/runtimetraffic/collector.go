@@ -72,6 +72,7 @@ func (c *Collector) Connections(query runtimeapi.ConnectionQuery) runtimeapi.Con
 		PageSize:   pageSize,
 		Available:  c.status.Available,
 		ObservedAt: c.connectionsAt,
+		ScopeToken: connectionScopeToken(items),
 	}
 	start := (page - 1) * pageSize
 	if start >= len(items) {

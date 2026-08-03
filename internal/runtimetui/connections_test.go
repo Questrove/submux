@@ -149,3 +149,110 @@ func TestRuntimeTUIConnectionSelectionUsesMonitorRegion(t *testing.T) {
 		t.Fatalf("connection selection=%d command=%v view=%q", model.connectionSelected, command != nil, model.View().Content)
 	}
 }
+
+func TestRuntimeTUICloseSelectedConnectionUsesUnifiedOperationConfirmation(t *testing.T) {
+	client := &fakeClient{snapshot: shellSnapshot(4, 3)}
+	model, _ := initializeShellModel(t, client)
+	model.openPage(pageMonitor)
+	model.focusIndex = 2
+	model.connectionPage = runtimeapi.ConnectionPage{
+		Items: []runtimeapi.Connection{{ID: "connection-1", Target: "api.example.com:443"}},
+		Total: 1, Page: 1, PageSize: 20, Available: true, ScopeToken: strings.Repeat("a", 64),
+	}
+	model.connectionHasData = true
+	model.connectionLoadedQuery = model.connectionQuery
+
+	updated, command := model.Update(keyPress('D'))
+	model = updated.(Model)
+	if command != nil || model.confirmation == nil || len(client.actions) != 0 {
+		t.Fatalf("close selected skipped confirmation: command=%v confirmation=%#v actions=%#v", command != nil, model.confirmation, client.actions)
+	}
+	action := model.confirmation.Action
+	if action.Kind != runtimeapi.ActionCloseConnection || action.Params.ConnectionID != "connection-1" || action.Params.ConnectionTarget != "api.example.com:443" {
+		t.Fatalf("close selected action=%#v", action)
+	}
+	view := model.View().Content
+	for _, expected := range []string{"确认运行操作 · 关闭活动连接", "api.example.com:443", "现有会话立即中断", "连接无法恢复"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("close selected confirmation missing %q: %q", expected, view)
+		}
+	}
+	updated, submit := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(Model)
+	if submit == nil || len(client.actions) != 0 {
+		t.Fatal("close selected was submitted before confirmation command ran")
+	}
+	_, _ = model.Update(submit())
+	if len(client.actions) != 1 || client.actions[0].Kind != runtimeapi.ActionCloseConnection {
+		t.Fatalf("submitted close actions=%#v", client.actions)
+	}
+}
+
+func TestRuntimeTUICloseCurrentConnectionScopeShowsCountFiltersAndImpact(t *testing.T) {
+	client := &fakeClient{snapshot: shellSnapshot(4, 3)}
+	model, _ := initializeShellModel(t, client)
+	model.openPage(pageMonitor)
+	model.focusIndex = 2
+	model.connectionLoadedQuery = runtimeapi.ConnectionQuery{Node: "Tokyo", Process: "browser", Page: 1, PageSize: 20}
+	model.connectionQuery = model.connectionLoadedQuery
+	model.connectionPage = runtimeapi.ConnectionPage{Total: 2, Page: 1, PageSize: 20, Available: true, ScopeToken: strings.Repeat("b", 64)}
+	model.connectionHasData = true
+
+	updated, command := model.Update(keyPress('X'))
+	model = updated.(Model)
+	if command != nil || model.confirmation == nil || len(client.actions) != 0 {
+		t.Fatalf("close scope skipped confirmation: command=%v confirmation=%#v actions=%#v", command != nil, model.confirmation, client.actions)
+	}
+	action := model.confirmation.Action
+	if action.Kind != runtimeapi.ActionCloseConnections || !action.Params.Confirm || action.Params.ConnectionCount != 2 ||
+		action.Params.ConnectionScope == nil || action.Params.ConnectionScope.Node != "Tokyo" ||
+		action.Params.ConnectionScope.Process != "browser" || action.Params.ConnectionScope.Page != 0 || action.Params.ConnectionScope.PageSize != 0 ||
+		action.Params.ConnectionScopeToken != strings.Repeat("b", 64) {
+		t.Fatalf("close scope action=%#v", action)
+	}
+	view := model.View().Content
+	for _, expected := range []string{
+		"关闭当前范围内全部连接", "已确认 2 条", "进程=browser", "节点=Tokyo",
+		"关闭当前确认范围内最多 2 条", "现有会话立即中断", "连接无法恢复",
+	} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("close scope confirmation missing %q: %q", expected, view)
+		}
+	}
+}
+
+func TestRuntimeTUIRefusesScopeCloseFromStaleConnectionData(t *testing.T) {
+	client := &fakeClient{snapshot: shellSnapshot(4, 3)}
+	model, _ := initializeShellModel(t, client)
+	model.openPage(pageMonitor)
+	model.focusIndex = 2
+	model.connectionPage = runtimeapi.ConnectionPage{Total: 2, Page: 1, PageSize: 20, Available: false}
+	model.connectionHasData = true
+	model.connectionStale = true
+
+	updated, command := model.Update(keyPress('X'))
+	model = updated.(Model)
+	if command != nil || model.confirmation != nil || len(client.actions) != 0 {
+		t.Fatalf("stale scope close command=%v confirmation=%#v actions=%#v", command != nil, model.confirmation, client.actions)
+	}
+	if !strings.Contains(model.status, "已过期") {
+		t.Fatalf("stale scope close status=%q", model.status)
+	}
+}
+
+func TestRuntimeTUIShowsConnectionCloseResultInGlobalOperationStrip(t *testing.T) {
+	client := &fakeClient{snapshot: shellSnapshot(4, 3)}
+	model, _ := initializeShellModel(t, client)
+	model.lastOperation = runtimeapi.Operation{
+		ID: "op-close", Action: runtimeapi.Action{Kind: runtimeapi.ActionCloseConnections},
+		State: runtimeapi.OperationSucceeded, Stage: "succeeded", Progress: 100,
+		CreatedAt: time.Now().Add(-time.Second), UpdatedAt: time.Now(),
+		Result: &runtimeapi.OperationResult{MatchedConnections: 3, ClosedConnections: 2, AlreadyClosedConnections: 1},
+	}
+	view := model.View().Content
+	for _, expected := range []string{"op-close", "succeeded", "已关闭 2 条", "已消失 1 条"} {
+		if !strings.Contains(view, expected) {
+			t.Fatalf("operation strip missing %q: %q", expected, view)
+		}
+	}
+}

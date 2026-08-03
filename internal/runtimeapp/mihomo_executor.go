@@ -21,6 +21,7 @@ import (
 	"submux/internal/runtimeprocess"
 	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
+	"submux/internal/runtimetraffic"
 	"submux/internal/runtimeupdate"
 	"submux/internal/safepath"
 )
@@ -41,6 +42,7 @@ type MihomoExecutor struct {
 	ProductUpdates  *productupdate.Manager
 	ProductNetwork  NetworkService
 	Backups         *runtimebackup.Service
+	Connections     *runtimetraffic.ConnectionManager
 	Now             func() time.Time
 
 	lifecycleMu sync.Mutex
@@ -138,6 +140,10 @@ func (e *MihomoExecutor) Execute(
 		return nil, errors.New("Mihomo Runtime executor is incomplete")
 	}
 	switch operation.Action.Kind {
+	case runtimeapi.ActionCloseConnection:
+		return e.closeConnection(ctx, operation, report)
+	case runtimeapi.ActionCloseConnections:
+		return e.closeConnections(ctx, operation, report)
 	case runtimeapi.ActionApplyImportedConfig:
 		return e.applyImport(ctx, operation, report)
 	case runtimeapi.ActionApplySource:
@@ -203,6 +209,80 @@ func (e *MihomoExecutor) Execute(
 		return nil, exposeSourceManagerError(err)
 	default:
 		return nil, fmt.Errorf("unsupported Runtime action %q", operation.Action.Kind)
+	}
+}
+
+func (e *MihomoExecutor) closeConnections(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if e.Connections == nil {
+		return nil, errors.New("Runtime connection manager is unavailable")
+	}
+	params := operation.Action.Params
+	if params.ConnectionScope == nil || !params.Confirm {
+		return nil, errors.New("Runtime connection scope close requires explicit confirmation")
+	}
+	if err := report("closing_connection_scope", 30, false); err != nil {
+		return nil, err
+	}
+	result, err := e.Connections.CloseScope(ctx, *params.ConnectionScope, params.ConnectionCount, params.ConnectionScopeToken)
+	if err != nil {
+		return nil, exposeConnectionControlError(err)
+	}
+	return &runtimeapi.OperationResult{
+		MatchedConnections:       result.Matched,
+		ClosedConnections:        result.Closed,
+		AlreadyClosedConnections: result.AlreadyClosed,
+	}, nil
+}
+
+func (e *MihomoExecutor) closeConnection(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	if e.Connections == nil {
+		return nil, errors.New("Runtime connection manager is unavailable")
+	}
+	if err := report("closing_connection", 50, false); err != nil {
+		return nil, err
+	}
+	result, err := e.Connections.CloseOne(ctx, operation.Action.Params.ConnectionID)
+	if err != nil {
+		return nil, exposeConnectionControlError(err)
+	}
+	return &runtimeapi.OperationResult{
+		ConnectionID:             operation.Action.Params.ConnectionID,
+		MatchedConnections:       result.Matched,
+		ClosedConnections:        result.Closed,
+		AlreadyClosedConnections: result.AlreadyClosed,
+		ConnectionAlreadyClosed:  result.AlreadyClosed > 0,
+	}, nil
+}
+
+func exposeConnectionControlError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, runtimetraffic.ErrConnectionScopeChanged):
+		return &PublicError{
+			Code:    runtimeapi.ErrorRevisionConflict,
+			Message: "The active connection scope grew after confirmation; refresh and confirm again",
+			Cause:   err,
+		}
+	case errors.Is(err, runtimetraffic.ErrConnectionSnapshotUnavailable),
+		errors.Is(err, runtimetraffic.ErrMihomoConnectionControl):
+		return &PublicError{
+			Code:      runtimeapi.ErrorServiceUnavailable,
+			Message:   "Mihomo connection control is temporarily unavailable",
+			Retryable: true,
+			Cause:     err,
+		}
+	default:
+		return err
 	}
 }
 

@@ -100,6 +100,8 @@ GET /v1/connections?target={text}&process={text}&rule={text}&node={text}&page={n
 
 Runtime 与流量采集共用 Mihomo 本机控制连接。客户端只调用 Runtime 本机 IPC，不直接连接 Mihomo，也不会取得 Mihomo secret。Mihomo 读取短暂失败时，Runtime 保留最后一次成功的连接结果并将 `available` 设为 `false`；客户端应只把连接区域标记为过期，使用最长五秒的退避间隔继续重试，其他页面和区域继续可用。接口不返回进程路径，连接明细不进入 Snapshot、状态数据库、日志或备份。
 
+关闭活动连接使用运行操作，不增加客户端可直接调用的 Mihomo 控制接口。`connection.close` 只接受稳定连接 ID 和可选的脱敏目标说明；连接已经消失时按幂等成功记录。连接分页结果还包含由当前筛选范围内全部稳定连接 ID 计算的 `scope_token`。`connection.close_scope` 只接受目标、进程、规则和节点筛选、界面显示并经操作员确认的连接数量、该范围令牌，以及 `confirm: true`。Runtime 执行前重新计算令牌；匹配成员或数量发生变化时拒绝操作并要求刷新后再次确认，因此确认后新出现的连接不会被关闭。令牌核验后、实际关闭前消失的连接仍按幂等成功记录。成功、失败、取消和结果未知都由同一套 Operation 状态与审计记录呈现。
+
 ### 上传导入内容
 
 ```http

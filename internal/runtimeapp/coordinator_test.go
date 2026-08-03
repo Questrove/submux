@@ -246,6 +246,54 @@ func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
 	}
 }
 
+func TestCoordinatorAcceptsOnlyBoundedConnectionCloseActions(t *testing.T) {
+	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer state.Close()
+	coordinator := &Coordinator{
+		State: state,
+		Executor: executorFunc{execute: func(context.Context, runtimeapi.Operation, StageReporter) (*runtimeapi.OperationResult, error) {
+			return &runtimeapi.OperationResult{}, nil
+		}},
+	}
+	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
+	requests := []runtimeapi.CreateOperationRequest{
+		{
+			RequestID: "close-one",
+			Action: runtimeapi.Action{Kind: runtimeapi.ActionCloseConnection, Params: runtimeapi.ActionParams{
+				ConnectionID: "connection-1", ConnectionTarget: "api.example.com:443",
+			}},
+		},
+		{
+			RequestID: "close-scope",
+			Action: runtimeapi.Action{Kind: runtimeapi.ActionCloseConnections, Params: runtimeapi.ActionParams{
+				ConnectionScope: &runtimeapi.ConnectionQuery{Node: "Tokyo"}, ConnectionScopeToken: strings.Repeat("a", 64), ConnectionCount: 2, Confirm: true,
+			}},
+		},
+	}
+	for _, request := range requests {
+		snapshot, err := coordinator.Observe(t.Context(), peer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.IfRevision = snapshot.Revision
+		if _, _, err := coordinator.Execute(t.Context(), peer, "tui", "test", request); err != nil {
+			t.Fatalf("valid connection action %q: %v", request.Action.Kind, err)
+		}
+	}
+	invalid := runtimeapi.CreateOperationRequest{
+		RequestID: "close-invalid",
+		Action: runtimeapi.Action{Kind: runtimeapi.ActionCloseConnections, Params: runtimeapi.ActionParams{
+			ConnectionScope: &runtimeapi.ConnectionQuery{Page: 1}, ConnectionCount: 0,
+		}},
+	}
+	if _, _, err := coordinator.Execute(t.Context(), peer, "tui", "test", invalid); err == nil {
+		t.Fatal("Runtime accepted unconfirmed, unbounded connection scope")
+	}
+}
+
 func TestCoordinatorReportsUnavailableNetworkWithoutClaimingCleanup(t *testing.T) {
 	state, err := runtimestate.Open(filepath.Join(t.TempDir(), "state"))
 	if err != nil {

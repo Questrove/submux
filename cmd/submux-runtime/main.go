@@ -269,6 +269,10 @@ func runServeContext(parent context.Context, arguments []string, stderr io.Write
 	trafficCollector := &runtimetraffic.Collector{
 		Reader: runtimetraffic.MihomoReader{Endpoint: defaults.ControlEndpoint},
 	}
+	connectionManager := &runtimetraffic.ConnectionManager{
+		Collector:  trafficCollector,
+		Controller: runtimetraffic.MihomoController{Endpoint: defaults.ControlEndpoint},
+	}
 	verifier := &mihomo.RuntimeCheck{
 		Control:    control,
 		ProxyProbe: mihomo.LocalHTTPProxyProbe{},
@@ -334,6 +338,7 @@ func runServeContext(parent context.Context, arguments []string, stderr io.Write
 		ProductUpdates:  productUpdateManager,
 		ProductNetwork:  network,
 		Backups:         backupManager,
+		Connections:     connectionManager,
 	}
 	executor.Sources = &runtimesource.Manager{
 		State: state,

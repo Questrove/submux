@@ -40,4 +40,5 @@ type ConnectionPage struct {
 	PageSize   int          `json:"page_size"`
 	Available  bool         `json:"available"`
 	ObservedAt time.Time    `json:"observed_at"`
+	ScopeToken string       `json:"scope_token,omitempty"`
 }

@@ -183,16 +183,21 @@ type Action struct {
 }
 
 type ActionParams struct {
-	ContentID    string `json:"content_id,omitempty"`
-	SourceID     string `json:"source_id,omitempty"`
-	SourceName   string `json:"source_name,omitempty"`
-	Route        string `json:"route,omitempty"`
-	UseCached    bool   `json:"use_cached,omitempty"`
-	Confirm      bool   `json:"confirm,omitempty"`
-	ResourceKind string `json:"resource_kind,omitempty"`
-	ResourceName string `json:"resource_name,omitempty"`
-	PlanID       string `json:"plan_id,omitempty"`
-	Trust        string `json:"trust,omitempty"`
+	ContentID            string           `json:"content_id,omitempty"`
+	SourceID             string           `json:"source_id,omitempty"`
+	SourceName           string           `json:"source_name,omitempty"`
+	Route                string           `json:"route,omitempty"`
+	UseCached            bool             `json:"use_cached,omitempty"`
+	Confirm              bool             `json:"confirm,omitempty"`
+	ResourceKind         string           `json:"resource_kind,omitempty"`
+	ResourceName         string           `json:"resource_name,omitempty"`
+	PlanID               string           `json:"plan_id,omitempty"`
+	Trust                string           `json:"trust,omitempty"`
+	ConnectionID         string           `json:"connection_id,omitempty"`
+	ConnectionTarget     string           `json:"connection_target,omitempty"`
+	ConnectionScope      *ConnectionQuery `json:"connection_scope,omitempty"`
+	ConnectionScopeToken string           `json:"connection_scope_token,omitempty"`
+	ConnectionCount      int              `json:"connection_count,omitempty"`
 }
 
 type CreateOperationRequest struct {
@@ -241,33 +246,38 @@ type AuditRecord struct {
 }
 
 type OperationResult struct {
-	ConfigRevision         string         `json:"config_revision,omitempty"`
-	CandidateSHA256        string         `json:"candidate_sha256,omitempty"`
-	ProxyKind              string         `json:"proxy_kind,omitempty"`
-	ProxyAddresses         []string       `json:"proxy_addresses,omitempty"`
-	Verified               bool           `json:"verified,omitempty"`
-	SourceID               string         `json:"source_id,omitempty"`
-	PreviousSourceID       string         `json:"previous_source_id,omitempty"`
-	UsedCachedSource       bool           `json:"used_cached_source,omitempty"`
-	Deleted                bool           `json:"deleted,omitempty"`
-	RefreshResult          string         `json:"refresh_result,omitempty"`
-	RefreshRoute           string         `json:"refresh_route,omitempty"`
-	NextRefreshAt          *time.Time     `json:"next_refresh_at,omitempty"`
-	NotModified            bool           `json:"not_modified,omitempty"`
-	ResourceID             string         `json:"resource_id,omitempty"`
-	ResourceKind           string         `json:"resource_kind,omitempty"`
-	AdvancedOverrideSHA256 string         `json:"advanced_override_sha256,omitempty"`
-	RunMode                string         `json:"run_mode,omitempty"`
-	Network                *NetworkStatus `json:"network,omitempty"`
-	CoreVersion            string         `json:"core_version,omitempty"`
-	PreviousCoreVersion    string         `json:"previous_core_version,omitempty"`
-	RuntimeVersion         string         `json:"runtime_version,omitempty"`
-	PreviousRuntimeVersion string         `json:"previous_runtime_version,omitempty"`
-	ProductRollback        string         `json:"product_rollback,omitempty"`
-	Trust                  string         `json:"trust,omitempty"`
-	BackupSHA256           string         `json:"backup_sha256,omitempty"`
-	AutomaticBackupFile    string         `json:"automatic_backup_file,omitempty"`
-	MachineSettingsPending bool           `json:"machine_settings_pending,omitempty"`
+	ConfigRevision           string         `json:"config_revision,omitempty"`
+	CandidateSHA256          string         `json:"candidate_sha256,omitempty"`
+	ProxyKind                string         `json:"proxy_kind,omitempty"`
+	ProxyAddresses           []string       `json:"proxy_addresses,omitempty"`
+	Verified                 bool           `json:"verified,omitempty"`
+	SourceID                 string         `json:"source_id,omitempty"`
+	PreviousSourceID         string         `json:"previous_source_id,omitempty"`
+	UsedCachedSource         bool           `json:"used_cached_source,omitempty"`
+	Deleted                  bool           `json:"deleted,omitempty"`
+	RefreshResult            string         `json:"refresh_result,omitempty"`
+	RefreshRoute             string         `json:"refresh_route,omitempty"`
+	NextRefreshAt            *time.Time     `json:"next_refresh_at,omitempty"`
+	NotModified              bool           `json:"not_modified,omitempty"`
+	ResourceID               string         `json:"resource_id,omitempty"`
+	ResourceKind             string         `json:"resource_kind,omitempty"`
+	AdvancedOverrideSHA256   string         `json:"advanced_override_sha256,omitempty"`
+	RunMode                  string         `json:"run_mode,omitempty"`
+	Network                  *NetworkStatus `json:"network,omitempty"`
+	CoreVersion              string         `json:"core_version,omitempty"`
+	PreviousCoreVersion      string         `json:"previous_core_version,omitempty"`
+	RuntimeVersion           string         `json:"runtime_version,omitempty"`
+	PreviousRuntimeVersion   string         `json:"previous_runtime_version,omitempty"`
+	ProductRollback          string         `json:"product_rollback,omitempty"`
+	Trust                    string         `json:"trust,omitempty"`
+	BackupSHA256             string         `json:"backup_sha256,omitempty"`
+	AutomaticBackupFile      string         `json:"automatic_backup_file,omitempty"`
+	MachineSettingsPending   bool           `json:"machine_settings_pending,omitempty"`
+	ConnectionID             string         `json:"connection_id,omitempty"`
+	MatchedConnections       int            `json:"matched_connections,omitempty"`
+	ClosedConnections        int            `json:"closed_connections,omitempty"`
+	AlreadyClosedConnections int            `json:"already_closed_connections,omitempty"`
+	ConnectionAlreadyClosed  bool           `json:"connection_already_closed,omitempty"`
 }
 
 type OperationResponse struct {
@@ -533,6 +543,8 @@ const (
 	ActionUpdateProduct       = "product.update"
 	ActionRollbackProduct     = "product.rollback"
 	ActionRestoreBackup       = "backup.restore"
+	ActionCloseConnection     = "connection.close"
+	ActionCloseConnections    = "connection.close_scope"
 
 	OperationQueued         = "queued"
 	OperationRunning        = "running"
