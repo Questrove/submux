@@ -87,6 +87,31 @@ func TestRuntimeTUIMutationUsesOneConfirmationRegion(t *testing.T) {
 	}
 }
 
+func TestRuntimeTUIRejectsWritesPreparedOrConfirmedFromStaleSnapshot(t *testing.T) {
+	client := &scriptedEventClient{fakeClient: &fakeClient{snapshot: shellSnapshot(7, 4)}}
+	model, _ := initializeShellModel(t, client)
+	model.snapshotStale = true
+
+	updated, command := model.Update(keyPress('s'))
+	model = updated.(Model)
+	if command != nil || model.confirmation != nil || len(client.actions) != 0 || !strings.Contains(model.status, "Snapshot 已过期") {
+		t.Fatalf("stale prepare command=%v confirmation=%v actions=%#v status=%q", command != nil, model.confirmation != nil, client.actions, model.status)
+	}
+
+	model.snapshotStale = false
+	updated, _ = model.Update(keyPress('s'))
+	model = updated.(Model)
+	if model.confirmation == nil {
+		t.Fatal("fresh Snapshot did not open confirmation")
+	}
+	model.snapshotStale = true
+	updated, command = model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(Model)
+	if command != nil || model.confirmation != nil || len(client.actions) != 0 || !strings.Contains(model.status, "Snapshot 已过期") {
+		t.Fatalf("stale confirm command=%v confirmation=%v actions=%#v status=%q", command != nil, model.confirmation != nil, client.actions, model.status)
+	}
+}
+
 func TestRuntimeTUIOperationStripSurvivesPageSwitchAndShowsProgress(t *testing.T) {
 	snapshot := shellSnapshot(12, 8)
 	snapshot.Operations.Queued = 2

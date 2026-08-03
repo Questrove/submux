@@ -180,6 +180,9 @@ func (m Model) renderTabs() string {
 }
 
 func (m Model) renderStatusPage() string {
+	if onboardingRequired(m.snapshot) {
+		return m.renderOnboardingPage()
+	}
 	nextRestart := "无"
 	if m.snapshot.Mihomo.NextRestartAt != nil {
 		nextRestart = m.snapshot.Mihomo.NextRestartAt.Local().Format(time.RFC3339)
@@ -780,21 +783,21 @@ func (m Model) renderHelp() string {
 }
 
 func (m Model) renderShellFooter() string {
-	definition := definitionFor(m.page)
+	regions := m.focusRegions()
 	focus := m.focusIndex
-	if focus < 0 || focus >= len(definition.regions) {
+	if focus < 0 || focus >= len(regions) {
 		focus = 0
 	}
 	region := "无"
-	if len(definition.regions) > 0 {
-		region = definition.regions[focus]
+	if len(regions) > 0 {
+		region = regions[focus]
 	}
 	status := renderStatus(m.status, m.err, m.busy)
 	return strings.Join([]string{
 		status,
 		m.renderOperationStrip(),
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
-		fmt.Sprintf("焦点 %d/%d · %s  |  1–5 页面 · Tab 焦点 · / 搜索 · ? 帮助 · r 刷新 · q 退出", focus+1, len(definition.regions), region),
+		fmt.Sprintf("焦点 %d/%d · %s  |  1–5 页面 · Tab 焦点 · / 搜索 · ? 帮助 · r 刷新 · q 退出", focus+1, len(regions), region),
 		"所有客户端只通过 Runtime 本机 IPC 管理",
 	}, "\n")
 }

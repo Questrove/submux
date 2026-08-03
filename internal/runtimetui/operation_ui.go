@@ -28,6 +28,9 @@ type actionConfirmation struct {
 }
 
 func (m *Model) prepareAction(action runtimeapi.Action) {
+	if m.rejectStaleMutation() {
+		return
+	}
 	if conflict := m.actionConflict(action); conflict != "" {
 		m.confirmation = nil
 		m.busy = false
@@ -44,6 +47,9 @@ func (m *Model) prepareAction(action runtimeapi.Action) {
 
 func (m *Model) confirmAction() tea.Cmd {
 	if m.confirmation == nil {
+		return nil
+	}
+	if m.rejectStaleMutation() {
 		return nil
 	}
 	confirmation := *m.confirmation
@@ -69,6 +75,9 @@ func (m *Model) cancelActionConfirmation() {
 }
 
 func (m *Model) prepareCancellation(operation runtimeapi.Operation) {
+	if m.rejectStaleMutation() {
+		return
+	}
 	m.confirmation = &actionConfirmation{
 		CancelOperationID: operation.ID,
 		Title:             "取消运行操作",
@@ -81,6 +90,17 @@ func (m *Model) prepareCancellation(operation runtimeapi.Operation) {
 	m.busy = false
 	m.err = nil
 	m.status = "请检查取消操作预览；Enter 确认，Esc 取消"
+}
+
+func (m *Model) rejectStaleMutation() bool {
+	if !m.snapshotStale {
+		return false
+	}
+	m.confirmation = nil
+	m.busy = false
+	m.err = errors.New("Runtime Snapshot 已过期；请等待重连或按 r 刷新后再操作")
+	m.status = m.err.Error()
+	return true
 }
 
 func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {

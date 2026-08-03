@@ -54,9 +54,10 @@ type TrafficPolicyStatus struct {
 }
 
 type RuntimeStatus struct {
-	Version      string `json:"version"`
-	ServiceState string `json:"service_state"`
-	Fault        *Fault `json:"fault,omitempty"`
+	Version            string `json:"version"`
+	ServiceState       string `json:"service_state"`
+	LocalIPCAuthorized bool   `json:"local_ipc_authorized"`
+	Fault              *Fault `json:"fault,omitempty"`
 }
 
 type Fault struct {

@@ -1285,29 +1285,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.prepareAction(runtimeapi.Action{Kind: actionKind})
 			return m, nil
 		case "U":
-			if m.mihomoUpdate.PlanID == "" ||
-				!m.mihomoUpdate.ExpiresAt.IsZero() && !time.Now().Before(m.mihomoUpdate.ExpiresAt) {
-				client, ok := m.client.(MihomoUpdateClient)
-				if !ok {
-					m.err = errors.New("当前 TUI 客户端不支持 Mihomo 更新")
-					m.status = m.err.Error()
-					return m, nil
-				}
-				m.busy = true
-				m.mihomoUpdate = runtimeapi.MihomoUpdatePlan{}
-				m.status = "正在通过 TUF 检查官方 Mihomo 稳定更新…"
-				return m, m.previewMihomoUpdateCmd(client)
-			}
-			m.sensitiveConfirm = ""
-			m.prepareAction(runtimeapi.Action{
-				Kind: runtimeapi.ActionUpdateMihomo,
-				Params: runtimeapi.ActionParams{
-					PlanID:  m.mihomoUpdate.PlanID,
-					Trust:   m.mihomoUpdate.Trust,
-					Confirm: true,
-				},
-			})
-			return m, nil
+			return m, m.beginMihomoUpdate()
 		case "R":
 			if m.snapshot.Updates.MihomoPreviousVersion == "" {
 				m.err = errors.New("当前没有可回滚的上一版 Mihomo 核心")

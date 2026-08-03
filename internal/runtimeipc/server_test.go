@@ -330,7 +330,7 @@ func TestSnapshotHandlerValidatesProtocolAndPeer(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &snapshot); err != nil {
 		t.Fatalf("decode snapshot: %v", err)
 	}
-	if snapshot.Revision != 7 || snapshot.LatestEventCursor != 9 {
+	if snapshot.Revision != 7 || snapshot.LatestEventCursor != 9 || !snapshot.Runtime.LocalIPCAuthorized {
 		t.Fatalf("snapshot = %#v", snapshot)
 	}
 	if recorder.Header().Get("Cache-Control") != "no-store" {

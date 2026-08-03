@@ -1012,6 +1012,10 @@ func (s *Server) handleSnapshot(writer http.ResponseWriter, request *http.Reques
 		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime state is temporarily unavailable", true)
 		return
 	}
+	// Reaching this point proves that the local peer passed the server's
+	// authorizer for this request. Keep the permission fact in the Snapshot so
+	// clients do not infer it from service health or maintain a separate flag.
+	snapshot.Runtime.LocalIPCAuthorized = true
 	writer.Header().Set(HeaderRequestID, requestID)
 	writer.Header().Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
 	writer.WriteHeader(http.StatusOK)

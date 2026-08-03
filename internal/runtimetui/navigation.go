@@ -95,13 +95,22 @@ func (m *Model) openPage(page pageID) {
 }
 
 func (m *Model) moveFocus(offset int) {
-	regions := definitionFor(m.page).regions
+	regions := m.focusRegions()
 	if len(regions) == 0 {
 		m.focusIndex = 0
 		return
 	}
 	m.focusIndex = (m.focusIndex + offset + len(regions)) % len(regions)
 	m.status = "焦点：" + regions[m.focusIndex]
+}
+
+func (m Model) focusRegions() []string {
+	if m.page == pageStatus && onboardingRequired(m.snapshot) {
+		if step, _, pending := currentOnboardingStep(m.snapshot); pending {
+			return []string{"首次运行 · " + step.title}
+		}
+	}
+	return definitionFor(m.page).regions
 }
 
 func (m *Model) moveSelection(forward bool) tea.Cmd {
@@ -134,6 +143,10 @@ func (m *Model) moveSelection(forward bool) tea.Cmd {
 }
 
 func (m *Model) activateFocus() tea.Cmd {
+	if m.page == pageStatus && onboardingRequired(m.snapshot) {
+		m.focusIndex = 0
+		return m.activateOnboarding()
+	}
 	switch m.page {
 	case pageStatus:
 		if m.focusIndex == 1 {
