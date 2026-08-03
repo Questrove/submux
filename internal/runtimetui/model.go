@@ -55,70 +55,66 @@ type BackupClient interface {
 }
 
 type Model struct {
-	ctx                context.Context
-	client             Client
-	editor             textarea.Model
-	editing            bool
-	editorMode         string
-	busy               bool
-	width              int
-	height             int
-	snapshot           runtimeapi.Snapshot
-	selectedSourceID   string
-	preview            runtimeapi.CandidatePreview
-	networkPreview     runtimeapi.NetworkPreview
-	mihomoUpdate       runtimeapi.MihomoUpdatePlan
-	productUpdate      runtimeapi.ProductUpdatePlan
-	networkEditorMode  string
-	lastOperation      runtimeapi.Operation
-	verification       runtimeapi.ProxyVerification
-	status             string
-	err                error
-	sensitiveConfirm   string
-	revealedURL        string
-	diagnostics        runtimeapi.DiagnosticsPreview
-	diagnosticsFile    runtimeapi.DiagnosticsResult
-	backupPreview      runtimeapi.BackupPreview
-	backupRestore      runtimeapi.BackupRestorePreview
-	backupArchive      runtimeapi.BackupArchive
-	backupFile         string
-	page               pageID
-	focusIndex         int
-	palette            textinput.Model
-	paletteOpen        bool
-	paletteIndex       int
-	showHelp           bool
-	snapshotStale      bool
-	snapshotFault      error
-	watchingEvents     bool
-	reconnectAttempts  int
-	observeGeneration  uint64
-	confirmation       *actionConfirmation
-	operationUncertain bool
-	operationFault     error
-	waitingOperationID string
+	ctx                  context.Context
+	client               Client
+	editor               textarea.Model
+	editing              bool
+	editorMode           string
+	busy                 bool
+	width                int
+	height               int
+	snapshot             runtimeapi.Snapshot
+	selectedSourceID     string
+	preview              runtimeapi.CandidatePreview
+	previewSourceID      string
+	sourceForm           *sourceForm
+	sourceDiagnosticOpen bool
+	networkPreview       runtimeapi.NetworkPreview
+	mihomoUpdate         runtimeapi.MihomoUpdatePlan
+	productUpdate        runtimeapi.ProductUpdatePlan
+	networkEditorMode    string
+	lastOperation        runtimeapi.Operation
+	verification         runtimeapi.ProxyVerification
+	status               string
+	err                  error
+	sensitiveConfirm     string
+	revealedURL          string
+	diagnostics          runtimeapi.DiagnosticsPreview
+	diagnosticsFile      runtimeapi.DiagnosticsResult
+	backupPreview        runtimeapi.BackupPreview
+	backupRestore        runtimeapi.BackupRestorePreview
+	backupArchive        runtimeapi.BackupArchive
+	backupFile           string
+	page                 pageID
+	focusIndex           int
+	palette              textinput.Model
+	paletteOpen          bool
+	paletteIndex         int
+	showHelp             bool
+	snapshotStale        bool
+	snapshotFault        error
+	watchingEvents       bool
+	reconnectAttempts    int
+	observeGeneration    uint64
+	confirmation         *actionConfirmation
+	operationUncertain   bool
+	operationFault       error
+	waitingOperationID   string
 }
 
 const (
-	editorModeConfig         = "config"
-	editorModeSource         = "source"
-	editorModeImportedSource = "imported_source"
-	editorModeResource       = "resource"
-	editorModeOverride       = "override"
-	editorModeNetwork        = "network"
-	editorModeBackupExport   = "backup_export"
-	editorModeBackupRestore  = "backup_restore"
-	editorModeProductImport  = "product_import"
+	editorModeConfig        = "config"
+	editorModeResource      = "resource"
+	editorModeOverride      = "override"
+	editorModeNetwork       = "network"
+	editorModeBackupExport  = "backup_export"
+	editorModeBackupRestore = "backup_restore"
+	editorModeProductImport = "product_import"
 )
 
 type resourceDraft struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
-	Content string `json:"content"`
-}
-
-type importedSourceDraft struct {
-	Name    string `json:"name"`
 	Content string `json:"content"`
 }
 
@@ -158,8 +154,9 @@ type operationIOErrorMsg struct {
 }
 
 type importPreviewMsg struct {
-	content runtimeapi.ImportContent
-	preview runtimeapi.CandidatePreview
+	content  runtimeapi.ImportContent
+	preview  runtimeapi.CandidatePreview
+	sourceID string
 }
 
 type operationMsg struct {
@@ -176,7 +173,8 @@ type overrideDocumentMsg struct {
 }
 
 type overridePreviewMsg struct {
-	preview runtimeapi.CandidatePreview
+	preview  runtimeapi.CandidatePreview
+	sourceID string
 }
 
 type revealSourceURLMsg struct {
@@ -387,6 +385,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.page = pageConfig
 		m.focusIndex = 1
 		m.preview = message.preview
+		m.previewSourceID = message.sourceID
 		m.busy = false
 		m.editing = false
 		m.err = nil
@@ -435,6 +434,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.page = pageConfig
 		m.focusIndex = 2
 		m.preview = message.preview
+		m.previewSourceID = message.sourceID
 		m.busy = false
 		m.err = nil
 		m.status = fmt.Sprintf("高级覆盖预览已校验：%s；Ctrl+S 保存", shortDigest(message.preview.CandidateSHA256))
@@ -445,7 +445,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.sensitiveConfirm = ""
 		m.revealedURL = message.response.URL
-		m.status = "已临时显示来源原始地址；离开当前界面后不会保存"
+		m.sourceDiagnosticOpen = true
+		m.status = "已打开来源只读诊断；敏感内容不会保存"
 	case diagnosticsPreviewMsg:
 		m.page = pageMaintenance
 		m.focusIndex = 2
@@ -533,6 +534,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = publicErrorMessage(message.err)
 	}
 
+	if m.sourceDiagnosticOpen {
+		if key, ok := message.(tea.KeyPressMsg); ok {
+			switch key.String() {
+			case "esc", "ctrl+u":
+				m.sourceDiagnosticOpen = false
+				m.revealedURL = ""
+				m.sensitiveConfirm = ""
+				m.status = "已关闭来源只读诊断"
+				return m, nil
+			}
+		}
+		return m, nil
+	}
+
+	if m.sourceForm != nil {
+		return m.updateSourceForm(message)
+	}
+
 	if m.editing {
 		if key, ok := message.(tea.KeyPressMsg); ok {
 			switch key.String() {
@@ -616,30 +635,6 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.status = "正在生成网络预览…"
 					return m, m.previewNetworkCmd(request)
-				}
-				if m.editorMode == editorModeSource {
-					var draft runtimeapi.RemoteSourceDraft
-					if err := json.Unmarshal(body, &draft); err != nil {
-						m.busy = false
-						m.err = errors.New("来源设置必须是有效 JSON")
-						m.status = m.err.Error()
-						return m, nil
-					}
-					m.status = "正在上传并添加远程来源…"
-					return m, m.addSourceCmd(body)
-				}
-				if m.editorMode == editorModeImportedSource {
-					var draft importedSourceDraft
-					if err := json.Unmarshal(body, &draft); err != nil ||
-						strings.TrimSpace(draft.Name) == "" ||
-						strings.TrimSpace(draft.Content) == "" {
-						m.busy = false
-						m.err = errors.New("本机来源必须是包含 name 和 content 的有效 JSON")
-						m.status = m.err.Error()
-						return m, nil
-					}
-					m.status = "正在上传并添加本机配置来源…"
-					return m, m.addImportedSourceCmd(draft)
 				}
 				if m.editorMode == editorModeResource {
 					var draft resourceDraft
@@ -751,19 +746,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "粘贴配置后按 Ctrl+S 上传并预览，Esc 取消"
 			return m, m.editor.Focus()
 		case "u":
-			m.editing = true
-			m.editorMode = editorModeSource
+			m.sourceForm = newRemoteSourceForm()
 			m.err = nil
-			m.editor.SetValue(defaultSourceDraft())
-			m.status = "编辑来源 JSON 后按 Ctrl+S 添加，Esc 取消"
-			return m, m.editor.Focus()
+			m.status = "填写远程来源表单；Tab 切换字段，Ctrl+S 预览添加"
+			return m, m.sourceForm.loadActiveField()
 		case "n":
-			m.editing = true
-			m.editorMode = editorModeImportedSource
+			m.sourceForm = newLocalSourceForm()
 			m.err = nil
-			m.editor.SetValue(defaultImportedSourceDraft())
-			m.status = "编辑本机来源 JSON 后按 Ctrl+S 添加，Esc 取消"
-			return m, m.editor.Focus()
+			m.status = "填写本机来源表单；文件只在本机读取，路径不会发送给 Runtime"
+			return m, m.sourceForm.loadActiveField()
 		case "e":
 			m.editing = true
 			m.editorMode = editorModeResource
@@ -844,7 +835,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+u":
 			sourceID := m.selectedSource()
 			if sourceID == "" {
-				m.err = errors.New("当前没有可显示原始地址的远程来源")
+				m.err = errors.New("当前没有可打开只读诊断的配置来源")
 				m.status = m.err.Error()
 				return m, nil
 			}
@@ -854,6 +845,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.revealedURL = ""
 				m.err = nil
 				m.status = runtimeapi.SensitiveDataWarning + " 再按一次 Ctrl+U 确认显示。"
+				return m, nil
+			}
+			if source := m.selectedSourceSummary(); source != nil && source.Type == runtimeapi.SourceTypeLocalImport {
+				m.sensitiveConfirm = ""
+				m.revealedURL = ""
+				m.sourceDiagnosticOpen = true
+				m.status = "已打开本机来源只读诊断；本机导入没有远程请求地址"
 				return m, nil
 			}
 			m.busy = true
@@ -1169,13 +1167,7 @@ func (m Model) legacyView() tea.View {
 	if m.editing {
 		editorTitle := "Submux Runtime · 导入本机配置副本"
 		editorHelp := "Ctrl+S 上传并预览 · Esc 取消"
-		if m.editorMode == editorModeSource {
-			editorTitle = "Submux Runtime · 添加远程配置来源"
-			editorHelp = "Ctrl+S 添加来源 · Esc 取消；高风险设置必须填写精确 authorized_target"
-		} else if m.editorMode == editorModeImportedSource {
-			editorTitle = "Submux Runtime · 添加本机配置来源"
-			editorHelp = "Ctrl+S 上传副本并添加来源 · Esc 取消；原文件路径不会保存"
-		} else if m.editorMode == editorModeResource {
+		if m.editorMode == editorModeResource {
 			editorTitle = "Submux Runtime · 添加托管资源"
 			editorHelp = "Ctrl+S 上传内容并添加 · Esc 取消；只接受约定的资源类型"
 		} else if m.editorMode == editorModeOverride {
@@ -1418,9 +1410,6 @@ func (m Model) legacyView() tea.View {
 			warnStyle.Render("待重新确认："+strings.Join(m.backupRestore.PendingSettings, "、")),
 			warnStyle.Render(m.backupRestore.Warning),
 		)
-	}
-	if m.revealedURL != "" {
-		lines = append(lines, "", warnStyle.Render("来源原始地址："+m.revealedURL))
 	}
 	if len(m.diagnostics.Items) > 0 {
 		lines = append(lines, "", labelStyle.Render("诊断包预览"))
@@ -1676,26 +1665,6 @@ func (m Model) addSourceCmd(body []byte) tea.Cmd {
 	}
 }
 
-func (m Model) addImportedSourceCmd(draft importedSourceDraft) tea.Cmd {
-	return func() tea.Msg {
-		content, err := m.client.UploadImport(
-			m.ctx,
-			"application/x-yaml",
-			[]byte(draft.Content),
-		)
-		if err != nil {
-			return errMsg{err: err}
-		}
-		return preparedActionMsg{action: runtimeapi.Action{
-			Kind: runtimeapi.ActionAddImportedSource,
-			Params: runtimeapi.ActionParams{
-				ContentID:  content.ID,
-				SourceName: draft.Name,
-			},
-		}}
-	}
-}
-
 func (m Model) addResourceCmd(draft resourceDraft) tea.Cmd {
 	return func() tea.Msg {
 		content, err := m.client.UploadImport(
@@ -1750,7 +1719,7 @@ func (m Model) previewSourceCmd(sourceID string) tea.Cmd {
 		if err != nil {
 			return errMsg{err: err}
 		}
-		return importPreviewMsg{preview: preview}
+		return importPreviewMsg{preview: preview, sourceID: sourceID}
 	}
 }
 
@@ -1767,7 +1736,7 @@ func (m Model) previewOverrideCmd(sourceID string, body []byte) tea.Cmd {
 		if err != nil {
 			return errMsg{err: err}
 		}
-		return overridePreviewMsg{preview: preview}
+		return overridePreviewMsg{preview: preview, sourceID: sourceID}
 	}
 }
 
@@ -1965,6 +1934,7 @@ func (m *Model) clearRevealedSource(previousSourceID string) {
 		return
 	}
 	m.revealedURL = ""
+	m.sourceDiagnosticOpen = false
 	if strings.HasPrefix(m.sensitiveConfirm, "reveal:") {
 		m.sensitiveConfirm = ""
 	}
@@ -2017,30 +1987,6 @@ func operationTerminal(state string) bool {
 	default:
 		return false
 	}
-}
-
-func defaultSourceDraft() string {
-	return `{
-  "type": "remote_http",
-  "name": "primary",
-  "url": "https://example.com/config.yaml",
-  "route": "direct",
-  "authorized_target": "",
-  "allow_private": false,
-  "allow_http": false,
-  "custom_ca_pem": "",
-  "skip_tls_verify": false,
-  "refresh_interval_seconds": 21600,
-  "timeout_seconds": 30,
-  "max_response_bytes": 8388608
-}`
-}
-
-func defaultImportedSourceDraft() string {
-	return `{
-  "name": "local-copy",
-  "content": "proxies: []\nrules:\n  - MATCH,DIRECT\n"
-}`
 }
 
 func defaultResourceDraft() string {

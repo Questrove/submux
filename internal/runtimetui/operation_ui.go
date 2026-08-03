@@ -106,10 +106,14 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 		description.Impact = "停止 Mihomo，并撤销 Runtime 管理的网络接管"
 		description.Interruption = "现有代理连接会中断，流量恢复直连"
 		description.Recovery = "可重新预览当前状态后再次启动"
-	case runtimeapi.ActionApplyImportedConfig, runtimeapi.ActionApplySource, runtimeapi.ActionSwitchSource:
+	case runtimeapi.ActionApplyImportedConfig, runtimeapi.ActionApplySource:
 		description.Impact = "校验并应用候选配置，成功后提交为最近可用配置"
 		description.Interruption = "Mihomo 可能短暂重载"
 		description.Recovery = "校验、应用或健康检查失败时恢复最近可用配置"
+	case runtimeapi.ActionSwitchSource:
+		description.Impact = "刷新所选来源 → 生成候选 → 校验 → 应用与健康检查 → 提交当前来源"
+		description.Interruption = "Mihomo 可能短暂重载"
+		description.Recovery = "任何一步失败都恢复原来源和原运行状态"
 	case runtimeapi.ActionRefreshSource:
 		description.Impact = "刷新所选 Runtime 配置来源并生成候选配置，不自动应用"
 		description.Recovery = "失败时继续使用当前来源和最近可用配置"

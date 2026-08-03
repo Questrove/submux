@@ -11,6 +11,26 @@ import (
 )
 
 func (m Model) View() tea.View {
+	if m.sourceForm != nil {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderSourceForm(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
+	if m.sourceDiagnosticOpen {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderSourceDiagnostics(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
 	if m.editing {
 		return m.legacyView()
 	}
@@ -134,9 +154,19 @@ func (m Model) renderConfigPage() string {
 		}
 		lines = append(lines, line)
 	}
-	if m.revealedURL != "" {
-		lines = append(lines, warnStyle.Render("来源原始地址："+m.revealedURL))
+	selectedName := "未选择"
+	if source := m.selectedSourceSummary(); source != nil {
+		selectedName = source.Name + " · " + source.Type + " · " + source.ID
 	}
+	currentName := "未提交"
+	if source := m.currentSourceSummary(); source != nil {
+		currentName = source.Name + " · " + source.Type + " · " + source.ID
+	}
+	lines = append(lines,
+		"浏览中的所选来源  "+selectedName,
+		"Runtime 已提交的当前来源  "+currentName,
+		mutedStyle.Render("Enter 生成候选，不会切换当前来源"),
+	)
 
 	lines = append(lines, "", m.focusHeading(1, "候选配置"))
 	if m.preview.CandidateSHA256 == "" {
@@ -161,7 +191,7 @@ func (m Model) renderConfigPage() string {
 	lines = append(lines,
 		"",
 		m.focusHeading(3, "配置操作"),
-		"u 添加远程来源 · n 添加本机来源 · y 预览 · f/d/m 刷新 · t/k 切换 · o 高级覆盖 · e 托管资源",
+		"u 添加远程来源 · n 添加本机来源 · y 生成候选 · f/d/m 刷新 · t/k 切换 · o 高级覆盖 · e 托管资源 · Ctrl+U 只读诊断",
 	)
 	return strings.Join(lines, "\n")
 }

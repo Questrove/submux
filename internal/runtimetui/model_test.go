@@ -884,12 +884,9 @@ func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testin
 
 	updated, _ = model.Update(keyPress('u'))
 	model = updated.(Model)
-	model.editor.SetValue(`{
-	  "name": "secondary",
-	  "url": "https://source.example/config.yaml",
-	  "route": "direct",
-	  "refresh_interval_seconds": 21600
-	}`)
+	model.sourceForm.setValue(sourceFieldName, "secondary")
+	model.sourceForm.setValue(sourceFieldURL, "https://source.example/config.yaml")
+	model.sourceForm.setValue(sourceFieldRoute, runtimeapi.SourceRouteDirect)
 	updated, command := model.Update(ctrlKey('s'))
 	model = updated.(Model)
 	if command == nil {
@@ -1034,10 +1031,15 @@ func TestModelManagesMultipleSourceTypesAndSwitchesSelectedSource(t *testing.T) 
 
 	updated, _ = model.Update(keyPress('n'))
 	model = updated.(Model)
-	if !model.editing || model.editorMode != editorModeImportedSource {
-		t.Fatalf("imported source editor = editing %v mode %q", model.editing, model.editorMode)
+	if model.sourceForm == nil || model.sourceForm.kind != sourceFormLocal {
+		t.Fatalf("imported source form = %#v", model.sourceForm)
 	}
-	model.editor.SetValue(`{"name":"local-two","content":"proxies: []\nrules: []\n"}`)
+	localSource := filepath.Join(t.TempDir(), "local-two.yaml")
+	if err := os.WriteFile(localSource, []byte("proxies: []\nrules: []\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	model.sourceForm.setValue(sourceFieldName, "local-two")
+	model.sourceForm.setValue(sourceFieldPath, localSource)
 	updated, command = model.Update(ctrlKey('s'))
 	model = updated.(Model)
 	if command == nil {
@@ -1110,6 +1112,11 @@ func TestSensitiveTUIActionsRequireTwoStepsAndUseSharedWarning(t *testing.T) {
 	if client.revealCalls != 1 || !strings.Contains(model.revealedURL, "token=secret") {
 		t.Fatalf("confirmed source reveal calls=%d URL=%q", client.revealCalls, model.revealedURL)
 	}
+	if !model.sourceDiagnosticOpen || !strings.Contains(model.View().Content, "只读诊断") {
+		t.Fatal("confirmed source reveal did not open read-only diagnostics")
+	}
+	updated, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	model = updated.(Model)
 	updated, _ = model.Update(tea.KeyPressMsg{Code: ']'})
 	model = updated.(Model)
 	if model.revealedURL != "" || strings.HasPrefix(model.sensitiveConfirm, "reveal:") {
