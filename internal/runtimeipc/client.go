@@ -105,6 +105,59 @@ func (c *Client) TrafficHistory(ctx context.Context, requestValue runtimeapi.Tra
 	return history, nil
 }
 
+func (c *Client) Logs(ctx context.Context, queryValue runtimeapi.LogQuery) (runtimeapi.LogPage, error) {
+	var page runtimeapi.LogPage
+	query := url.Values{}
+	if queryValue.Before > 0 {
+		query.Set("before", strconv.FormatUint(queryValue.Before, 10))
+	}
+	if queryValue.After > 0 {
+		query.Set("after", strconv.FormatUint(queryValue.After, 10))
+	}
+	if queryValue.Limit > 0 {
+		query.Set("limit", strconv.Itoa(queryValue.Limit))
+	}
+	if queryValue.Text != "" {
+		query.Set("text", queryValue.Text)
+	}
+	if queryValue.Level != "" {
+		query.Set("level", queryValue.Level)
+	}
+	if queryValue.Component != "" {
+		query.Set("component", queryValue.Component)
+	}
+	if !queryValue.Since.IsZero() {
+		query.Set("since", queryValue.Since.UTC().Format(time.RFC3339Nano))
+	}
+	if !queryValue.Until.IsZero() {
+		query.Set("until", queryValue.Until.UTC().Format(time.RFC3339Nano))
+	}
+	path := "/v1/logs"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return page, err
+	}
+	request, err := c.newRequest(ctx, http.MethodGet, path, nil, requestID)
+	if err != nil {
+		return page, err
+	}
+	response, err := c.do(request)
+	if err != nil {
+		return page, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return page, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, &page); err != nil {
+		return runtimeapi.LogPage{}, invalidResponseError("log response", err)
+	}
+	return page, nil
+}
+
 func (c *Client) Connections(ctx context.Context, queryValue runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error) {
 	var page runtimeapi.ConnectionPage
 	query := url.Values{}

@@ -30,7 +30,7 @@ var pageDefinitions = []pageDefinition{
 	{id: pageConfig, number: "2", title: "配置", regions: []string{"配置来源", "候选配置", "本机配置层", "配置操作", "最终规则", "代理组与节点"}},
 	{id: pageNetwork, number: "3", title: "网络", regions: []string{"当前网络", "网络预览", "网络操作"}},
 	{id: pageMonitor, number: "4", title: "监控", regions: []string{"实时概况", "速度曲线", "活动连接", "Runtime 事件"}},
-	{id: pageMaintenance, number: "5", title: "维护", regions: []string{"更新与回滚", "备份与恢复", "诊断", "运行操作"}},
+	{id: pageMaintenance, number: "5", title: "维护", regions: []string{"更新与回滚", "备份与恢复", "诊断", "运行操作", "日志"}},
 }
 
 func pageFromKey(key string) pageID {
@@ -225,6 +225,8 @@ func (m *Model) activateFocus() tea.Cmd {
 			}
 			m.status = "当前没有可查看的运行操作"
 			return nil
+		case 4:
+			return m.startLogViewer(runtimeapi.LogQuery{})
 		}
 	}
 	m.status = "当前区域为只读；使用 Tab 切换焦点或 / 搜索操作"
@@ -261,6 +263,7 @@ func paletteCommands() []paletteCommand {
 		{label: "编辑本机高级覆盖", keywords: "YAML 敏感", key: "o"},
 		{label: "预览或生成诊断包", keywords: "日志 故障", key: "ctrl+g"},
 		{label: "预览或生成完整诊断包", keywords: "完整日志 配置 网络 敏感", key: "G"},
+		{label: "打开脱敏日志查看器", keywords: "Runtime Mihomo 特权网络 级别 筛选", key: "l"},
 		{label: "检查 Mihomo 更新", keywords: "核心 升级", key: "U"},
 		{label: "检查 Runtime 产品更新", keywords: "升级", key: "P"},
 		{label: "创建脱敏备份清单", keywords: "导出", key: "b"},

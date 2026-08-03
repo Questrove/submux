@@ -51,6 +51,19 @@ type trafficObserver struct {
 	history func(context.Context, runtimeapi.PeerIdentity, runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error)
 }
 
+type logObserver struct {
+	observerFunc
+	logs func(context.Context, runtimeapi.PeerIdentity, runtimeapi.LogQuery) (runtimeapi.LogPage, error)
+}
+
+func (observer logObserver) Logs(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	query runtimeapi.LogQuery,
+) (runtimeapi.LogPage, error) {
+	return observer.logs(ctx, peer, query)
+}
+
 type connectionObserver struct {
 	observerFunc
 	connections func(context.Context, runtimeapi.PeerIdentity, runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error)
@@ -373,6 +386,58 @@ func TestTrafficHistoryHandlerUsesBoundedTimeOrCursorQuery(t *testing.T) {
 	recorder = serve("/v1/traffic/history?limit=1025")
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("unbounded traffic limit status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestLogHandlerUsesBoundedFiltersAndCursors(t *testing.T) {
+	var received runtimeapi.LogQuery
+	service := logObserver{
+		observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		},
+		logs: func(_ context.Context, peer runtimeapi.PeerIdentity, query runtimeapi.LogQuery) (runtimeapi.LogPage, error) {
+			if peer.UID != 1000 {
+				t.Fatalf("peer=%#v", peer)
+			}
+			received = query
+			return runtimeapi.LogPage{
+				Items:          []runtimeapi.LogEntry{{Cursor: 9, Component: runtimeapi.LogComponentMihomo, Level: runtimeapi.LogLevelError, Message: "dial failed"}},
+				EarliestCursor: 9, LatestCursor: 9,
+			}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set(HeaderRequestID, "request-logs")
+		request.Header.Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+		request.Header.Set(HeaderClientType, "tui")
+		request.Header.Set(HeaderClientVersion, "test")
+		request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	since := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	recorder := serve("/v1/logs?after=8&limit=200&component=mihomo&level=error&text=dial&since=" + since.Format(time.RFC3339Nano))
+	if recorder.Code != http.StatusOK || received.After != 8 || received.Limit != 200 ||
+		received.Component != runtimeapi.LogComponentMihomo || received.Level != runtimeapi.LogLevelError ||
+		received.Text != "dial" || !received.Since.Equal(since) || !strings.Contains(recorder.Body.String(), `"latest_cursor":9`) {
+		t.Fatalf("logs status=%d request=%#v body=%s", recorder.Code, received, recorder.Body.String())
+	}
+	for _, path := range []string{
+		"/v1/logs?before=7&after=8",
+		"/v1/logs?limit=1001",
+		"/v1/logs?component=unknown",
+		"/v1/logs?level=trace",
+		"/v1/logs?unknown=value",
+	} {
+		if invalid := serve(path); invalid.Code != http.StatusBadRequest {
+			t.Fatalf("invalid log query %q status=%d body=%s", path, invalid.Code, invalid.Body.String())
+		}
 	}
 }
 

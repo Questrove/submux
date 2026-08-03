@@ -19,6 +19,7 @@ var (
 	privateKeyPattern       = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----`)
 	windowsPathPattern      = regexp.MustCompile(`(?i)(?:[a-z]:[\\/]|\\\\)[^\s"'<>|]+`)
 	posixPathPattern        = regexp.MustCompile(`(^|[\s="'(])(/[A-Za-z0-9._~@%+,-]+(?:/[A-Za-z0-9._~@%+,-]+)+)`)
+	configBodyLinePattern   = regexp.MustCompile(`(?i)^\s*(?:proxies|proxy-groups|proxy-providers|rule-providers|rules|dns|tun|listeners|mixed-port|redir-port|tproxy-port|external-controller)\s*:`)
 )
 
 func RedactURL(raw string) string {
@@ -57,6 +58,17 @@ func RedactText(value string) string {
 	value = windowsPathPattern.ReplaceAllString(value, "<local-path>")
 	value = posixPathPattern.ReplaceAllString(value, `${1}<local-path>`)
 	return value
+}
+
+func RedactLogText(value string) string {
+	if value == "" {
+		return ""
+	}
+	if configBodyLinePattern.MatchString(value) {
+		return "[REDACTED CONFIG]"
+	}
+	value = urlPattern.ReplaceAllString(value, "<url>")
+	return RedactText(value)
 }
 
 func RedactError(err error) string {

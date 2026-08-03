@@ -1,6 +1,7 @@
 package runtimelog
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"submux/internal/runtimeapi"
 	"submux/internal/runtimeprivacy"
 	"submux/internal/safepath"
 )
@@ -22,7 +24,8 @@ const (
 	DefaultMaxBytes     = int64(50 << 20)
 	DefaultMaxFileBytes = int64(5 << 20)
 	DefaultGCInterval   = time.Hour
-	maxLogMessageBytes  = 64 << 10
+	maxLogMessageBytes  = 8 << 10
+	maxRecentLogEntries = 2000
 )
 
 type Store struct {
@@ -32,7 +35,11 @@ type Store struct {
 	MaxFileBytes int64
 	Now          func() time.Time
 
-	mu sync.Mutex
+	mu            sync.Mutex
+	lastCursor    uint64
+	startupCursor uint64
+	recentFloor   uint64
+	recent        []runtimeapi.LogEntry
 }
 
 type Writer struct {
@@ -45,9 +52,11 @@ type Writer struct {
 }
 
 type record struct {
+	Cursor  uint64    `json:"cursor,omitempty"`
 	At      time.Time `json:"at"`
 	Source  string    `json:"source"`
 	Stream  string    `json:"stream"`
+	Level   string    `json:"level,omitempty"`
 	Message string    `json:"message"`
 }
 
@@ -72,7 +81,18 @@ func Open(root string) (*Store, error) {
 	if err := os.Chmod(absolute, 0700); err != nil {
 		return nil, err
 	}
-	return &Store{Root: absolute}, nil
+	store := &Store{Root: absolute}
+	store.mu.Lock()
+	cursor, err := store.latestCursorLocked()
+	if err == nil {
+		store.lastCursor = cursor
+	} else if err != nil {
+		store.lastCursor = uint64(time.Now().UTC().UnixNano())
+	}
+	store.startupCursor = store.lastCursor
+	store.recentFloor = store.lastCursor
+	store.mu.Unlock()
+	return store, nil
 }
 
 func (s *Store) Writer(source, stream string) (*Writer, error) {
@@ -130,7 +150,7 @@ func (s *Store) GC() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, source := range []string{"runtime", "mihomo"} {
+	for _, source := range []string{runtimeapi.LogComponentRuntime, runtimeapi.LogComponentMihomo, runtimeapi.LogComponentNetwork} {
 		if err := s.gcSource(source, s.now()); err != nil {
 			return err
 		}
@@ -163,11 +183,21 @@ func (s *Store) writeRecord(source, stream, message string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	message = runtimeprivacy.RedactText(strings.TrimSpace(message))
+	message = runtimeprivacy.RedactLogText(strings.TrimSpace(message))
 	if len(message) > maxLogMessageBytes {
 		message = message[:maxLogMessageBytes] + "…"
 	}
-	encoded, err := json.Marshal(record{At: now, Source: source, Stream: stream, Message: message})
+	cursor := uint64(now.UnixNano())
+	if cursor <= s.lastCursor {
+		cursor = s.lastCursor + 1
+	}
+	s.lastCursor = cursor
+	level := detectLevel(stream, message)
+	encoded, err := json.Marshal(record{
+		Cursor: cursor,
+		At:     now, Source: source, Stream: stream,
+		Level: level, Message: message,
+	})
 	if err != nil {
 		return err
 	}
@@ -196,7 +226,285 @@ func (s *Store) writeRecord(source, stream, message string) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return s.gcSource(source, now)
+	if err := s.gcSource(source, now); err != nil {
+		return err
+	}
+	s.recent = append(s.recent, runtimeapi.LogEntry{
+		Cursor: cursor, At: now, Component: source, Stream: stream, Level: level, Message: message,
+	})
+	if len(s.recent) > maxRecentLogEntries {
+		dropped := len(s.recent) - maxRecentLogEntries
+		s.recentFloor = s.recent[dropped-1].Cursor
+		s.recent = append([]runtimeapi.LogEntry(nil), s.recent[dropped:]...)
+	}
+	return nil
+}
+
+func (s *Store) Query(query runtimeapi.LogQuery) (runtimeapi.LogPage, error) {
+	if s == nil {
+		return runtimeapi.LogPage{}, errors.New("Runtime log store is unavailable")
+	}
+	if query.Before != 0 && query.After != 0 {
+		return runtimeapi.LogPage{}, errors.New("Runtime log query cannot combine before and after cursors")
+	}
+	if query.Limit < 0 || query.Limit > runtimeapi.LogPageMaxSize {
+		return runtimeapi.LogPage{}, errors.New("Runtime log query limit is invalid")
+	}
+	if query.Limit == 0 {
+		query.Limit = runtimeapi.LogPageDefaultSize
+	}
+	if query.Component != "" && !validLogComponent(query.Component) {
+		return runtimeapi.LogPage{}, errors.New("Runtime log component filter is invalid")
+	}
+	if query.Level != "" && !validLogLevel(query.Level) {
+		return runtimeapi.LogPage{}, errors.New("Runtime log level filter is invalid")
+	}
+	query.Text = strings.TrimSpace(query.Text)
+	if len(query.Text) > 256 || (!query.Since.IsZero() && !query.Until.IsZero() && query.Since.After(query.Until)) {
+		return runtimeapi.LogPage{}, errors.New("Runtime log filter is invalid")
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var all []runtimeapi.LogEntry
+	var err error
+	resetRequired := false
+	if query.After != 0 && query.After >= s.startupCursor {
+		all = append([]runtimeapi.LogEntry(nil), s.recent...)
+		resetRequired = query.After < s.recentFloor
+	} else {
+		all, err = s.readEntriesLocked(query.Component)
+		if err != nil {
+			return runtimeapi.LogPage{}, err
+		}
+		resetRequired = query.After != 0 && len(all) > 0 && query.After < all[0].Cursor
+	}
+	page := runtimeapi.LogPage{Items: []runtimeapi.LogEntry{}, ObservedAt: s.now()}
+	page.ResetRequired = resetRequired
+	filtered := make([]runtimeapi.LogEntry, 0, len(all))
+	text := strings.ToLower(query.Text)
+	for _, entry := range all {
+		if query.Component != "" && entry.Component != query.Component {
+			continue
+		}
+		if query.Level != "" && entry.Level != query.Level {
+			continue
+		}
+		if text != "" && !strings.Contains(strings.ToLower(entry.Message), text) {
+			continue
+		}
+		if !query.Since.IsZero() && entry.At.Before(query.Since) {
+			continue
+		}
+		if !query.Until.IsZero() && entry.At.After(query.Until) {
+			continue
+		}
+		if query.Before != 0 && entry.Cursor >= query.Before {
+			continue
+		}
+		if query.After != 0 && !resetRequired && entry.Cursor <= query.After {
+			continue
+		}
+		entry.Message = runtimeprivacy.RedactLogText(entry.Message)
+		filtered = append(filtered, entry)
+	}
+	if len(filtered) == 0 {
+		return page, nil
+	}
+	start, end := 0, len(filtered)
+	if query.After != 0 && !resetRequired {
+		if end > query.Limit {
+			end = query.Limit
+			page.HasNewer = len(filtered) > end
+		}
+	} else if end > query.Limit {
+		start = end - query.Limit
+		page.HasOlder = true
+	}
+	page.Items = append(page.Items, filtered[start:end]...)
+	page.EarliestCursor = page.Items[0].Cursor
+	page.LatestCursor = page.Items[len(page.Items)-1].Cursor
+	return page, nil
+}
+
+func (s *Store) latestCursorLocked() (uint64, error) {
+	entries, err := os.ReadDir(s.Root)
+	if err != nil {
+		return 0, err
+	}
+	latest := uint64(0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		component := strings.SplitN(entry.Name(), "-", 2)[0]
+		component = strings.TrimSuffix(component, ".log")
+		if !validLogComponent(component) {
+			continue
+		}
+		line, err := readLastLogLine(filepath.Join(s.Root, entry.Name()))
+		if err != nil {
+			return 0, err
+		}
+		if len(line) == 0 {
+			continue
+		}
+		var item record
+		if err := json.Unmarshal(line, &item); err != nil {
+			return 0, err
+		}
+		cursor := item.Cursor
+		if cursor == 0 && !item.At.IsZero() {
+			cursor = uint64(item.At.UnixNano())
+		}
+		if cursor > latest {
+			latest = cursor
+		}
+	}
+	return latest, nil
+}
+
+func readLastLogLine(name string) ([]byte, error) {
+	file, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil || info.Size() == 0 {
+		return nil, err
+	}
+	const tailBytes = maxLogMessageBytes + (16 << 10)
+	start := info.Size() - tailBytes
+	if start < 0 {
+		start = 0
+	}
+	body := make([]byte, info.Size()-start)
+	if _, err := file.ReadAt(body, start); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	body = []byte(strings.TrimSpace(string(body)))
+	if len(body) == 0 {
+		return nil, nil
+	}
+	if index := strings.LastIndexByte(string(body), '\n'); index >= 0 {
+		body = body[index+1:]
+	}
+	return body, nil
+}
+
+func (s *Store) readEntriesLocked(component string) ([]runtimeapi.LogEntry, error) {
+	entries, err := os.ReadDir(s.Root)
+	if err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".log") {
+			continue
+		}
+		nameComponent := strings.SplitN(entry.Name(), "-", 2)[0]
+		if strings.HasSuffix(nameComponent, ".log") {
+			nameComponent = strings.TrimSuffix(nameComponent, ".log")
+		}
+		managed := validLogComponent(nameComponent)
+		if !managed || component != "" && nameComponent != component {
+			continue
+		}
+		paths = append(paths, filepath.Join(s.Root, entry.Name()))
+	}
+	sort.Strings(paths)
+	result := make([]runtimeapi.LogEntry, 0)
+	for _, name := range paths {
+		file, err := os.Open(name)
+		if err != nil {
+			return nil, err
+		}
+		scanner := bufio.NewScanner(file)
+		scanner.Buffer(make([]byte, 64<<10), maxLogMessageBytes+(16<<10))
+		for scanner.Scan() {
+			var item record
+			if err := json.Unmarshal(scanner.Bytes(), &item); err != nil {
+				_ = file.Close()
+				return nil, errors.New("Runtime log file contains an invalid record")
+			}
+			if item.At.IsZero() || !validLogComponent(item.Source) || !validComponent(item.Stream) {
+				_ = file.Close()
+				return nil, errors.New("Runtime log file contains invalid metadata")
+			}
+			level := item.Level
+			if !validLogLevel(level) {
+				level = detectLevel(item.Stream, item.Message)
+			}
+			result = append(result, runtimeapi.LogEntry{
+				Cursor: item.Cursor, At: item.At.UTC(), Component: item.Source,
+				Stream: item.Stream, Level: level, Message: item.Message,
+			})
+		}
+		scanErr := scanner.Err()
+		closeErr := file.Close()
+		if scanErr != nil || closeErr != nil {
+			return nil, errors.Join(scanErr, closeErr)
+		}
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		if result[left].At.Equal(result[right].At) {
+			return result[left].Cursor < result[right].Cursor
+		}
+		return result[left].At.Before(result[right].At)
+	})
+	var cursor uint64
+	for index := range result {
+		if result[index].Cursor <= cursor {
+			candidate := uint64(result[index].At.UnixNano())
+			if candidate <= cursor {
+				candidate = cursor + 1
+			}
+			result[index].Cursor = candidate
+		}
+		cursor = result[index].Cursor
+	}
+	return result, nil
+}
+
+func detectLevel(stream, message string) string {
+	value := strings.ToLower(message)
+	for _, candidate := range []struct {
+		needle string
+		level  string
+	}{
+		{"debug", runtimeapi.LogLevelDebug},
+		{"warn", runtimeapi.LogLevelWarn},
+		{"error", runtimeapi.LogLevelError},
+		{"fatal", runtimeapi.LogLevelError},
+		{"failed", runtimeapi.LogLevelError},
+	} {
+		if strings.Contains(value, candidate.needle) {
+			return candidate.level
+		}
+	}
+	if stream == "stderr" {
+		return runtimeapi.LogLevelError
+	}
+	return runtimeapi.LogLevelInfo
+}
+
+func validLogComponent(value string) bool {
+	switch value {
+	case runtimeapi.LogComponentRuntime, runtimeapi.LogComponentMihomo, runtimeapi.LogComponentNetwork:
+		return true
+	default:
+		return false
+	}
+}
+
+func validLogLevel(value string) bool {
+	switch value {
+	case runtimeapi.LogLevelDebug, runtimeapi.LogLevelInfo, runtimeapi.LogLevelWarn, runtimeapi.LogLevelError:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Store) gcSource(source string, now time.Time) error {

@@ -66,6 +66,10 @@ type RuleClient interface {
 	Rules(context.Context, runtimeapi.RuleQuery) (runtimeapi.RuleSet, error)
 }
 
+type LogClient interface {
+	Logs(context.Context, runtimeapi.LogQuery) (runtimeapi.LogPage, error)
+}
+
 type Model struct {
 	ctx                   context.Context
 	client                Client
@@ -146,6 +150,19 @@ type Model struct {
 	proxyGroupLoading     bool
 	proxyGroupFault       error
 	proxyGroupGeneration  uint64
+	logViewerOpen         bool
+	logFilter             *logFilterForm
+	logQuery              runtimeapi.LogQuery
+	logEntries            []runtimeapi.LogEntry
+	logHasOlder           bool
+	logPaused             bool
+	logLoading            bool
+	logStale              bool
+	logFault              error
+	logLastSuccess        time.Time
+	logGeneration         uint64
+	logFailures           int
+	logSelected           int
 }
 
 const (
@@ -215,6 +232,22 @@ type connectionTickMsg struct {
 type trafficPolicyPreviewMsg struct {
 	preview   runtimeapi.CandidatePreview
 	selection string
+}
+
+type logPageMsg struct {
+	page       runtimeapi.LogPage
+	mode       string
+	generation uint64
+}
+
+type logPageErrorMsg struct {
+	err        error
+	mode       string
+	generation uint64
+}
+
+type logTickMsg struct {
+	generation uint64
 }
 
 type ruleSetMsg struct {
@@ -492,6 +525,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.trafficHistoryCmd(false)
+	case logPageMsg:
+		return m.acceptLogPage(message)
+	case logPageErrorMsg:
+		return m.acceptLogPageError(message)
+	case logTickMsg:
+		if !m.logViewerOpen || m.logPaused || message.generation != m.logGeneration || m.logLoading {
+			return m, nil
+		}
+		return m, m.startLogRequest(logPageModeFollow)
 	case connectionPageMsg:
 		if m.page != pageMonitor || message.query != m.connectionQuery || message.generation != m.connectionsGeneration {
 			return m, nil
@@ -788,6 +830,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			switch key.String() {
 			case "q", "ctrl+c":
 				return m, tea.Quit
+			case "l":
+				m.operationDetailOpen = false
+				start := m.lastOperation.CreatedAt
+				end := m.lastOperation.UpdatedAt
+				if !start.IsZero() {
+					start = start.Add(-30 * time.Second)
+				}
+				if end.IsZero() {
+					end = time.Now()
+				}
+				end = end.Add(30 * time.Second)
+				return m, m.startLogViewer(runtimeapi.LogQuery{Since: start, Until: end})
 			case "esc", "enter":
 				m.operationDetailOpen = false
 				m.status = "已关闭运行操作详情"
@@ -798,6 +852,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.sourceForm != nil {
 		return m.updateSourceForm(message)
+	}
+	if m.logViewerOpen {
+		return m.updateLogViewer(message)
 	}
 	if m.networkForm != nil {
 		return m.updateNetworkForm(message)
@@ -1006,6 +1063,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在读取 Runtime 状态…"
 			return m, m.startObserveCmd()
+		case "l":
+			return m, m.startLogViewer(runtimeapi.LogQuery{})
 		case "i":
 			m.editing = true
 			m.editorMode = editorModeConfig

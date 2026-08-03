@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 
@@ -14,6 +15,7 @@ import (
 type Connector struct {
 	Endpoint          string
 	RuntimeInstanceID string
+	Log               io.Writer
 
 	mu     sync.Mutex
 	client *Client
@@ -319,9 +321,12 @@ func (connector *Connector) clientForLocked(ctx context.Context) (*Client, error
 	}
 	client, err := Dial(ctx, connector.Endpoint, connector.RuntimeInstanceID)
 	if err != nil {
+		connector.logf("ERROR privileged network connection failed: %v", err)
 		return nil, err
 	}
+	client.Log = connector.Log
 	connector.client = client
+	connector.logf("INFO privileged network connection established")
 	return client, nil
 }
 
@@ -340,7 +345,19 @@ func (connector *Connector) closeLocked() error {
 	}
 	err := connector.client.Close()
 	connector.client = nil
+	if err != nil {
+		connector.logf("ERROR privileged network connection close failed: %v", err)
+	} else {
+		connector.logf("INFO privileged network connection closed")
+	}
 	return err
+}
+
+func (connector *Connector) logf(format string, arguments ...any) {
+	if connector == nil || connector.Log == nil {
+		return
+	}
+	_, _ = fmt.Fprintf(connector.Log, format+"\n", arguments...)
 }
 
 func committedPayload(

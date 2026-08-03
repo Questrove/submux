@@ -13,6 +13,16 @@ import (
 )
 
 func (m Model) View() tea.View {
+	if m.logViewerOpen {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderLogViewer(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
 	if m.operationDetailOpen {
 		return tea.NewView(strings.Join([]string{
 			m.renderShellHeader(),
@@ -630,6 +640,20 @@ func (m Model) renderMaintenancePage() string {
 	}
 
 	lines = append(lines, "", m.focusHeading(3, "运行操作"), m.operationLine(), mutedStyle.Render("Enter 查看阶段、错误、恢复和产物详情"))
+	lines = append(lines, "", m.focusHeading(4, "日志"))
+	if len(m.logEntries) == 0 {
+		lines = append(lines, mutedStyle.Render("Enter 打开默认最近 200 条 Runtime、Mihomo 与特权网络脱敏日志"))
+	} else {
+		latest := m.logEntries[len(m.logEntries)-1]
+		state := "跟随中"
+		if m.logPaused {
+			state = "已暂停"
+		}
+		if m.logStale {
+			state += " · 数据可能过期"
+		}
+		lines = append(lines, fmt.Sprintf("%d 条 · %s · 最近 %s %s/%s", len(m.logEntries), state, latest.At.Local().Format("15:04:05"), latest.Component, latest.Stream))
+	}
 	return strings.Join(lines, "\n")
 }
 
@@ -677,7 +701,7 @@ func (m Model) renderOperationDetail() string {
 			lines = append(lines, "产品恢复点 "+result.ProductRollback)
 		}
 	}
-	lines = append(lines, "", "Esc 或 Enter 返回")
+	lines = append(lines, "", "l 查看该操作时间范围的日志 · Esc 或 Enter 返回")
 	return strings.Join(lines, "\n")
 }
 

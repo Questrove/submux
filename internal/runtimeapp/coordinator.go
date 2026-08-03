@@ -88,6 +88,10 @@ type ProxyGroupObserver interface {
 	ProxyGroups(context.Context, runtimeapi.ProxyGroupQuery) (runtimeapi.ProxyGroupList, error)
 }
 
+type LogService interface {
+	Query(runtimeapi.LogQuery) (runtimeapi.LogPage, error)
+}
+
 func (c *Coordinator) ProxyGroups(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -122,6 +126,23 @@ func (c *Coordinator) Rules(
 		return runtimeapi.RuleSet{}, errors.New("Runtime final rule viewer is unavailable")
 	}
 	return observer.AppliedRules(ctx, query)
+}
+
+func (c *Coordinator) Logs(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	query runtimeapi.LogQuery,
+) (runtimeapi.LogPage, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.LogPage{}, err
+	}
+	if peer.Key() == "" {
+		return runtimeapi.LogPage{}, errors.New("Runtime log observer identity is required")
+	}
+	if c == nil || c.LogStore == nil {
+		return runtimeapi.LogPage{}, errors.New("Runtime log viewer is unavailable")
+	}
+	return c.LogStore.Query(query)
 }
 
 func (c *Coordinator) Connections(
@@ -184,6 +205,7 @@ type Coordinator struct {
 	ProductUpdates ProductUpdateService
 	Backups        BackupService
 	Traffic        TrafficService
+	LogStore       LogService
 	Version        string
 	Now            func() time.Time
 	QueueCapacity  int

@@ -35,6 +35,7 @@ type Controller interface {
 type Client struct {
 	endpoint          string
 	runtimeInstanceID string
+	Log               io.Writer
 
 	mu       sync.Mutex
 	http     *http.Client
@@ -433,7 +434,18 @@ func (err *transportError) Unwrap() error {
 	return err.err
 }
 
-func (c *Client) postLocked(ctx context.Context, path string, request any, response any) error {
+func (c *Client) postLocked(ctx context.Context, path string, request any, response any) (resultErr error) {
+	started := time.Now()
+	defer func() {
+		if c.Log == nil {
+			return
+		}
+		if resultErr != nil {
+			_, _ = fmt.Fprintf(c.Log, "ERROR %s failed after %s: %v\n", path, time.Since(started).Round(time.Millisecond), resultErr)
+			return
+		}
+		_, _ = fmt.Fprintf(c.Log, "INFO %s completed in %s\n", path, time.Since(started).Round(time.Millisecond))
+	}()
 	if err := contextError(ctx); err != nil {
 		return err
 	}

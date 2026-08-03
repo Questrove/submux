@@ -50,6 +50,22 @@ type fakeClient struct {
 	ruleSets                  []runtimeapi.RuleSet
 	ruleError                 error
 	candidateRequests         []runtimeapi.PreviewCandidateRequest
+	logRequests               []runtimeapi.LogQuery
+	logPages                  []runtimeapi.LogPage
+	logError                  error
+}
+
+func (f *fakeClient) Logs(_ context.Context, query runtimeapi.LogQuery) (runtimeapi.LogPage, error) {
+	f.logRequests = append(f.logRequests, query)
+	if f.logError != nil {
+		return runtimeapi.LogPage{}, f.logError
+	}
+	if len(f.logPages) == 0 {
+		return runtimeapi.LogPage{Items: []runtimeapi.LogEntry{}, ObservedAt: time.Now()}, nil
+	}
+	page := f.logPages[0]
+	f.logPages = f.logPages[1:]
+	return page, nil
 }
 
 func (f *fakeClient) Rules(_ context.Context, query runtimeapi.RuleQuery) (runtimeapi.RuleSet, error) {

@@ -43,6 +43,16 @@ type trafficServiceStub struct {
 	connections runtimeapi.ConnectionPage
 }
 
+type logServiceStub struct {
+	page  runtimeapi.LogPage
+	query runtimeapi.LogQuery
+}
+
+func (service *logServiceStub) Query(query runtimeapi.LogQuery) (runtimeapi.LogPage, error) {
+	service.query = query
+	return service.page, nil
+}
+
 func (service trafficServiceStub) Status() runtimeapi.TrafficStatus {
 	return service.status
 }
@@ -181,6 +191,7 @@ func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
 	}
 	defer state.Close()
 	called := 0
+	logs := &logServiceStub{page: runtimeapi.LogPage{Items: []runtimeapi.LogEntry{{Cursor: 9, Message: "ready"}}, LatestCursor: 9}}
 	coordinator := &Coordinator{
 		State: state,
 		Network: networkServiceFunc{
@@ -215,7 +226,8 @@ func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
 				Total: 1, Page: 1, PageSize: 20,
 			},
 		},
-		Version: "test",
+		LogStore: logs,
+		Version:  "test",
 	}
 	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
 	preview, err := coordinator.PreviewNetwork(t.Context(), peer, runtimeapi.NetworkPreviewRequest{
@@ -243,6 +255,10 @@ func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
 	connections, err := coordinator.Connections(t.Context(), peer, runtimeapi.ConnectionQuery{Target: "example"})
 	if err != nil || connections.Total != 1 || connections.Items[0].ID != "connection-1" {
 		t.Fatalf("connections=%#v err=%v", connections, err)
+	}
+	logPage, err := coordinator.Logs(t.Context(), peer, runtimeapi.LogQuery{After: 8, Limit: 20})
+	if err != nil || logPage.LatestCursor != 9 || logs.query.After != 8 || logs.query.Limit != 20 {
+		t.Fatalf("logs=%#v query=%#v err=%v", logPage, logs.query, err)
 	}
 }
 

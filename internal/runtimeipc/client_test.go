@@ -67,6 +67,37 @@ func TestClientTrafficHistoryEncodesSinceTime(t *testing.T) {
 	}
 }
 
+func TestClientReadsFilteredLogsWithCursor(t *testing.T) {
+	since := time.Date(2026, 8, 3, 12, 0, 0, 123, time.UTC)
+	client := &Client{
+		clientType: "tui",
+		version:    "test",
+		http: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			query := request.URL.Query()
+			if request.URL.Path != "/v1/logs" || query.Get("after") != "7" || query.Get("limit") != "200" ||
+				query.Get("component") != runtimeapi.LogComponentRuntime || query.Get("level") != runtimeapi.LogLevelWarn ||
+				query.Get("text") != "retry" || query.Get("since") != since.Format(time.RFC3339Nano) {
+				t.Fatalf("request=%s", request.URL.String())
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"items":[{"cursor":8,"at":"2026-08-03T12:00:00Z","component":"runtime","stream":"service","level":"warn","message":"retry"}],"earliest_cursor":8,"latest_cursor":8,"observed_at":"2026-08-03T12:00:01Z"}`,
+				)),
+				Request: request,
+			}, nil
+		})},
+	}
+	page, err := client.Logs(t.Context(), runtimeapi.LogQuery{
+		After: 7, Limit: 200, Component: runtimeapi.LogComponentRuntime,
+		Level: runtimeapi.LogLevelWarn, Text: "retry", Since: since,
+	})
+	if err != nil || page.LatestCursor != 8 || len(page.Items) != 1 || page.Items[0].Message != "retry" {
+		t.Fatalf("logs=%#v err=%v", page, err)
+	}
+}
+
 func TestClientReadsFilteredConnectionPage(t *testing.T) {
 	client := &Client{
 		clientType: "tui",

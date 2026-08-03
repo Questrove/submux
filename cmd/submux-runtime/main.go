@@ -233,10 +233,21 @@ func runServeContext(parent context.Context, arguments []string, stderr io.Write
 		writeCLIError(stderr, runtimeapi.ErrorInternal, err.Error(), false)
 		return 1
 	}
+	defer mihomoStdout.Flush()
 	mihomoStderr, err := logs.Writer("mihomo", "stderr")
 	if err != nil {
 		writeCLIError(stderr, runtimeapi.ErrorInternal, err.Error(), false)
 		return 1
+	}
+	defer mihomoStderr.Flush()
+	networkLogWriter, err := logs.Writer("network", "privileged-ipc")
+	if err != nil {
+		writeCLIError(stderr, runtimeapi.ErrorInternal, err.Error(), false)
+		return 1
+	}
+	defer networkLogWriter.Flush()
+	if network != nil {
+		network.Log = networkLogWriter
 	}
 
 	listener, err := runtimeipc.Listen(*endpoint)
@@ -360,6 +371,7 @@ func runServeContext(parent context.Context, arguments []string, stderr io.Write
 		ProductUpdates: productUpdateManager,
 		Backups:        backupManager,
 		Traffic:        trafficCollector,
+		LogStore:       logs,
 		Diagnostics: &runtimediag.Service{
 			State:          state,
 			StateRoot:      *stateRoot,

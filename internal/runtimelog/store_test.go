@@ -2,11 +2,14 @@ package runtimelog
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"submux/internal/runtimeapi"
 )
 
 func TestStoreRedactsAndBoundsLogsByAgeAndSize(t *testing.T) {
@@ -66,6 +69,106 @@ func TestStoreRedactsAndBoundsLogsByAgeAndSize(t *testing.T) {
 	}
 	if _, err := os.Stat(old); !os.IsNotExist(err) {
 		t.Fatalf("old Runtime log still exists: %v", err)
+	}
+}
+
+func TestQueryReturnsLatestPageFiltersAndCursorCatchUp(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 3, 1, 0, 0, 0, time.UTC)
+	store.Now = func() time.Time {
+		now = now.Add(time.Millisecond)
+		return now
+	}
+	runtimeWriter, _ := store.Writer(runtimeapi.LogComponentRuntime, "service")
+	mihomoWriter, _ := store.Writer(runtimeapi.LogComponentMihomo, "stderr")
+	networkWriter, _ := store.Writer(runtimeapi.LogComponentNetwork, "privileged-ipc")
+	for index := 0; index < 205; index++ {
+		_, _ = runtimeWriter.Write([]byte("INFO runtime healthy\n"))
+	}
+	_, _ = mihomoWriter.Write([]byte("ERROR dial failed\n"))
+	_, _ = networkWriter.Write([]byte("WARN privileged reconnect\n"))
+
+	page, err := store.Query(runtimeapi.LogQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != runtimeapi.LogPageDefaultSize || !page.HasOlder || page.EarliestCursor == 0 || page.LatestCursor == 0 {
+		t.Fatalf("default page=%#v", page)
+	}
+	for index := 1; index < len(page.Items); index++ {
+		if page.Items[index-1].Cursor >= page.Items[index].Cursor {
+			t.Fatalf("log page is not ascending: %#v", page.Items[index-1:index+1])
+		}
+	}
+
+	filtered, err := store.Query(runtimeapi.LogQuery{
+		Component: runtimeapi.LogComponentNetwork,
+		Level:     runtimeapi.LogLevelWarn,
+		Text:      "reconnect",
+	})
+	if err != nil || len(filtered.Items) != 1 || filtered.Items[0].Component != runtimeapi.LogComponentNetwork {
+		t.Fatalf("filtered page=%#v err=%v", filtered, err)
+	}
+
+	older, err := store.Query(runtimeapi.LogQuery{Before: page.EarliestCursor, Limit: 20})
+	if err != nil || len(older.Items) != 7 || older.HasOlder {
+		t.Fatalf("older page=%#v err=%v", older, err)
+	}
+	_, _ = runtimeWriter.Write([]byte("DEBUG bounded catch-up\n"))
+	catchUp, err := store.Query(runtimeapi.LogQuery{After: page.LatestCursor, Limit: 20})
+	if err != nil || len(catchUp.Items) != 1 || catchUp.Items[0].Level != runtimeapi.LogLevelDebug {
+		t.Fatalf("catch-up page=%#v err=%v", catchUp, err)
+	}
+}
+
+func TestQueryNeverReturnsFullURLsPathsOrConfigurationBodies(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "logs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, _ := store.Writer(runtimeapi.LogComponentMihomo, "stderr")
+	_, _ = writer.Write([]byte("GET https://user:pass@example.com/private/config.yaml?token=secret C:\\private\\config.yaml\n"))
+	_, _ = writer.Write([]byte("proxies: [{name: secret-node, password: secret-pass}]\n"))
+	page, err := store.Query(runtimeapi.LogQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"example.com/private/config.yaml", "user:pass", "secret", `C:\\private\\config.yaml`, "secret-node"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("log query exposed %q: %s", secret, encoded)
+		}
+	}
+}
+
+func TestCorruptLogOnlyBreaksQueriesAndDoesNotBlockRuntimeLogging(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "logs")
+	if err := os.MkdirAll(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "runtime.log"), []byte("not-json\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(root)
+	if err != nil {
+		t.Fatalf("corrupt retained log blocked Runtime startup: %v", err)
+	}
+	if _, err := store.Query(runtimeapi.LogQuery{}); err == nil {
+		t.Fatal("corrupt retained log did not fail the isolated log query")
+	}
+	writer, err := store.Writer(runtimeapi.LogComponentRuntime, "service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("INFO Runtime continues\n")); err != nil {
+		t.Fatalf("corrupt retained log blocked new Runtime logging: %v", err)
 	}
 }
 

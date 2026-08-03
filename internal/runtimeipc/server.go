@@ -32,6 +32,10 @@ type TrafficObserver interface {
 	TrafficHistory(context.Context, runtimeapi.PeerIdentity, runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error)
 }
 
+type LogObserver interface {
+	Logs(context.Context, runtimeapi.PeerIdentity, runtimeapi.LogQuery) (runtimeapi.LogPage, error)
+}
+
 type ConnectionObserver interface {
 	Connections(context.Context, runtimeapi.PeerIdentity, runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error)
 }
@@ -87,6 +91,7 @@ type Server struct {
 	observer           Observer
 	eventObserver      EventObserver
 	trafficObserver    TrafficObserver
+	logObserver        LogObserver
 	connectionObserver ConnectionObserver
 	ruleObserver       RuleObserver
 	proxyGroupObserver ProxyGroupObserver
@@ -120,6 +125,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	backups, _ := observer.(BackupOperator)
 	eventObserver, _ := observer.(EventObserver)
 	trafficObserver, _ := observer.(TrafficObserver)
+	logObserver, _ := observer.(LogObserver)
 	connectionObserver, _ := observer.(ConnectionObserver)
 	ruleObserver, _ := observer.(RuleObserver)
 	proxyGroupObserver, _ := observer.(ProxyGroupObserver)
@@ -131,6 +137,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		observer:           observer,
 		eventObserver:      eventObserver,
 		trafficObserver:    trafficObserver,
+		logObserver:        logObserver,
 		connectionObserver: connectionObserver,
 		ruleObserver:       ruleObserver,
 		proxyGroupObserver: proxyGroupObserver,
@@ -193,6 +200,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/snapshot", s.handleSnapshot)
 	mux.HandleFunc("/v1/events", s.handleEvents)
 	mux.HandleFunc("/v1/traffic/history", s.handleTrafficHistory)
+	mux.HandleFunc("/v1/logs", s.handleLogs)
 	mux.HandleFunc("/v1/connections", s.handleConnections)
 	mux.HandleFunc("/v1/rules", s.handleRules)
 	mux.HandleFunc("/v1/proxy-groups", s.handleProxyGroups)
@@ -448,6 +456,115 @@ func (s *Server) handleTrafficHistory(writer http.ResponseWriter, request *http.
 	}
 	writer.Header().Set(HeaderRequestID, requestID)
 	s.writeJSON(writer, http.StatusOK, history)
+}
+
+func (s *Server) handleLogs(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime log viewer only accepts GET", false)
+		return
+	}
+	if requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log viewer does not accept a request body", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.logObserver == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime log viewer is unavailable", true)
+		return
+	}
+	allowed := map[string]bool{
+		"before": true, "after": true, "limit": true, "text": true,
+		"level": true, "component": true, "since": true, "until": true,
+	}
+	for key := range request.URL.Query() {
+		if !allowed[key] {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log query contains an unsupported parameter", false)
+			return
+		}
+	}
+	query := runtimeapi.LogQuery{
+		Text:      strings.TrimSpace(request.URL.Query().Get("text")),
+		Level:     strings.ToLower(strings.TrimSpace(request.URL.Query().Get("level"))),
+		Component: strings.ToLower(strings.TrimSpace(request.URL.Query().Get("component"))),
+	}
+	if utf8.RuneCountInString(query.Text) > 256 {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log text filter is too long", false)
+		return
+	}
+	if query.Level != "" && query.Level != runtimeapi.LogLevelDebug && query.Level != runtimeapi.LogLevelInfo &&
+		query.Level != runtimeapi.LogLevelWarn && query.Level != runtimeapi.LogLevelError {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log level filter is invalid", false)
+		return
+	}
+	if query.Component != "" && query.Component != runtimeapi.LogComponentRuntime &&
+		query.Component != runtimeapi.LogComponentMihomo && query.Component != runtimeapi.LogComponentNetwork {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log component filter is invalid", false)
+		return
+	}
+	var err error
+	if value := request.URL.Query().Get("before"); value != "" {
+		query.Before, err = strconv.ParseUint(value, 10, 64)
+		if err != nil || query.Before == 0 {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log before cursor is invalid", false)
+			return
+		}
+	}
+	if value := request.URL.Query().Get("after"); value != "" {
+		query.After, err = strconv.ParseUint(value, 10, 64)
+		if err != nil || query.After == 0 {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log after cursor is invalid", false)
+			return
+		}
+	}
+	if query.Before != 0 && query.After != 0 {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log query cannot combine before and after cursors", false)
+		return
+	}
+	if value := request.URL.Query().Get("limit"); value != "" {
+		query.Limit, err = strconv.Atoi(value)
+		if err != nil || query.Limit <= 0 || query.Limit > runtimeapi.LogPageMaxSize {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log limit is invalid", false)
+			return
+		}
+	}
+	if value := request.URL.Query().Get("since"); value != "" {
+		query.Since, err = time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log since time is invalid", false)
+			return
+		}
+	}
+	if value := request.URL.Query().Get("until"); value != "" {
+		query.Until, err = time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log until time is invalid", false)
+			return
+		}
+	}
+	if !query.Since.IsZero() && !query.Until.IsZero() && query.Since.After(query.Until) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime log time range is invalid", false)
+		return
+	}
+	page, err := s.logObserver.Logs(request.Context(), peer, query)
+	if err != nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime logs are temporarily unavailable", true)
+		return
+	}
+	body, err := json.Marshal(page)
+	if err != nil || len(body) > MaxResponseBytes {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime log response exceeds the size limit", true)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, page)
 }
 
 func (s *Server) handleBackupPreview(writer http.ResponseWriter, request *http.Request) {
