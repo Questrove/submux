@@ -41,6 +41,7 @@ type Snapshot struct {
 	Operations        OperationStatus `json:"operations"`
 	Updates           UpdateStatus    `json:"updates"`
 	Backups           BackupStatus    `json:"backups"`
+	Traffic           TrafficStatus   `json:"traffic"`
 	LatestEventCursor uint64          `json:"latest_event_cursor"`
 	ObservedAt        time.Time       `json:"observed_at"`
 }

@@ -39,6 +39,7 @@ import (
 	"submux/internal/runtimeprocess"
 	"submux/internal/runtimesource"
 	"submux/internal/runtimestate"
+	"submux/internal/runtimetraffic"
 	"submux/internal/runtimetui"
 	"submux/internal/runtimeupdate"
 )
@@ -265,6 +266,9 @@ func runServeContext(parent context.Context, arguments []string, stderr io.Write
 		process.Delegate = delegate
 	}
 	control := runtimeprocess.ControlProbe{Endpoint: defaults.ControlEndpoint}
+	trafficCollector := &runtimetraffic.Collector{
+		Reader: runtimetraffic.MihomoReader{Endpoint: defaults.ControlEndpoint},
+	}
 	verifier := &mihomo.RuntimeCheck{
 		Control:    control,
 		ProxyProbe: mihomo.LocalHTTPProxyProbe{},
@@ -350,6 +354,7 @@ func runServeContext(parent context.Context, arguments []string, stderr io.Write
 		Updates:        updateManager,
 		ProductUpdates: productUpdateManager,
 		Backups:        backupManager,
+		Traffic:        trafficCollector,
 		Diagnostics: &runtimediag.Service{
 			State:          state,
 			StateRoot:      *stateRoot,
@@ -394,10 +399,19 @@ func runServeContext(parent context.Context, arguments []string, stderr io.Write
 			stop()
 		}
 	}()
+	trafficResult := make(chan error, 1)
+	go func() {
+		trafficErr := trafficCollector.Run(serviceContext)
+		trafficResult <- trafficErr
+		if trafficErr != nil {
+			stop()
+		}
+	}()
 	serverErr := server.Serve(serviceContext, listener)
 	stop()
 	workerErr := <-workerResult
 	logGCErr := <-logGCResult
+	trafficErr := <-trafficResult
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelShutdown()
 	var networkErr error
@@ -408,7 +422,7 @@ func runServeContext(parent context.Context, arguments []string, stderr io.Write
 	if networkErr == nil {
 		processErr = process.Stop(shutdownContext)
 	}
-	if err := errors.Join(serverErr, workerErr, logGCErr, processErr, networkErr); err != nil {
+	if err := errors.Join(serverErr, workerErr, logGCErr, trafficErr, processErr, networkErr); err != nil {
 		runtimeLogger.Printf("service stopped with error: %s", runtimeprivacy.RedactError(err))
 		writeCLIError(stderr, runtimeapi.ErrorServiceUnavailable, err.Error(), true)
 		return 1
@@ -475,6 +489,17 @@ func runStatus(arguments []string, stdout io.Writer, stderr io.Writer) int {
 	}
 	if snapshot.Mihomo.Fault != nil {
 		fmt.Fprintf(stdout, "Mihomo fault: %s: %s\n", snapshot.Mihomo.Fault.Code, snapshot.Mihomo.Fault.Message)
+	}
+	if snapshot.Traffic.Available {
+		fmt.Fprintf(
+			stdout,
+			"Traffic bytes/s up/down: %d / %d; run bytes up/down: %d / %d; connections: %d\n",
+			snapshot.Traffic.UploadSpeed,
+			snapshot.Traffic.DownloadSpeed,
+			snapshot.Traffic.UploadTotal,
+			snapshot.Traffic.DownloadTotal,
+			snapshot.Traffic.ActiveConnections,
+		)
 	}
 	fmt.Fprintf(stdout, "Revision: %d\n", snapshot.Revision)
 	writeNetworkStatus(stdout, snapshot.Network)

@@ -29,7 +29,7 @@ var pageDefinitions = []pageDefinition{
 	{id: pageStatus, number: "1", title: "状态", regions: []string{"运行状态", "当前来源", "最近运行操作"}},
 	{id: pageConfig, number: "2", title: "配置", regions: []string{"配置来源", "候选配置", "本机配置层", "配置操作"}},
 	{id: pageNetwork, number: "3", title: "网络", regions: []string{"当前网络", "网络预览", "网络操作"}},
-	{id: pageMonitor, number: "4", title: "监控", regions: []string{"实时概况", "Runtime 事件"}},
+	{id: pageMonitor, number: "4", title: "监控", regions: []string{"实时概况", "速度曲线", "Runtime 事件"}},
 	{id: pageMaintenance, number: "5", title: "维护", regions: []string{"更新与回滚", "备份与恢复", "诊断", "运行操作"}},
 }
 
@@ -222,6 +222,9 @@ func (m Model) updatePalette(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.palette.Blur()
 			if command.page != "" {
 				m.openPage(command.page)
+				if command.page == pageMonitor {
+					return m, m.trafficHistoryCmd(true)
+				}
 				return m, nil
 			}
 			return m.Update(commandKey(command.key))

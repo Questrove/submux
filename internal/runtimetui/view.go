@@ -293,10 +293,28 @@ func (m Model) renderMonitorPage() string {
 		m.focusHeading(0, "实时概况"),
 		"Mihomo 状态      " + valueOr(m.snapshot.Mihomo.State, "未知"),
 		"网络状态         " + valueOr(m.snapshot.Network.State, "未知"),
-		mutedStyle.Render("流量曲线和活动连接将在后续监控任务中通过独立增量 IPC 接入"),
+		fmt.Sprintf("当前速度         ↑ %s/s    ↓ %s/s", formatTrafficBytes(m.snapshot.Traffic.UploadSpeed), formatTrafficBytes(m.snapshot.Traffic.DownloadSpeed)),
+		fmt.Sprintf("本次运行累计     ↑ %s      ↓ %s", formatTrafficBytes(m.snapshot.Traffic.UploadTotal), formatTrafficBytes(m.snapshot.Traffic.DownloadTotal)),
+		fmt.Sprintf("活动连接         %d", m.snapshot.Traffic.ActiveConnections),
 		"",
-		m.focusHeading(1, "Runtime 事件"),
+		m.focusHeading(1, "速度曲线"),
+		fmt.Sprintf("范围 %s · [ / ] 切换 1、5、15 分钟 · 每秒增量刷新", trafficRangeLabel(m.trafficRange)),
+		"上传 " + m.renderTrafficSparkline(true),
+		"下载 " + m.renderTrafficSparkline(false),
+		mutedStyle.Render("│ 表示 Mihomo 停止、重启或计数器重置造成的中断"),
+		"",
+		m.focusHeading(2, "Runtime 事件"),
 		fmt.Sprintf("最新游标 %d · Snapshot revision %d · 观测时间 %s", m.snapshot.LatestEventCursor, m.snapshot.Revision, observed),
+	}
+	if !m.snapshot.Traffic.Available {
+		lines = append(lines, warnStyle.Render("Mihomo 流量接口当前不可用；保留最后一次确认的本次运行累计"))
+	}
+	if m.trafficStale {
+		message := "流量数据已过期，正在通过独立 IPC 重试"
+		if m.trafficFault != nil {
+			message += "：" + publicErrorMessage(m.trafficFault)
+		}
+		lines = append(lines, warnStyle.Render(message))
 	}
 	if m.snapshotFault != nil {
 		lines = append(lines, warnStyle.Render("本机 IPC："+publicErrorMessage(m.snapshotFault)))

@@ -38,6 +38,24 @@ type fakeClient struct {
 	backupExports      int
 	backupInspections  int
 	lastBackupExport   runtimeapi.BackupExportRequest
+	trafficRequests    []runtimeapi.TrafficHistoryRequest
+	trafficHistories   []runtimeapi.TrafficHistory
+	trafficError       error
+}
+
+func (f *fakeClient) TrafficHistory(_ context.Context, request runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error) {
+	index := len(f.trafficRequests)
+	f.trafficRequests = append(f.trafficRequests, request)
+	if f.trafficError != nil {
+		return runtimeapi.TrafficHistory{}, f.trafficError
+	}
+	if len(f.trafficHistories) == 0 {
+		return runtimeapi.TrafficHistory{Status: f.snapshot.Traffic}, nil
+	}
+	if index >= len(f.trafficHistories) {
+		index = len(f.trafficHistories) - 1
+	}
+	return f.trafficHistories[index], nil
 }
 
 func (f *fakeClient) Observe(context.Context) (runtimeapi.Snapshot, error) {

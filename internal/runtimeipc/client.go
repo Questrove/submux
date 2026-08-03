@@ -14,6 +14,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -27,6 +28,49 @@ type Client struct {
 	clientType string
 	version    string
 	http       *http.Client
+}
+
+func (c *Client) TrafficHistory(ctx context.Context, requestValue runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error) {
+	var history runtimeapi.TrafficHistory
+	query := url.Values{}
+	if requestValue.After > 0 {
+		query.Set("after", strconv.FormatUint(requestValue.After, 10))
+	}
+	if !requestValue.Since.IsZero() {
+		query.Set("since", requestValue.Since.UTC().Format(time.RFC3339Nano))
+	}
+	if requestValue.Limit > 0 {
+		query.Set("limit", strconv.Itoa(requestValue.Limit))
+	}
+	path := "/v1/traffic/history"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return history, err
+	}
+	request, err := c.newRequest(ctx, http.MethodGet, path, nil, requestID)
+	if err != nil {
+		return history, err
+	}
+	response, err := c.do(request)
+	if err != nil {
+		return history, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return history, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, &history); err != nil {
+		return runtimeapi.TrafficHistory{}, &ClientError{
+			Code:      runtimeapi.ErrorServiceUnavailable,
+			Message:   "Runtime returned invalid traffic history",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	return history, nil
 }
 
 type ClientError struct {

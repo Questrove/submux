@@ -37,6 +37,19 @@ type networkServiceFunc struct {
 	observe func(context.Context) (runtimeapi.NetworkStatus, error)
 }
 
+type trafficServiceStub struct {
+	status  runtimeapi.TrafficStatus
+	history runtimeapi.TrafficHistory
+}
+
+func (service trafficServiceStub) Status() runtimeapi.TrafficStatus {
+	return service.status
+}
+
+func (service trafficServiceStub) History(runtimeapi.TrafficHistoryRequest) runtimeapi.TrafficHistory {
+	return service.history
+}
+
 type productUpdateServiceFunc struct {
 	preview func(context.Context, runtimeapi.PeerIdentity, runtimeapi.ProductUpdatePreviewRequest, []byte) (runtimeapi.ProductUpdatePlan, error)
 	status  func(context.Context) (runtimeapi.UpdateStatus, error)
@@ -186,6 +199,13 @@ func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
 				}, nil
 			},
 		},
+		Traffic: trafficServiceStub{
+			status: runtimeapi.TrafficStatus{Available: true, UploadTotal: 123, ActiveConnections: 2},
+			history: runtimeapi.TrafficHistory{
+				Samples:      []runtimeapi.TrafficSample{{Cursor: 7, UploadTotal: 123}},
+				LatestCursor: 7,
+			},
+		},
 		Version: "test",
 	}
 	peer := runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}
@@ -203,8 +223,13 @@ func TestCoordinatorUsesObservedNetworkStateAndTypedPreview(t *testing.T) {
 	}
 	if snapshot.RunMode != runtimeapi.RunModeTUN ||
 		snapshot.Network.State != runtimeapi.NetworkStateActive ||
-		snapshot.Network.OwnershipID == "" {
+		snapshot.Network.OwnershipID == "" || snapshot.Traffic.UploadTotal != 123 ||
+		snapshot.Traffic.ActiveConnections != 2 {
 		t.Fatalf("observed Runtime network snapshot=%#v", snapshot)
+	}
+	history, err := coordinator.TrafficHistory(t.Context(), peer, runtimeapi.TrafficHistoryRequest{After: 6})
+	if err != nil || history.LatestCursor != 7 || len(history.Samples) != 1 {
+		t.Fatalf("traffic history=%#v err=%v", history, err)
 	}
 }
 

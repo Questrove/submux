@@ -27,6 +27,10 @@ type EventObserver interface {
 	Events(context.Context, runtimeapi.PeerIdentity, uint64, int) ([]runtimeapi.Event, uint64, error)
 }
 
+type TrafficObserver interface {
+	TrafficHistory(context.Context, runtimeapi.PeerIdentity, runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error)
+}
+
 type Operator interface {
 	UploadImport(context.Context, runtimeapi.PeerIdentity, string, int64, string, []byte) (runtimeapi.ImportContent, error)
 	GetAdvancedOverride(context.Context, runtimeapi.PeerIdentity, string, string, string, bool) (runtimeapi.AdvancedOverrideDocument, error)
@@ -67,15 +71,16 @@ type BackupOperator interface {
 }
 
 type Server struct {
-	observer       Observer
-	eventObserver  EventObserver
-	operator       Operator
-	network        NetworkPreviewer
-	updates        MihomoUpdateOperator
-	productUpdates ProductUpdateOperator
-	backups        BackupOperator
-	authorizer     Authorizer
-	runtimeVersion string
+	observer        Observer
+	eventObserver   EventObserver
+	trafficObserver TrafficObserver
+	operator        Operator
+	network         NetworkPreviewer
+	updates         MihomoUpdateOperator
+	productUpdates  ProductUpdateOperator
+	backups         BackupOperator
+	authorizer      Authorizer
+	runtimeVersion  string
 }
 
 type peerContextValue struct {
@@ -98,20 +103,22 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	productUpdates, _ := observer.(ProductUpdateOperator)
 	backups, _ := observer.(BackupOperator)
 	eventObserver, _ := observer.(EventObserver)
+	trafficObserver, _ := observer.(TrafficObserver)
 	runtimeVersion := ""
 	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
 		runtimeVersion = provider.RuntimeVersion()
 	}
 	return &Server{
-		observer:       observer,
-		eventObserver:  eventObserver,
-		operator:       operator,
-		network:        network,
-		updates:        updates,
-		productUpdates: productUpdates,
-		backups:        backups,
-		authorizer:     authorizer,
-		runtimeVersion: runtimeVersion,
+		observer:        observer,
+		eventObserver:   eventObserver,
+		trafficObserver: trafficObserver,
+		operator:        operator,
+		network:         network,
+		updates:         updates,
+		productUpdates:  productUpdates,
+		backups:         backups,
+		authorizer:      authorizer,
+		runtimeVersion:  runtimeVersion,
 	}, nil
 }
 
@@ -163,6 +170,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/snapshot", s.handleSnapshot)
 	mux.HandleFunc("/v1/events", s.handleEvents)
+	mux.HandleFunc("/v1/traffic/history", s.handleTrafficHistory)
 	mux.HandleFunc("/v1/imports", s.handleImport)
 	mux.HandleFunc("/v1/advanced-override", s.handleAdvancedOverride)
 	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
@@ -183,6 +191,70 @@ func (s *Server) Handler() http.Handler {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
 	return mux
+}
+
+func (s *Server) handleTrafficHistory(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime traffic history only accepts GET", false)
+		return
+	}
+	if requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime traffic history does not accept a request body", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.trafficObserver == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime traffic history is unavailable", true)
+		return
+	}
+	for key := range request.URL.Query() {
+		if key != "after" && key != "since" && key != "limit" {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime traffic history query contains an unsupported parameter", false)
+			return
+		}
+	}
+	var historyRequest runtimeapi.TrafficHistoryRequest
+	var err error
+	if value := request.URL.Query().Get("after"); value != "" {
+		historyRequest.After, err = strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime traffic history after cursor is invalid", false)
+			return
+		}
+	}
+	if value := request.URL.Query().Get("since"); value != "" {
+		historyRequest.Since, err = time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime traffic history since time is invalid", false)
+			return
+		}
+	}
+	if historyRequest.After > 0 && !historyRequest.Since.IsZero() {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime traffic history accepts either after or since, not both", false)
+		return
+	}
+	if value := request.URL.Query().Get("limit"); value != "" {
+		historyRequest.Limit, err = strconv.Atoi(value)
+		if err != nil || historyRequest.Limit <= 0 || historyRequest.Limit > runtimeapi.TrafficHistoryMaxSamples {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime traffic history limit is invalid", false)
+			return
+		}
+	}
+	history, err := s.trafficObserver.TrafficHistory(request.Context(), peer, historyRequest)
+	if err != nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime traffic history is temporarily unavailable", true)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, history)
 }
 
 func (s *Server) handleBackupPreview(writer http.ResponseWriter, request *http.Request) {

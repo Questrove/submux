@@ -34,7 +34,7 @@ func (p ControlProbe) check(ctx context.Context, path string) error {
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return dialControl(ctx, p.Endpoint)
+			return DialControl(ctx, p.Endpoint)
 		},
 		DisableCompression: true,
 		DisableKeepAlives:  true,
@@ -57,4 +57,8 @@ func (p ControlProbe) check(ctx context.Context, path string) error {
 		return fmt.Errorf("Mihomo local control endpoint returned HTTP %d", response.StatusCode)
 	}
 	return nil
+}
+
+func DialControl(ctx context.Context, endpoint string) (net.Conn, error) {
+	return dialControl(ctx, endpoint)
 }

@@ -46,6 +46,19 @@ type networkObserver struct {
 	preview func(context.Context, runtimeapi.PeerIdentity, runtimeapi.NetworkPreviewRequest) (runtimeapi.NetworkPreview, error)
 }
 
+type trafficObserver struct {
+	observerFunc
+	history func(context.Context, runtimeapi.PeerIdentity, runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error)
+}
+
+func (observer trafficObserver) TrafficHistory(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.TrafficHistoryRequest,
+) (runtimeapi.TrafficHistory, error) {
+	return observer.history(ctx, peer, request)
+}
+
 type updateObserver struct {
 	operatorObserver
 	upload  func(runtimeapi.PeerIdentity, int64, string, io.Reader) (runtimeapi.MihomoUpdateBundle, error)
@@ -270,6 +283,57 @@ func TestSnapshotHandlerValidatesProtocolAndPeer(t *testing.T) {
 	}
 	if recorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("Cache-Control = %q", recorder.Header().Get("Cache-Control"))
+	}
+}
+
+func TestTrafficHistoryHandlerUsesBoundedTimeOrCursorQuery(t *testing.T) {
+	var received runtimeapi.TrafficHistoryRequest
+	service := trafficObserver{
+		observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		},
+		history: func(_ context.Context, peer runtimeapi.PeerIdentity, request runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error) {
+			if peer.UID != 1000 {
+				t.Fatalf("peer=%#v", peer)
+			}
+			received = request
+			return runtimeapi.TrafficHistory{
+				Status:       runtimeapi.TrafficStatus{Available: true, UploadTotal: 12},
+				Samples:      []runtimeapi.TrafficSample{{Cursor: 8, UploadTotal: 12}},
+				LatestCursor: 8,
+			}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set(HeaderRequestID, "request-traffic")
+		request.Header.Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+		request.Header.Set(HeaderClientType, "cli")
+		request.Header.Set(HeaderClientVersion, "test")
+		request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+
+	since := time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC)
+	recorder := serve("/v1/traffic/history?since=" + since.Format(time.RFC3339Nano) + "&limit=900")
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" ||
+		!received.Since.Equal(since) || received.Limit != 900 ||
+		!strings.Contains(recorder.Body.String(), `"latest_cursor":8`) {
+		t.Fatalf("traffic history status=%d request=%#v body=%s", recorder.Code, received, recorder.Body.String())
+	}
+	recorder = serve("/v1/traffic/history?after=8&since=" + since.Format(time.RFC3339Nano))
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("mixed traffic range status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	recorder = serve("/v1/traffic/history?limit=1025")
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unbounded traffic limit status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 

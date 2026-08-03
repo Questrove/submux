@@ -54,6 +54,10 @@ type BackupClient interface {
 	PreviewBackupRestore(context.Context, runtimeapi.BackupRestorePreviewRequest) (runtimeapi.BackupRestorePreview, error)
 }
 
+type TrafficClient interface {
+	TrafficHistory(context.Context, runtimeapi.TrafficHistoryRequest) (runtimeapi.TrafficHistory, error)
+}
+
 type Model struct {
 	ctx                  context.Context
 	client               Client
@@ -100,6 +104,11 @@ type Model struct {
 	operationUncertain   bool
 	operationFault       error
 	waitingOperationID   string
+	trafficHistory       []runtimeapi.TrafficSample
+	trafficCursor        uint64
+	trafficRange         time.Duration
+	trafficStale         bool
+	trafficFault         error
 }
 
 const (
@@ -136,6 +145,19 @@ type runtimeWatchErrorMsg struct {
 }
 
 type runtimeReconnectMsg struct{}
+
+type trafficHistoryMsg struct {
+	history runtimeapi.TrafficHistory
+	rangeAt time.Duration
+	initial bool
+}
+
+type trafficHistoryErrorMsg struct {
+	err     error
+	rangeAt time.Duration
+}
+
+type trafficTickMsg struct{}
 
 type preparedActionMsg struct {
 	action runtimeapi.Action
@@ -250,6 +272,7 @@ func New(ctx context.Context, client Client) Model {
 		status:            "正在读取 Runtime 状态…",
 		busy:              true,
 		observeGeneration: 1,
+		trafficRange:      5 * time.Minute,
 	}
 }
 
@@ -345,6 +368,32 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	case runtimeReconnectMsg:
 		m.status = "正在重新连接 Runtime 本机 IPC…"
 		return m, m.startObserveCmd()
+	case trafficHistoryMsg:
+		if m.page != pageMonitor || message.rangeAt != m.trafficRange {
+			return m, nil
+		}
+		m.snapshot.Traffic = message.history.Status
+		if message.initial || message.history.ResetRequired {
+			m.trafficHistory = append([]runtimeapi.TrafficSample(nil), message.history.Samples...)
+		} else {
+			m.trafficHistory = appendTrafficSamples(m.trafficHistory, message.history.Samples)
+		}
+		m.trafficCursor = message.history.LatestCursor
+		m.trafficStale = false
+		m.trafficFault = nil
+		return m, trafficTickCmd()
+	case trafficHistoryErrorMsg:
+		if m.page != pageMonitor || message.rangeAt != m.trafficRange {
+			return m, nil
+		}
+		m.trafficStale = true
+		m.trafficFault = message.err
+		return m, trafficTickCmd()
+	case trafficTickMsg:
+		if m.page != pageMonitor {
+			return m, nil
+		}
+		return m, m.trafficHistoryCmd(false)
 	case preparedActionMsg:
 		m.editing = false
 		m.editor.Blur()
@@ -680,7 +729,11 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = !m.showHelp
 			return m, nil
 		case "1", "2", "3", "4", "5":
-			m.openPage(pageFromKey(key.String()))
+			page := pageFromKey(key.String())
+			m.openPage(page)
+			if page == pageMonitor {
+				return m, m.trafficHistoryCmd(true)
+			}
 			return m, nil
 		case "tab":
 			m.moveFocus(1)
@@ -1072,6 +1125,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			})
 			return m, nil
 		case "[", "]":
+			if m.page == pageMonitor {
+				m.cycleTrafficRange(key.String() == "]")
+				return m, m.trafficHistoryCmd(true)
+			}
 			m.selectAdjacentSource(key.String() == "]")
 			m.err = nil
 			if source := m.selectedSourceSummary(); source != nil {

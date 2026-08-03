@@ -69,6 +69,11 @@ type BackupService interface {
 	Inspect([]byte, string) (runtimeapi.BackupRestorePreview, error)
 }
 
+type TrafficService interface {
+	Status() runtimeapi.TrafficStatus
+	History(runtimeapi.TrafficHistoryRequest) runtimeapi.TrafficHistory
+}
+
 type PublicError struct {
 	Code      string
 	Message   string
@@ -111,6 +116,7 @@ type Coordinator struct {
 	Updates        MihomoUpdateService
 	ProductUpdates ProductUpdateService
 	Backups        BackupService
+	Traffic        TrafficService
 	Version        string
 	Now            func() time.Time
 	QueueCapacity  int
@@ -126,6 +132,9 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 	snapshot, err := service.Observe(ctx, peer)
 	if err != nil {
 		return runtimeapi.Snapshot{}, err
+	}
+	if c.Traffic != nil {
+		snapshot.Traffic = c.Traffic.Status()
 	}
 	if c.Network == nil {
 		snapshot.Network = runtimeapi.NetworkStatus{
@@ -155,6 +164,23 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 		snapshot.RunMode = runtimeapi.RunModeExplicit
 	}
 	return c.observeUpdates(ctx, snapshot)
+}
+
+func (c *Coordinator) TrafficHistory(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	request runtimeapi.TrafficHistoryRequest,
+) (runtimeapi.TrafficHistory, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.TrafficHistory{}, err
+	}
+	if peer.Key() == "" {
+		return runtimeapi.TrafficHistory{}, errors.New("Runtime traffic observer identity is required")
+	}
+	if c == nil || c.Traffic == nil {
+		return runtimeapi.TrafficHistory{}, errors.New("Runtime traffic history is unavailable")
+	}
+	return c.Traffic.History(request), nil
 }
 
 func (c *Coordinator) observeUpdates(ctx context.Context, snapshot runtimeapi.Snapshot) (runtimeapi.Snapshot, error) {
