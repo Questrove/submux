@@ -52,6 +52,26 @@ func (m Model) View() tea.View {
 			m.renderShellFooter(),
 		}, "\n"))
 	}
+	if m.ruleFilter != nil {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderRuleFilter(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
+	if m.ruleViewerOpen {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderFinalRuleViewer(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
 	if m.trafficPolicyEditing {
 		return tea.NewView(strings.Join([]string{
 			m.renderShellHeader(),
@@ -234,6 +254,10 @@ func (m Model) renderConfigPage() string {
 		"",
 		m.focusHeading(3, "配置操作"),
 		"u 添加远程来源 · n 添加本机来源 · y 生成候选 · f/d/m 刷新 · t/k 切换 · o 高级覆盖 · e 托管资源 · Ctrl+Y 流量策略 · Ctrl+U 只读诊断",
+		"",
+		m.focusHeading(4, "最终规则"),
+		fmt.Sprintf("当前运行配置可通过 Runtime 读取 · 尚未应用候选 %s", candidateRuleSummary(m.preview)),
+		"Enter 或 Ctrl+R 打开只读查看器；支持内容、类型、目标筛选以及当前/候选切换",
 	)
 	return strings.Join(lines, "\n")
 }
@@ -370,7 +394,7 @@ func (m Model) renderMonitorPage() string {
 	lines = append(lines,
 		"",
 		m.focusHeading(2, "活动连接"),
-		fmt.Sprintf("%s · 第 %d/%d 页 · 共 %d 条 · F 筛选 · ,/. 翻页 · D 关闭所选 · X 关闭当前范围", connectionFilterSummary(loadedQuery), page, lastPage, m.connectionPage.Total),
+		fmt.Sprintf("%s · 第 %d/%d 页 · 共 %d 条 · F 筛选 · ,/. 翻页 · Ctrl+R 定位规则 · D 关闭所选 · X 关闭当前范围", connectionFilterSummary(loadedQuery), page, lastPage, m.connectionPage.Total),
 	)
 	if len(m.connectionPage.Items) == 0 {
 		lines = append(lines, mutedStyle.Render("当前筛选下没有活动连接"))
@@ -518,6 +542,7 @@ func (m Model) renderHelp() string {
 		"1–5 切换页面 · Tab/Shift+Tab 移动页内焦点",
 		"↑↓ 选择当前区域条目 · Enter 打开或执行当前区域的安全默认操作",
 		"配置页的本机配置层：Enter 或 Ctrl+Y 选择流量策略并生成候选确认",
+		"配置页最终规则：Enter 或 Ctrl+R 打开；监控页活动连接：Ctrl+R 定位命中规则",
 		"/ 或 Ctrl+K 搜索页面和操作 · Esc 返回 · ? 关闭帮助 · q 退出",
 		"现有字母快捷键继续可用，页面底部会显示当前焦点。",
 	}, "\n")

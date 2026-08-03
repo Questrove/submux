@@ -27,7 +27,7 @@ type pageDefinition struct {
 
 var pageDefinitions = []pageDefinition{
 	{id: pageStatus, number: "1", title: "状态", regions: []string{"运行状态", "当前来源", "最近运行操作"}},
-	{id: pageConfig, number: "2", title: "配置", regions: []string{"配置来源", "候选配置", "本机配置层", "配置操作"}},
+	{id: pageConfig, number: "2", title: "配置", regions: []string{"配置来源", "候选配置", "本机配置层", "配置操作", "最终规则"}},
 	{id: pageNetwork, number: "3", title: "网络", regions: []string{"当前网络", "网络预览", "网络操作"}},
 	{id: pageMonitor, number: "4", title: "监控", regions: []string{"实时概况", "速度曲线", "活动连接", "Runtime 事件"}},
 	{id: pageMaintenance, number: "5", title: "维护", regions: []string{"更新与回滚", "备份与恢复", "诊断", "运行操作"}},
@@ -152,6 +152,9 @@ func (m *Model) activateFocus() tea.Cmd {
 			updated, command := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 			*m = updated.(Model)
 			return command
+		}
+		if m.focusIndex == 4 {
+			return m.openAppliedRules(runtimeapi.RuleQuery{})
 		}
 	case pageNetwork:
 		if m.focusIndex == 2 {

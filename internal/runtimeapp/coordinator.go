@@ -80,6 +80,28 @@ type TrafficPolicyObserver interface {
 	AppliedTrafficPolicy(context.Context) (string, error)
 }
 
+type AppliedRuleObserver interface {
+	AppliedRules(context.Context, runtimeapi.RuleQuery) (runtimeapi.RuleSet, error)
+}
+
+func (c *Coordinator) Rules(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	query runtimeapi.RuleQuery,
+) (runtimeapi.RuleSet, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.RuleSet{}, err
+	}
+	if peer.Key() == "" {
+		return runtimeapi.RuleSet{}, errors.New("Runtime final rule observer identity is required")
+	}
+	observer, ok := c.Executor.(AppliedRuleObserver)
+	if !ok {
+		return runtimeapi.RuleSet{}, errors.New("Runtime final rule viewer is unavailable")
+	}
+	return observer.AppliedRules(ctx, query)
+}
+
 func (c *Coordinator) Connections(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,

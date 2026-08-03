@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"submux/internal/runtimeapi"
 	"submux/internal/runtimeprivacy"
@@ -33,6 +34,10 @@ type TrafficObserver interface {
 
 type ConnectionObserver interface {
 	Connections(context.Context, runtimeapi.PeerIdentity, runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error)
+}
+
+type RuleObserver interface {
+	Rules(context.Context, runtimeapi.PeerIdentity, runtimeapi.RuleQuery) (runtimeapi.RuleSet, error)
 }
 
 type Operator interface {
@@ -79,6 +84,7 @@ type Server struct {
 	eventObserver      EventObserver
 	trafficObserver    TrafficObserver
 	connectionObserver ConnectionObserver
+	ruleObserver       RuleObserver
 	operator           Operator
 	network            NetworkPreviewer
 	updates            MihomoUpdateOperator
@@ -110,6 +116,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 	eventObserver, _ := observer.(EventObserver)
 	trafficObserver, _ := observer.(TrafficObserver)
 	connectionObserver, _ := observer.(ConnectionObserver)
+	ruleObserver, _ := observer.(RuleObserver)
 	runtimeVersion := ""
 	if provider, ok := observer.(interface{ RuntimeVersion() string }); ok {
 		runtimeVersion = provider.RuntimeVersion()
@@ -119,6 +126,7 @@ func NewServer(observer Observer, authorizer Authorizer) (*Server, error) {
 		eventObserver:      eventObserver,
 		trafficObserver:    trafficObserver,
 		connectionObserver: connectionObserver,
+		ruleObserver:       ruleObserver,
 		operator:           operator,
 		network:            network,
 		updates:            updates,
@@ -179,6 +187,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/events", s.handleEvents)
 	mux.HandleFunc("/v1/traffic/history", s.handleTrafficHistory)
 	mux.HandleFunc("/v1/connections", s.handleConnections)
+	mux.HandleFunc("/v1/rules", s.handleRules)
 	mux.HandleFunc("/v1/imports", s.handleImport)
 	mux.HandleFunc("/v1/advanced-override", s.handleAdvancedOverride)
 	mux.HandleFunc("/v1/candidates/preview", s.handleCandidatePreview)
@@ -199,6 +208,60 @@ func (s *Server) Handler() http.Handler {
 		s.writeError(writer, request, http.StatusNotFound, runtimeapi.ErrorInvalidRequest, "unknown Runtime IPC endpoint", false)
 	})
 	return mux
+}
+
+func (s *Server) handleRules(writer http.ResponseWriter, request *http.Request) {
+	requestID, _, _, ok := s.validateCommon(writer, request)
+	if !ok {
+		return
+	}
+	if request.Method != http.MethodGet {
+		writer.Header().Set("Allow", http.MethodGet)
+		s.writeError(writer, request, http.StatusMethodNotAllowed, runtimeapi.ErrorInvalidRequest, "Runtime final rule viewer only accepts GET", false)
+		return
+	}
+	if requestHasBody(request) {
+		s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime final rule viewer does not accept a request body", false)
+		return
+	}
+	peer, ok := s.authenticatedPeer(writer, request)
+	if !ok {
+		return
+	}
+	if s.ruleObserver == nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime final rule viewer is unavailable", true)
+		return
+	}
+	allowed := map[string]bool{"content": true, "type": true, "target": true}
+	for key := range request.URL.Query() {
+		if !allowed[key] {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime final rule query contains an unsupported parameter", false)
+			return
+		}
+	}
+	query := runtimeapi.RuleQuery{
+		Content: strings.TrimSpace(request.URL.Query().Get("content")),
+		Type:    strings.TrimSpace(request.URL.Query().Get("type")),
+		Target:  strings.TrimSpace(request.URL.Query().Get("target")),
+	}
+	for _, filter := range []string{query.Content, query.Type, query.Target} {
+		if utf8.RuneCountInString(filter) > runtimeapi.RuleFilterMaxLength {
+			s.writeError(writer, request, http.StatusBadRequest, runtimeapi.ErrorInvalidRequest, "Runtime final rule filter is too long", false)
+			return
+		}
+	}
+	rules, err := s.ruleObserver.Rules(request.Context(), peer, query)
+	if err != nil {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime final rule viewer is temporarily unavailable", true)
+		return
+	}
+	body, err := json.Marshal(rules)
+	if err != nil || len(body) > MaxResponseBytes {
+		s.writeError(writer, request, http.StatusServiceUnavailable, runtimeapi.ErrorServiceUnavailable, "Runtime final rule response exceeds the size limit", true)
+		return
+	}
+	writer.Header().Set(HeaderRequestID, requestID)
+	s.writeJSON(writer, http.StatusOK, rules)
 }
 
 func (s *Server) handleConnections(writer http.ResponseWriter, request *http.Request) {

@@ -99,3 +99,32 @@ func TestClientReadsFilteredConnectionPage(t *testing.T) {
 		t.Fatalf("connection page=%#v", page)
 	}
 }
+
+func TestClientReadsFilteredAppliedRules(t *testing.T) {
+	client := &Client{
+		clientType: "tui",
+		version:    "test",
+		http: &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			query := request.URL.Query()
+			if request.URL.Path != "/v1/rules" || query.Get("content") != "api.example" ||
+				query.Get("type") != "domain" || query.Get("target") != "proxy" {
+				t.Fatalf("request=%s", request.URL.String())
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body: io.NopCloser(strings.NewReader(
+					`{"view":"applied","configuration_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","items":[{"order":7,"type":"DOMAIN","condition":"api.example","target":"PROXY","origin":"source","content":"DOMAIN,api.example,PROXY"}],"total":1}`,
+				)),
+				Request: request,
+			}, nil
+		})},
+	}
+	rules, err := client.Rules(t.Context(), runtimeapi.RuleQuery{Content: "api.example", Type: "domain", Target: "proxy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules.View != runtimeapi.RuleViewApplied || rules.Total != 1 || len(rules.Items) != 1 || rules.Items[0].Order != 7 {
+		t.Fatalf("rules=%#v", rules)
+	}
+}

@@ -44,7 +44,25 @@ type fakeClient struct {
 	connectionRequests []runtimeapi.ConnectionQuery
 	connectionPages    []runtimeapi.ConnectionPage
 	connectionError    error
+	ruleRequests       []runtimeapi.RuleQuery
+	ruleSets           []runtimeapi.RuleSet
+	ruleError          error
 	candidateRequests  []runtimeapi.PreviewCandidateRequest
+}
+
+func (f *fakeClient) Rules(_ context.Context, query runtimeapi.RuleQuery) (runtimeapi.RuleSet, error) {
+	index := len(f.ruleRequests)
+	f.ruleRequests = append(f.ruleRequests, query)
+	if f.ruleError != nil {
+		return runtimeapi.RuleSet{}, f.ruleError
+	}
+	if len(f.ruleSets) == 0 {
+		return runtimeapi.RuleSet{View: runtimeapi.RuleViewApplied, Items: []runtimeapi.FinalRule{}, Total: 0}, nil
+	}
+	if index >= len(f.ruleSets) {
+		index = len(f.ruleSets) - 1
+	}
+	return f.ruleSets[index], nil
 }
 
 func (f *fakeClient) Connections(_ context.Context, query runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error) {

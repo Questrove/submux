@@ -62,6 +62,10 @@ type ConnectionClient interface {
 	Connections(context.Context, runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error)
 }
 
+type RuleClient interface {
+	Rules(context.Context, runtimeapi.RuleQuery) (runtimeapi.RuleSet, error)
+}
+
 type Model struct {
 	ctx                   context.Context
 	client                Client
@@ -126,6 +130,13 @@ type Model struct {
 	connectionFailures    int
 	trafficPolicyEditing  bool
 	trafficPolicyDraft    string
+	ruleViewerOpen        bool
+	ruleFilter            *ruleFilterForm
+	ruleView              string
+	ruleQuery             runtimeapi.RuleQuery
+	ruleSet               runtimeapi.RuleSet
+	ruleSelected          int
+	ruleGeneration        uint64
 }
 
 const (
@@ -195,6 +206,18 @@ type connectionTickMsg struct {
 type trafficPolicyPreviewMsg struct {
 	preview   runtimeapi.CandidatePreview
 	selection string
+}
+
+type ruleSetMsg struct {
+	rules      runtimeapi.RuleSet
+	query      runtimeapi.RuleQuery
+	generation uint64
+}
+
+type ruleSetErrorMsg struct {
+	err        error
+	query      runtimeapi.RuleQuery
+	generation uint64
 }
 
 type preparedActionMsg struct {
@@ -482,6 +505,27 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.connectionsCmd()
+	case ruleSetMsg:
+		if !m.ruleViewerOpen || m.ruleView != runtimeapi.RuleViewApplied ||
+			message.query != m.ruleQuery || message.generation != m.ruleGeneration {
+			return m, nil
+		}
+		m.ruleSet = message.rules
+		m.ruleSet.View = runtimeapi.RuleViewApplied
+		m.ruleSelected = 0
+		m.busy = false
+		m.err = nil
+		m.status = fmt.Sprintf("已读取 %d 条当前运行规则", message.rules.Total)
+		return m, nil
+	case ruleSetErrorMsg:
+		if !m.ruleViewerOpen || m.ruleView != runtimeapi.RuleViewApplied ||
+			message.query != m.ruleQuery || message.generation != m.ruleGeneration {
+			return m, nil
+		}
+		m.busy = false
+		m.err = message.err
+		m.status = publicErrorMessage(message.err)
+		return m, nil
 	case trafficPolicyPreviewMsg:
 		m.page = pageConfig
 		m.focusIndex = 2
@@ -556,6 +600,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = nil
 		m.status = operationStatus(message.operation)
+		if message.operation.State == runtimeapi.OperationSucceeded &&
+			message.operation.Result != nil &&
+			message.operation.Result.CandidateSHA256 != "" &&
+			strings.EqualFold(message.operation.Result.CandidateSHA256, m.preview.CandidateSHA256) {
+			m.preview = runtimeapi.CandidatePreview{}
+			m.previewSourceID = ""
+		}
 		if operationTerminal(message.operation.State) {
 			return m, m.startObserveCmd()
 		}
@@ -706,6 +757,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.connectionFilter != nil {
 		return m.updateConnectionFilter(message)
+	}
+	if m.ruleFilter != nil {
+		return m.updateRuleFilter(message)
+	}
+	if m.ruleViewerOpen {
+		return m.updateRuleViewer(message)
 	}
 	if m.trafficPolicyEditing {
 		return m.updateTrafficPolicyEditor(message)
@@ -873,6 +930,25 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		switch key.String() {
 		case "q", "ctrl+c":
 			return m, tea.Quit
+		case "ctrl+r":
+			if m.page == pageConfig {
+				return m, m.openAppliedRules(runtimeapi.RuleQuery{})
+			}
+			if m.page == pageMonitor && m.focusIndex == 2 {
+				if len(m.connectionPage.Items) == 0 || m.connectionSelected < 0 || m.connectionSelected >= len(m.connectionPage.Items) {
+					m.err = errors.New("当前没有可定位规则的活动连接")
+					m.status = m.err.Error()
+					return m, nil
+				}
+				connection := m.connectionPage.Items[m.connectionSelected]
+				target := ""
+				if len(connection.OutboundChain) > 0 {
+					target = connection.OutboundChain[0]
+				}
+				return m, m.openAppliedRules(runtimeapi.RuleQuery{Content: connection.RulePayload, Type: connection.Rule, Target: target})
+			}
+			m.status = "最终规则只读查看器位于配置页；监控页可从活动连接跳转"
+			return m, nil
 		case "r":
 			m.busy = true
 			m.status = "正在读取 Runtime 状态…"

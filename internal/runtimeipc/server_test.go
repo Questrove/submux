@@ -56,6 +56,11 @@ type connectionObserver struct {
 	connections func(context.Context, runtimeapi.PeerIdentity, runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error)
 }
 
+type ruleObserver struct {
+	observerFunc
+	rules func(context.Context, runtimeapi.PeerIdentity, runtimeapi.RuleQuery) (runtimeapi.RuleSet, error)
+}
+
 func (observer trafficObserver) TrafficHistory(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -70,6 +75,14 @@ func (observer connectionObserver) Connections(
 	query runtimeapi.ConnectionQuery,
 ) (runtimeapi.ConnectionPage, error) {
 	return observer.connections(ctx, peer, query)
+}
+
+func (observer ruleObserver) Rules(
+	ctx context.Context,
+	peer runtimeapi.PeerIdentity,
+	query runtimeapi.RuleQuery,
+) (runtimeapi.RuleSet, error) {
+	return observer.rules(ctx, peer, query)
 }
 
 type updateObserver struct {
@@ -398,6 +411,55 @@ func TestConnectionHandlerUsesBoundedFiltersAndPagination(t *testing.T) {
 	} {
 		if invalid := serve(path); invalid.Code != http.StatusBadRequest {
 			t.Fatalf("invalid connection query %q status=%d body=%s", path, invalid.Code, invalid.Body.String())
+		}
+	}
+}
+
+func TestRuleHandlerReturnsOnlyFilteredAppliedRules(t *testing.T) {
+	var received runtimeapi.RuleQuery
+	service := ruleObserver{
+		observerFunc: func(context.Context, runtimeapi.PeerIdentity) (runtimeapi.Snapshot, error) {
+			return runtimeapi.Snapshot{}, nil
+		},
+		rules: func(_ context.Context, peer runtimeapi.PeerIdentity, query runtimeapi.RuleQuery) (runtimeapi.RuleSet, error) {
+			if peer.UID != 1000 {
+				t.Fatalf("peer=%#v", peer)
+			}
+			received = query
+			return runtimeapi.RuleSet{
+				View:  runtimeapi.RuleViewApplied,
+				Items: []runtimeapi.FinalRule{{Order: 7, Type: "DOMAIN", Condition: "api.example", Target: "PROXY", Origin: runtimeapi.RuleOriginSource, Content: "DOMAIN,api.example,PROXY"}},
+				Total: 1,
+			}, nil
+		},
+	}
+	server, err := NewServer(service, AuthorizeFunc(func(runtimeapi.PeerIdentity) error { return nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func(path string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set(HeaderRequestID, "request-rules")
+		request.Header.Set(HeaderProtocolVersion, strconv.Itoa(runtimeapi.ProtocolVersion))
+		request.Header.Set(HeaderClientType, "tui")
+		request.Header.Set(HeaderClientVersion, "test")
+		request = withPeerContext(request, runtimeapi.PeerIdentity{Platform: "linux", UID: 1000}, nil)
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		return recorder
+	}
+	recorder := serve("/v1/rules?content=api.example&type=domain&target=proxy")
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" ||
+		received.Content != "api.example" || received.Type != "domain" || received.Target != "proxy" ||
+		!strings.Contains(recorder.Body.String(), `"order":7`) {
+		t.Fatalf("rule status=%d query=%#v body=%s", recorder.Code, received, recorder.Body.String())
+	}
+	for _, path := range []string{
+		"/v1/rules?unknown=value",
+		"/v1/rules?content=" + strings.Repeat("a", runtimeapi.RuleFilterMaxLength+1),
+	} {
+		if invalid := serve(path); invalid.Code != http.StatusBadRequest {
+			t.Fatalf("invalid rule query %q status=%d body=%s", path, invalid.Code, invalid.Body.String())
 		}
 	}
 }

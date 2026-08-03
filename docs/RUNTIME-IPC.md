@@ -100,6 +100,18 @@ GET /v1/connections?target={text}&process={text}&rule={text}&node={text}&page={n
 
 Runtime 与流量采集共用 Mihomo 本机控制连接。客户端只调用 Runtime 本机 IPC，不直接连接 Mihomo，也不会取得 Mihomo secret。Mihomo 读取短暂失败时，Runtime 保留最后一次成功的连接结果并将 `available` 设为 `false`；客户端应只把连接区域标记为过期，使用最长五秒的退避间隔继续重试，其他页面和区域继续可用。接口不返回进程路径，连接明细不进入 Snapshot、状态数据库、日志或备份。
 
+### 读取最终规则
+
+```http
+GET /v1/rules?content={text}&type={text}&target={text}
+```
+
+该只读接口从 `current/config.yaml` 读取当前运行配置的最终规则，并用同一配置集中的 `source.yaml` 判断非 Runtime 规则来自配置来源还是本机高级覆盖。响应明确标记 `view: "applied"`，同时返回配置摘要，以及每条规则的最终顺序、类型、匹配条件、目标、来源和完整规则内容。`content`、`type` 和 `target` 都是可选的、不区分大小写的包含筛选，每项最多 256 个字符。接口不提供编辑、重排或提交能力。
+
+候选配置预览响应中的 `rules` 使用相同结构，但标记为 `view: "candidate"`。候选规则在配置来源、本机高级覆盖、本机流量策略和 Runtime 保留规则全部合并后生成，因此顺序就是尚未应用候选的最终顺序。客户端必须明确显示当前运行配置与尚未应用候选配置的区别，不能把候选规则表述为已经生效。
+
+Runtime 添加的健康检查规则标记为 `runtime`；其余规则标记为 `source`、`advanced_override`，无法从旧配置集确认时标记为 `current_configuration`。规则内容不写入 Snapshot、事件、审计或备份索引。活动连接详情可以用返回的 `rule` 和 `rule_payload` 作为类型和内容筛选，跳转到当前运行规则中的命中项。规则只能通过 Runtime 配置来源、本机高级覆盖或既有控制面流程修改。
+
 关闭活动连接使用运行操作，不增加客户端可直接调用的 Mihomo 控制接口。`connection.close` 只接受稳定连接 ID 和可选的脱敏目标说明；连接已经消失时按幂等成功记录。连接分页结果还包含由当前筛选范围内全部稳定连接 ID 计算的 `scope_token`。`connection.close_scope` 只接受目标、进程、规则和节点筛选、界面显示并经操作员确认的连接数量、该范围令牌，以及 `confirm: true`。Runtime 执行前重新计算令牌；匹配成员或数量发生变化时拒绝操作并要求刷新后再次确认，因此确认后新出现的连接不会被关闭。令牌核验后、实际关闭前消失的连接仍按幂等成功记录。成功、失败、取消和结果未知都由同一套 Operation 状态与审计记录呈现。
 
 ### 上传导入内容
@@ -123,7 +135,7 @@ POST /v1/candidates/preview
 Content-Type: application/json
 ```
 
-请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果，并用可选的 `traffic_policy` 预览跟随来源、规则、全局或直连的选择。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回经过结构化脱敏的最终候选配置、摘要、显式代理监听、引用的托管资源、有效流量策略，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不保存流量策略、不切换当前配置，也不启动 Mihomo。响应始终使用 `Cache-Control: no-store`。
+请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果，并用可选的 `traffic_policy` 预览跟随来源、规则、全局或直连的选择。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回经过结构化脱敏的最终候选配置、摘要、显式代理监听、引用的托管资源、有效流量策略、结构化最终规则，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不保存流量策略、不切换当前配置，也不启动 Mihomo。响应始终使用 `Cache-Control: no-store`。
 
 ### 读取本机高级覆盖
 

@@ -176,6 +176,7 @@ type CandidatePreview struct {
 	SourceSHA256        string                 `json:"source_sha256"`
 	OverrideSHA256      string                 `json:"override_sha256,omitempty"`
 	TrafficPolicy       string                 `json:"traffic_policy"`
+	Rules               RuleSet                `json:"rules"`
 	Validated           bool                   `json:"validated"`
 }
 

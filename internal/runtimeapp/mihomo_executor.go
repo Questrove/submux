@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"submux/internal/mihomo"
 	"submux/internal/productupdate"
@@ -111,6 +112,10 @@ func (e *MihomoExecutor) PreviewCandidate(
 		}
 	}
 	digest := sha256.Sum256(detailed.YAML)
+	rules, err := mihomo.FinalRules(detailed.YAML, body, candidateRuleOrigin(detailed.FieldOrigins))
+	if err != nil {
+		return runtimeapi.CandidatePreview{}, err
+	}
 	return runtimeapi.CandidatePreview{
 		ContentID:           contentID,
 		CandidateYAML:       string(detailed.YAML),
@@ -123,7 +128,14 @@ func (e *MihomoExecutor) PreviewCandidate(
 		SourceSHA256:        sourceDigest,
 		OverrideSHA256:      overrideDigest,
 		TrafficPolicy:       detailed.TrafficPolicy,
-		Validated:           true,
+		Rules: runtimeapi.RuleSet{
+			View:                runtimeapi.RuleViewCandidate,
+			ConfigurationSHA256: hex.EncodeToString(digest[:]),
+			SourceID:            request.SourceID,
+			Items:               runtimeRules(rules),
+			Total:               len(rules),
+		},
+		Validated: true,
 	}, nil
 }
 
@@ -1095,6 +1107,126 @@ func (e *MihomoExecutor) AppliedTrafficPolicy(ctx context.Context) (string, erro
 		return "", fmt.Errorf("read current Mihomo traffic policy: %w", err)
 	}
 	return mihomo.TrafficPolicyFromConfiguration(body)
+}
+
+func (e *MihomoExecutor) AppliedRules(ctx context.Context, query runtimeapi.RuleQuery) (runtimeapi.RuleSet, error) {
+	if err := ctx.Err(); err != nil {
+		return runtimeapi.RuleSet{}, err
+	}
+	if err := validateRuleQuery(query); err != nil {
+		return runtimeapi.RuleSet{}, &PublicError{
+			Code:    runtimeapi.ErrorInvalidRequest,
+			Message: "Runtime final rule query is invalid",
+			Cause:   err,
+		}
+	}
+	if e == nil || strings.TrimSpace(e.ConfigRoot) == "" {
+		return runtimeapi.RuleSet{}, errors.New("Mihomo Runtime rule viewer is incomplete")
+	}
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+	current := filepath.Join(e.ConfigRoot, "current")
+	candidate, err := os.ReadFile(filepath.Join(current, "config.yaml"))
+	if err != nil {
+		return runtimeapi.RuleSet{}, &PublicError{
+			Code:      runtimeapi.ErrorServiceUnavailable,
+			Message:   "The current applied Mihomo configuration is unavailable",
+			Retryable: true,
+			Cause:     err,
+		}
+	}
+	source, err := os.ReadFile(filepath.Join(current, "source.yaml"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return runtimeapi.RuleSet{}, err
+	}
+	rules, err := mihomo.FinalRules(candidate, source, "")
+	if err != nil {
+		return runtimeapi.RuleSet{}, err
+	}
+	items := filterRuntimeRules(runtimeRules(rules), query)
+	digest := sha256.Sum256(candidate)
+	result := runtimeapi.RuleSet{
+		View:                runtimeapi.RuleViewApplied,
+		ConfigurationSHA256: hex.EncodeToString(digest[:]),
+		Items:               items,
+		Total:               len(items),
+	}
+	if e.State != nil {
+		if currentSource, currentErr := e.State.CurrentSource(); currentErr == nil && currentSource.ID != "" {
+			result.SourceID = currentSource.ID
+		}
+	}
+	return result, nil
+}
+
+func candidateRuleOrigin(origins []mihomo.CandidateFieldOrigin) string {
+	for _, origin := range origins {
+		if origin.Path != "rules" {
+			continue
+		}
+		if origin.Origin == mihomo.CandidateOriginRuntime && origin.ReplacedOrigin != "" {
+			return origin.ReplacedOrigin
+		}
+		return origin.Origin
+	}
+	return mihomo.CandidateOriginCurrentConfiguration
+}
+
+func runtimeRules(rules []mihomo.FinalRule) []runtimeapi.FinalRule {
+	result := make([]runtimeapi.FinalRule, 0, len(rules))
+	for _, rule := range rules {
+		result = append(result, runtimeapi.FinalRule{
+			Order:     rule.Order,
+			Type:      rule.Type,
+			Condition: rule.Condition,
+			Target:    rule.Target,
+			Origin:    runtimeRuleOrigin(rule.Origin),
+			Content:   rule.Content,
+		})
+	}
+	return result
+}
+
+func runtimeRuleOrigin(origin string) string {
+	switch origin {
+	case mihomo.CandidateOriginSource:
+		return runtimeapi.RuleOriginSource
+	case mihomo.CandidateOriginOverride:
+		return runtimeapi.RuleOriginAdvancedOverride
+	case mihomo.CandidateOriginRuntime:
+		return runtimeapi.RuleOriginRuntime
+	default:
+		return runtimeapi.RuleOriginCurrentConfiguration
+	}
+}
+
+func validateRuleQuery(query runtimeapi.RuleQuery) error {
+	for _, value := range []string{query.Content, query.Type, query.Target} {
+		if utf8.RuneCountInString(value) > runtimeapi.RuleFilterMaxLength {
+			return errors.New("Runtime final rule filter is too long")
+		}
+	}
+	return nil
+}
+
+func filterRuntimeRules(rules []runtimeapi.FinalRule, query runtimeapi.RuleQuery) []runtimeapi.FinalRule {
+	content := strings.ToLower(strings.TrimSpace(query.Content))
+	ruleType := strings.ToLower(strings.TrimSpace(query.Type))
+	target := strings.ToLower(strings.TrimSpace(query.Target))
+	filtered := make([]runtimeapi.FinalRule, 0, len(rules))
+	for _, rule := range rules {
+		if content != "" && !strings.Contains(strings.ToLower(rule.Content), content) {
+			continue
+		}
+		if ruleType != "" && !strings.Contains(strings.ToLower(rule.Type), ruleType) {
+			continue
+		}
+		if target != "" && !strings.Contains(strings.ToLower(rule.Target), target) {
+			continue
+		}
+		filtered = append(filtered, rule)
+	}
+	return filtered
 }
 
 func (e *MihomoExecutor) setTrafficPolicy(

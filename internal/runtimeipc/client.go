@@ -125,6 +125,44 @@ func (c *Client) Connections(ctx context.Context, queryValue runtimeapi.Connecti
 	return page, nil
 }
 
+func (c *Client) Rules(ctx context.Context, queryValue runtimeapi.RuleQuery) (runtimeapi.RuleSet, error) {
+	var rules runtimeapi.RuleSet
+	query := url.Values{}
+	if queryValue.Content != "" {
+		query.Set("content", queryValue.Content)
+	}
+	if queryValue.Type != "" {
+		query.Set("type", queryValue.Type)
+	}
+	if queryValue.Target != "" {
+		query.Set("target", queryValue.Target)
+	}
+	path := "/v1/rules"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	requestID, err := newRequestID()
+	if err != nil {
+		return rules, err
+	}
+	request, err := c.newRequest(ctx, http.MethodGet, path, nil, requestID)
+	if err != nil {
+		return rules, err
+	}
+	response, err := c.do(request)
+	if err != nil {
+		return rules, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return rules, decodeClientError(response)
+	}
+	if err := decodeStrictJSON(response.Body, MaxResponseBytes, &rules); err != nil {
+		return runtimeapi.RuleSet{}, invalidResponseError("final rule response", err)
+	}
+	return rules, nil
+}
+
 type ClientError struct {
 	Code            string
 	Message         string
