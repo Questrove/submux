@@ -154,6 +154,8 @@ func (e *MihomoExecutor) Execute(
 		return nil, errors.New("Mihomo Runtime executor is incomplete")
 	}
 	switch operation.Action.Kind {
+	case runtimeapi.ActionTestProxyLatency:
+		return e.testProxyLatency(ctx, operation, report)
 	case runtimeapi.ActionSelectProxyNode:
 		return e.selectProxyNode(ctx, operation, report)
 	case runtimeapi.ActionSetTrafficPolicy:

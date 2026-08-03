@@ -999,9 +999,12 @@ func (c *Coordinator) now() time.Time {
 }
 
 func validateAction(action runtimeapi.Action) error {
-	proxySelectionAction := action.Kind == runtimeapi.ActionSelectProxyNode
-	if !proxySelectionAction && (action.Params.ProxyGroup != "" || action.Params.ProxyNode != "") {
-		return errors.New("proxy group parameters are only accepted by a proxy selection action")
+	proxyGroupAction := action.Kind == runtimeapi.ActionSelectProxyNode || action.Kind == runtimeapi.ActionTestProxyLatency
+	if !proxyGroupAction && (action.Params.ProxyGroup != "" || action.Params.ProxyNode != "") {
+		return errors.New("proxy group parameters are only accepted by a proxy group action")
+	}
+	if action.Kind != runtimeapi.ActionTestProxyLatency && action.Params.LatencyScope != "" {
+		return errors.New("latency_scope is only accepted by a proxy latency action")
 	}
 	trafficPolicyAction := action.Kind == runtimeapi.ActionSetTrafficPolicy
 	if !trafficPolicyAction && action.Params.TrafficPolicy != "" {
@@ -1036,8 +1039,18 @@ func validateAction(action runtimeapi.Action) error {
 			action.Params.PlanID != "" || action.Params.Trust != "" || action.Params.ConnectionID != "" ||
 			action.Params.ConnectionTarget != "" || action.Params.ConnectionScope != nil ||
 			action.Params.ConnectionScopeToken != "" || action.Params.ConnectionCount != 0 ||
-			action.Params.TrafficPolicy != "" {
+			action.Params.TrafficPolicy != "" || action.Params.LatencyScope != "" {
 			return errors.New("proxy_group.select requires only the current source, proxy group, and node")
+		}
+	case runtimeapi.ActionTestProxyLatency:
+		if !validProxyLatencyParams(action.Params) || action.Params.ContentID != "" ||
+			action.Params.SourceName != "" || action.Params.Route != "" || action.Params.UseCached ||
+			action.Params.Confirm || action.Params.ResourceKind != "" || action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" || action.Params.Trust != "" || action.Params.ConnectionID != "" ||
+			action.Params.ConnectionTarget != "" || action.Params.ConnectionScope != nil ||
+			action.Params.ConnectionScopeToken != "" || action.Params.ConnectionCount != 0 ||
+			action.Params.TrafficPolicy != "" {
+			return errors.New("proxy_latency.test requires only the current source and a valid node, group, or source scope")
 		}
 	case runtimeapi.ActionSetTrafficPolicy:
 		if !validTrafficPolicy(action.Params.TrafficPolicy) ||
@@ -1423,6 +1436,10 @@ func validResourceName(name string) bool {
 
 func publicExecutionMessage(kind string) string {
 	switch kind {
+	case runtimeapi.ActionTestProxyLatency:
+		return "Runtime could not complete the fixed proxy latency test"
+	case runtimeapi.ActionSelectProxyNode:
+		return "Runtime could not save the selected proxy node"
 	case runtimeapi.ActionSetTrafficPolicy:
 		return "Runtime could not save the traffic policy"
 	case runtimeapi.ActionCloseConnection:

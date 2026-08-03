@@ -211,6 +211,7 @@ type ActionParams struct {
 	TrafficPolicy        string           `json:"traffic_policy,omitempty"`
 	ProxyGroup           string           `json:"proxy_group,omitempty"`
 	ProxyNode            string           `json:"proxy_node,omitempty"`
+	LatencyScope         string           `json:"latency_scope,omitempty"`
 }
 
 type CreateOperationRequest struct {
@@ -295,6 +296,9 @@ type OperationResult struct {
 	TrafficPolicyEffective   string         `json:"traffic_policy_effective,omitempty"`
 	ProxyGroup               string         `json:"proxy_group,omitempty"`
 	ProxyNode                string         `json:"proxy_node,omitempty"`
+	LatencyTested            int            `json:"latency_tested,omitempty"`
+	LatencySucceeded         int            `json:"latency_succeeded,omitempty"`
+	LatencyFailed            int            `json:"latency_failed,omitempty"`
 }
 
 type OperationResponse struct {
@@ -560,6 +564,7 @@ const (
 	ActionSetAdvancedOverride = "override.set"
 	ActionSetTrafficPolicy    = "traffic_policy.set"
 	ActionSelectProxyNode     = "proxy_group.select"
+	ActionTestProxyLatency    = "proxy_latency.test"
 	ActionEnableTUN           = "network.enable_tun"
 	ActionDisableTUN          = "network.disable_tun"
 	ActionEnableGateway       = "network.enable_gateway"

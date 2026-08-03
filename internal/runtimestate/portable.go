@@ -293,6 +293,11 @@ func (s *Store) ReplacePortableState(
 		}); err != nil {
 			return err
 		}
+		// Delay observations describe the old machine and network. They remain in
+		// runtime.db across ordinary restarts, but are intentionally not portable.
+		if err := replacePortableBucket(transaction, proxyDelaysBucket, func(*bbolt.Bucket) error { return nil }); err != nil {
+			return err
+		}
 		if state.CurrentSourceID == "" {
 			if err := metadata.Delete(currentSourceIDKey); err != nil {
 				return err

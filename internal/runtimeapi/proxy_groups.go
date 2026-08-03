@@ -2,6 +2,12 @@ package runtimeapi
 
 import "time"
 
+const (
+	ProxyLatencyScopeNode   = "node"
+	ProxyLatencyScopeGroup  = "group"
+	ProxyLatencyScopeSource = "source"
+)
+
 const ProxyGroupNameMaxLength = 256
 
 type ProxyGroupQuery struct {

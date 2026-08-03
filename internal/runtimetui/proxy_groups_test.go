@@ -61,7 +61,7 @@ func TestConfigPageListsEveryProxyNodeWithAvailabilityAndDelay(t *testing.T) {
 			Name: "PROXY", Type: "select", Main: true, Selectable: true, Current: "Tokyo",
 			Nodes: []runtimeapi.ProxyNodeStatus{
 				{Name: "Tokyo", Type: "VLESS", Available: true, DelayMillis: 42, DelayTestedAt: &testedAt},
-				{Name: "Osaka", Type: "VLESS", Available: false, UnavailableReason: "provider 未加载"},
+				{Name: "Osaka", Type: "VLESS", Available: false, UnavailableReason: "provider 未加载", DelayTestedAt: &testedAt, DelayFailure: "测试超时"},
 			},
 		}},
 	}
@@ -70,7 +70,7 @@ func TestConfigPageListsEveryProxyNodeWithAvailabilityAndDelay(t *testing.T) {
 	for _, expected := range []string{
 		"PROXY · 可选择 · 当前 Tokyo · 2 个节点 · 主代理组",
 		"Tokyo [当前] · VLESS · 可用 · 42 ms · 10:30:00",
-		"Osaka · VLESS · 不可用：provider 未加载",
+		"Osaka · VLESS · 不可用：provider 未加载 · 延迟失败：测试超时 · 10:30:00",
 	} {
 		if !strings.Contains(view, expected) {
 			t.Fatalf("configuration proxy summary missing %q:\n%s", expected, view)
@@ -106,6 +106,40 @@ func TestProxyGroupViewerUsesUnifiedConfirmationBeforeSubmittingSelection(t *tes
 	}
 	if len(client.actions) != 1 || client.actions[0].Kind != runtimeapi.ActionSelectProxyNode || client.actions[0].Params.ProxyNode != "Osaka" {
 		t.Fatalf("actions=%#v", client.actions)
+	}
+}
+
+func TestProxyGroupViewerPreparesFixedLatencyScopes(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       rune
+		scope     string
+		wantGroup string
+		wantNode  string
+	}{
+		{name: "node", key: 't', scope: runtimeapi.ProxyLatencyScopeNode, wantGroup: "PROXY", wantNode: "Osaka"},
+		{name: "group", key: 'g', scope: runtimeapi.ProxyLatencyScopeGroup, wantGroup: "PROXY"},
+		{name: "source", key: 'a', scope: runtimeapi.ProxyLatencyScopeSource},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			model := New(context.Background(), &proxyFakeClient{fakeClient: &fakeClient{}})
+			model.snapshot = proxyGroupSnapshot()
+			model.proxyGroups = selectableProxyGroups()
+			model.openProxyGroups(model.snapshot.Sources.CurrentSourceID)
+			model.proxyNodeSelected = 1
+			updated, command := model.updateProxyGroups(tea.KeyPressMsg{Code: test.key})
+			if command != nil {
+				t.Fatal("latency test submitted before unified confirmation")
+			}
+			model = updated.(Model)
+			if model.confirmation == nil || model.confirmation.Action.Kind != runtimeapi.ActionTestProxyLatency ||
+				model.confirmation.Action.Params.LatencyScope != test.scope ||
+				model.confirmation.Action.Params.ProxyGroup != test.wantGroup ||
+				model.confirmation.Action.Params.ProxyNode != test.wantNode {
+				t.Fatalf("confirmation=%#v", model.confirmation)
+			}
+		})
 	}
 }
 

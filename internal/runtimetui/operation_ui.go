@@ -99,6 +99,17 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 	}
 
 	switch action.Kind {
+	case runtimeapi.ActionTestProxyLatency:
+		switch action.Params.LatencyScope {
+		case runtimeapi.ProxyLatencyScopeNode:
+			description.Impact = fmt.Sprintf("使用 Runtime 固定测试参数测量节点 %s 的延迟", action.Params.ProxyNode)
+		case runtimeapi.ProxyLatencyScopeGroup:
+			description.Impact = fmt.Sprintf("使用 Runtime 固定测试参数测量代理组 %s 的全部节点", action.Params.ProxyGroup)
+		default:
+			description.Impact = "使用 Runtime 固定测试参数测量当前来源的全部代理节点"
+		}
+		description.Interruption = "最多并行测试 4 个节点；测试期间可以取消或切换页面"
+		description.Recovery = "测试失败只记录失败状态，不会改变当前代理节点选择"
 	case runtimeapi.ActionSelectProxyNode:
 		description.Impact = fmt.Sprintf("把代理组 %s 切换到节点 %s，并按来源保存选择", action.Params.ProxyGroup, action.Params.ProxyNode)
 		description.Interruption = "已有连接通常保持不变；新连接使用新节点"
@@ -172,6 +183,7 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 func actionTitle(kind string) string {
 	titles := map[string]string{
 		runtimeapi.ActionSetTrafficPolicy:    "设置流量策略",
+		runtimeapi.ActionTestProxyLatency:    "测试代理延迟",
 		runtimeapi.ActionSelectProxyNode:     "选择代理节点",
 		runtimeapi.ActionCloseConnection:     "关闭活动连接",
 		runtimeapi.ActionCloseConnections:    "关闭当前范围内全部连接",
@@ -255,6 +267,8 @@ func actionConflictGroup(kind string) string {
 	switch kind {
 	case runtimeapi.ActionSetTrafficPolicy, runtimeapi.ActionSelectProxyNode:
 		return "configuration"
+	case runtimeapi.ActionTestProxyLatency:
+		return "proxy-latency"
 	case runtimeapi.ActionCloseConnection, runtimeapi.ActionCloseConnections:
 		return "connection-control"
 	case runtimeapi.ActionAddRemoteSource,

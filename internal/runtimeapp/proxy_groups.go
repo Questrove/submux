@@ -17,6 +17,7 @@ import (
 type ProxyControl interface {
 	ProxyGroups(context.Context) (map[string]runtimeprocess.ControlProxy, error)
 	SelectProxy(context.Context, string, string) error
+	ProxyDelay(context.Context, string) (int, error)
 }
 
 func (e *MihomoExecutor) proxyControl() ProxyControl {
@@ -78,6 +79,11 @@ func (e *MihomoExecutor) ProxyGroups(ctx context.Context, query runtimeapi.Proxy
 		}
 		result.Groups = append(result.Groups, status)
 	}
+	delays, err := e.State.ProxyDelayResults(record.ID)
+	if err != nil {
+		return runtimeapi.ProxyGroupList{}, err
+	}
+	overlayPersistedProxyDelays(&result, delays, e.now())
 	if !current {
 		result.Available = false
 		result.Message = "切换为当前来源后可以选择节点"
@@ -100,6 +106,7 @@ func (e *MihomoExecutor) ProxyGroups(ctx context.Context, query runtimeapi.Proxy
 	}
 	result.Available = true
 	overlayLiveProxyGroups(&result, live, e.now())
+	overlayPersistedProxyDelays(&result, delays, e.now())
 	return result, nil
 }
 
@@ -153,10 +160,37 @@ func overlayLiveProxyGroups(result *runtimeapi.ProxyGroupList, live map[string]r
 			if length := len(liveNode.History); length > 0 {
 				last := liveNode.History[length-1]
 				testedAt := last.Time.UTC()
-				node.DelayMillis = last.Delay
-				node.DelayTestedAt = &testedAt
-				node.DelayStale = now.Sub(testedAt) > 5*time.Minute
+				if node.DelayTestedAt == nil || testedAt.After(*node.DelayTestedAt) {
+					node.DelayMillis = last.Delay
+					node.DelayTestedAt = &testedAt
+					node.DelayFailure = ""
+					node.DelayStale = now.Sub(testedAt) > 5*time.Minute
+				}
 			}
+		}
+	}
+}
+
+func overlayPersistedProxyDelays(result *runtimeapi.ProxyGroupList, records []runtimestate.ProxyDelayRecord, now time.Time) {
+	for _, record := range records {
+		for groupIndex := range result.Groups {
+			group := &result.Groups[groupIndex]
+			if group.Name != record.Group {
+				continue
+			}
+			node := runtimeProxyNode(group.Nodes, record.Node)
+			if node == nil {
+				break
+			}
+			testedAt := record.TestedAt.UTC()
+			if node.DelayTestedAt != nil && !testedAt.After(*node.DelayTestedAt) {
+				break
+			}
+			node.DelayMillis = record.DelayMillis
+			node.DelayTestedAt = &testedAt
+			node.DelayFailure = record.Failure
+			node.DelayStale = now.Sub(testedAt) > 5*time.Minute
+			break
 		}
 	}
 }
@@ -331,4 +365,20 @@ func validProxyActionName(value string) bool {
 		}
 	}
 	return true
+}
+
+func validProxyLatencyParams(params runtimeapi.ActionParams) bool {
+	if !validSourceID(params.SourceID) {
+		return false
+	}
+	switch params.LatencyScope {
+	case runtimeapi.ProxyLatencyScopeNode:
+		return validProxyActionName(params.ProxyGroup) && validProxyActionName(params.ProxyNode)
+	case runtimeapi.ProxyLatencyScopeGroup:
+		return validProxyActionName(params.ProxyGroup) && params.ProxyNode == ""
+	case runtimeapi.ProxyLatencyScopeSource:
+		return params.ProxyGroup == "" && params.ProxyNode == ""
+	default:
+		return false
+	}
 }

@@ -10,7 +10,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
+)
+
+const (
+	ProxyDelayTestURL = "https://www.gstatic.com/generate_204"
+	ProxyDelayTimeout = 5 * time.Second
 )
 
 type ControlProbe struct {
@@ -106,13 +112,66 @@ func (p ControlProbe) SelectProxy(ctx context.Context, group, node string) error
 	return nil
 }
 
-func (p ControlProbe) do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
-	if p.Endpoint == "" {
-		return nil, errors.New("Mihomo local control endpoint is required")
+func (p ControlProbe) ProxyDelay(ctx context.Context, node string) (int, error) {
+	if node == "" {
+		return 0, errors.New("Mihomo proxy node is required")
 	}
+	response, err := p.doWithTimeout(
+		ctx,
+		http.MethodGet,
+		proxyDelayPath(node),
+		nil,
+		ProxyDelayTimeout+2*time.Second,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+		return 0, fmt.Errorf("Mihomo local control endpoint returned HTTP %d", response.StatusCode)
+	}
+	return decodeProxyDelayResponse(response.Body)
+}
+
+func proxyDelayPath(node string) string {
+	query := url.Values{}
+	query.Set("url", ProxyDelayTestURL)
+	query.Set("timeout", strconv.FormatInt(ProxyDelayTimeout.Milliseconds(), 10))
+	return "/proxies/" + url.PathEscape(node) + "/delay?" + query.Encode()
+}
+
+func decodeProxyDelayResponse(reader io.Reader) (int, error) {
+	var body struct {
+		Delay *int `json:"delay"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(reader, 1<<20))
+	if err := decoder.Decode(&body); err != nil {
+		return 0, fmt.Errorf("decode Mihomo proxy delay: %w", err)
+	}
+	if body.Delay == nil || *body.Delay < 0 {
+		return 0, errors.New("Mihomo proxy delay response is incomplete")
+	}
+	return *body.Delay, nil
+}
+
+func (p ControlProbe) do(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	timeout := p.Timeout
 	if timeout <= 0 {
 		timeout = 3 * time.Second
+	}
+	return p.doWithTimeout(ctx, method, path, body, timeout)
+}
+
+func (p ControlProbe) doWithTimeout(
+	ctx context.Context,
+	method string,
+	path string,
+	body io.Reader,
+	timeout time.Duration,
+) (*http.Response, error) {
+	if p.Endpoint == "" {
+		return nil, errors.New("Mihomo local control endpoint is required")
 	}
 	transport := &http.Transport{
 		Proxy: nil,

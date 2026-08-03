@@ -121,7 +121,7 @@ func (m *Model) openProxyGroups(sourceID string) tea.Cmd {
 	if m.proxyGroups.SourceID == sourceID && len(m.proxyGroups.Groups) > 0 {
 		m.proxyGroupLoading = false
 		m.syncProxyGroupSelection()
-		m.status = "Tab 切换代理组，↑↓ 选择节点，Enter 进入统一确认"
+		m.status = "Tab 切换代理组，↑↓ 选择节点，Enter 选择；t/g/a 测试节点、组或当前来源"
 		return nil
 	}
 	m.proxyGroups = runtimeapi.ProxyGroupList{SourceID: sourceID}
@@ -165,6 +165,43 @@ func (m Model) updateProxyGroups(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.proxyNodeSelected = (m.proxyNodeSelected + offset + len(group.Nodes)) % len(group.Nodes)
 		m.status = "已选择节点：" + group.Nodes[m.proxyNodeSelected].Name
 		return m, nil
+	case "t", "g", "a":
+		if !m.proxyGroups.CurrentSource {
+			m.err = errors.New("请先把该配置来源切换为当前来源")
+			m.status = m.err.Error()
+			return m, nil
+		}
+		if !m.proxyGroups.Available {
+			m.err = errors.New(valueOr(m.proxyGroups.Message, "Mihomo 当前不可用，无法测试延迟"))
+			m.status = m.err.Error()
+			return m, nil
+		}
+		params := runtimeapi.ActionParams{SourceID: m.proxyGroups.SourceID}
+		switch key.String() {
+		case "t":
+			group := m.selectedProxyGroup()
+			node := m.selectedProxyNode()
+			if group == nil || node == nil {
+				m.status = "当前没有可测试的代理节点"
+				return m, nil
+			}
+			params.LatencyScope = runtimeapi.ProxyLatencyScopeNode
+			params.ProxyGroup = group.Name
+			params.ProxyNode = node.Name
+		case "g":
+			group := m.selectedProxyGroup()
+			if group == nil {
+				m.status = "当前没有可测试的代理组"
+				return m, nil
+			}
+			params.LatencyScope = runtimeapi.ProxyLatencyScopeGroup
+			params.ProxyGroup = group.Name
+		case "a":
+			params.LatencyScope = runtimeapi.ProxyLatencyScopeSource
+		}
+		m.proxyGroupOpen = false
+		m.prepareAction(runtimeapi.Action{Kind: runtimeapi.ActionTestProxyLatency, Params: params})
+		return m, nil
 	case "enter":
 		group := m.selectedProxyGroup()
 		node := m.selectedProxyNode()
@@ -205,7 +242,7 @@ func (m Model) renderProxyGroupViewer() string {
 	lines := []string{
 		titleStyle.Render("代理组与节点"),
 		fmt.Sprintf("来源 %s · %s", valueOr(m.proxyGroups.SourceID, "未知"), proxyGroupSourceState(m.proxyGroups)),
-		"Tab/←→ 切换代理组 · ↑↓ 选择节点 · Enter 确认选择 · r 刷新 · Esc 关闭",
+		"Tab/←→ 切换组 · ↑↓ 选节点 · Enter 选择 · t 测节点 · g 测当前组 · a 测当前来源 · r 刷新 · Esc 关闭",
 		"",
 	}
 	if m.proxyGroupLoading {
@@ -248,7 +285,11 @@ func (m Model) renderProxyGroupViewer() string {
 			}
 			line := fmt.Sprintf("%s%s%s · %s", prefix, node.Name, current, valueOr(node.Type, "未知类型"))
 			if node.DelayTestedAt != nil {
-				line += fmt.Sprintf(" · %d ms · %s", node.DelayMillis, node.DelayTestedAt.Local().Format("15:04:05"))
+				if node.DelayFailure != "" {
+					line += " · 延迟失败：" + node.DelayFailure + " · " + node.DelayTestedAt.Local().Format("15:04:05")
+				} else {
+					line += fmt.Sprintf(" · %d ms · %s", node.DelayMillis, node.DelayTestedAt.Local().Format("15:04:05"))
+				}
 				if node.DelayStale {
 					line += " · 已过期"
 				}
@@ -304,6 +345,9 @@ func proxyNodeDelay(node *runtimeapi.ProxyNodeStatus) string {
 		return "尚无延迟结果"
 	}
 	state := fmt.Sprintf("%d ms · %s", node.DelayMillis, node.DelayTestedAt.Local().Format("15:04:05"))
+	if node.DelayFailure != "" {
+		state = "失败：" + node.DelayFailure + " · " + node.DelayTestedAt.Local().Format("15:04:05")
+	}
 	if node.DelayStale || time.Since(*node.DelayTestedAt) > 5*time.Minute {
 		state += " · 已过期"
 	}
@@ -379,7 +423,11 @@ func (m Model) renderConfigProxyGroupSummary(sourceID string) []string {
 			}
 			line := fmt.Sprintf("  · %s%s · %s · %s", node.Name, current, valueOr(node.Type, "未知类型"), availability)
 			if node.DelayTestedAt != nil {
-				line += fmt.Sprintf(" · %d ms · %s", node.DelayMillis, node.DelayTestedAt.Local().Format("15:04:05"))
+				if node.DelayFailure != "" {
+					line += " · 延迟失败：" + node.DelayFailure + " · " + node.DelayTestedAt.Local().Format("15:04:05")
+				} else {
+					line += fmt.Sprintf(" · %d ms · %s", node.DelayMillis, node.DelayTestedAt.Local().Format("15:04:05"))
+				}
 				if node.DelayStale {
 					line += " · 已过期"
 				}

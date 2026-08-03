@@ -535,6 +535,31 @@ func TestProxySelectionActionAcceptsOnlyStrictSourceGroupAndNode(t *testing.T) {
 	}
 }
 
+func TestProxyLatencyActionAcceptsOnlyFixedScopeParameters(t *testing.T) {
+	const sourceID = "src_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	valid := []runtimeapi.Action{
+		{Kind: runtimeapi.ActionTestProxyLatency, Params: runtimeapi.ActionParams{SourceID: sourceID, LatencyScope: runtimeapi.ProxyLatencyScopeNode, ProxyGroup: "PROXY", ProxyNode: "Tokyo"}},
+		{Kind: runtimeapi.ActionTestProxyLatency, Params: runtimeapi.ActionParams{SourceID: sourceID, LatencyScope: runtimeapi.ProxyLatencyScopeGroup, ProxyGroup: "PROXY"}},
+		{Kind: runtimeapi.ActionTestProxyLatency, Params: runtimeapi.ActionParams{SourceID: sourceID, LatencyScope: runtimeapi.ProxyLatencyScopeSource}},
+	}
+	for _, action := range valid {
+		if !validAction(action) {
+			t.Fatalf("valid proxy latency action rejected: %#v", action)
+		}
+	}
+	for _, invalid := range []runtimeapi.Action{
+		{Kind: runtimeapi.ActionTestProxyLatency, Params: runtimeapi.ActionParams{SourceID: sourceID, LatencyScope: runtimeapi.ProxyLatencyScopeNode, ProxyGroup: "PROXY"}},
+		{Kind: runtimeapi.ActionTestProxyLatency, Params: runtimeapi.ActionParams{SourceID: sourceID, LatencyScope: runtimeapi.ProxyLatencyScopeGroup, ProxyGroup: "PROXY", ProxyNode: "Tokyo"}},
+		{Kind: runtimeapi.ActionTestProxyLatency, Params: runtimeapi.ActionParams{SourceID: sourceID, LatencyScope: runtimeapi.ProxyLatencyScopeSource, ProxyGroup: "PROXY"}},
+		{Kind: runtimeapi.ActionTestProxyLatency, Params: runtimeapi.ActionParams{SourceID: sourceID, LatencyScope: "custom", ProxyGroup: "PROXY"}},
+		{Kind: runtimeapi.ActionStartProxy, Params: runtimeapi.ActionParams{LatencyScope: runtimeapi.ProxyLatencyScopeSource}},
+	} {
+		if validAction(invalid) {
+			t.Fatalf("invalid proxy latency action accepted: %#v", invalid)
+		}
+	}
+}
+
 func TestEventHandlerStreamsMonotonicNDJSON(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	calls := 0

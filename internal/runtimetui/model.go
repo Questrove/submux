@@ -2191,6 +2191,8 @@ func operationStatus(operation runtimeapi.Operation) string {
 		return status
 	}
 	switch operation.Action.Kind {
+	case runtimeapi.ActionTestProxyLatency:
+		return fmt.Sprintf("%s；已测试 %d 个节点，成功 %d，失败 %d", status, operation.Result.LatencyTested, operation.Result.LatencySucceeded, operation.Result.LatencyFailed)
 	case runtimeapi.ActionSelectProxyNode:
 		return fmt.Sprintf("%s；代理组 %s 已选择 %s", status, operation.Result.ProxyGroup, operation.Result.ProxyNode)
 	case runtimeapi.ActionSwitchSource:

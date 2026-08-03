@@ -54,7 +54,8 @@ func pageForAction(kind string) pageID {
 		runtimeapi.ActionAddManagedResource,
 		runtimeapi.ActionSetAdvancedOverride,
 		runtimeapi.ActionSetTrafficPolicy,
-		runtimeapi.ActionSelectProxyNode:
+		runtimeapi.ActionSelectProxyNode,
+		runtimeapi.ActionTestProxyLatency:
 		return pageConfig
 	case runtimeapi.ActionEnableTUN,
 		runtimeapi.ActionDisableTUN,

@@ -1506,8 +1506,11 @@ func validAction(action runtimeapi.Action) bool {
 	if action.Kind != runtimeapi.ActionSetTrafficPolicy && action.Params.TrafficPolicy != "" {
 		return false
 	}
-	if action.Kind != runtimeapi.ActionSelectProxyNode &&
+	if action.Kind != runtimeapi.ActionSelectProxyNode && action.Kind != runtimeapi.ActionTestProxyLatency &&
 		(action.Params.ProxyGroup != "" || action.Params.ProxyNode != "") {
+		return false
+	}
+	if action.Kind != runtimeapi.ActionTestProxyLatency && action.Params.LatencyScope != "" {
 		return false
 	}
 	if action.Kind != runtimeapi.ActionUpdateMihomo &&
@@ -1558,7 +1561,27 @@ func validAction(action runtimeapi.Action) bool {
 			action.Params.ConnectionScope == nil &&
 			action.Params.ConnectionScopeToken == "" &&
 			action.Params.ConnectionCount == 0 &&
-			action.Params.TrafficPolicy == ""
+			action.Params.TrafficPolicy == "" &&
+			action.Params.LatencyScope == ""
+	case runtimeapi.ActionTestProxyLatency:
+		params := action.Params
+		sourceID, scope := params.SourceID, params.LatencyScope
+		group, node := params.ProxyGroup, params.ProxyNode
+		params.SourceID, params.LatencyScope = "", ""
+		params.ProxyGroup, params.ProxyNode = "", ""
+		if !validSourceID(sourceID) || params != (runtimeapi.ActionParams{}) {
+			return false
+		}
+		switch scope {
+		case runtimeapi.ProxyLatencyScopeNode:
+			return validProxyGroupName(group) && validProxyGroupName(node)
+		case runtimeapi.ProxyLatencyScopeGroup:
+			return validProxyGroupName(group) && node == ""
+		case runtimeapi.ProxyLatencyScopeSource:
+			return group == "" && node == ""
+		default:
+			return false
+		}
 	case runtimeapi.ActionApplyImportedConfig:
 		return validContentID(action.Params.ContentID) &&
 			action.Params.SourceID == "" &&
