@@ -86,7 +86,8 @@ func TestOperationPersistenceIdempotencyRevisionAndCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("observe Runtime state: %v", err)
 	}
-	if snapshot.Revision != 3 || snapshot.LatestEventCursor != 2 || snapshot.Operations.Queued != 0 {
+	if snapshot.Revision != 3 || snapshot.LatestEventCursor != 2 ||
+		snapshot.Operations.Queued != 0 || snapshot.Operations.RecentOperationID != operation.ID {
 		t.Fatalf("snapshot after cancellation = %#v", snapshot)
 	}
 }

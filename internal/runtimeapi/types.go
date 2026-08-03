@@ -137,6 +137,7 @@ type AdvancedOverrideDocument struct {
 
 type OperationStatus struct {
 	CurrentOperationID string `json:"current_operation_id,omitempty"`
+	RecentOperationID  string `json:"recent_operation_id,omitempty"`
 	Queued             int    `json:"queued"`
 }
 

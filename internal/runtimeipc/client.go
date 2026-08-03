@@ -60,6 +60,17 @@ func (e *ClientError) Unwrap() error {
 	return e.Cause
 }
 
+func (e *ClientError) RuntimeErrorCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
+func (e *ClientError) RuntimeErrorRetryable() bool {
+	return e != nil && e.Retryable
+}
+
 func NewClient(endpoint string, clientVersion string) (*Client, error) {
 	return NewTypedClient(endpoint, "cli", clientVersion)
 }

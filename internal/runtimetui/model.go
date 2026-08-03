@@ -55,44 +55,48 @@ type BackupClient interface {
 }
 
 type Model struct {
-	ctx               context.Context
-	client            Client
-	editor            textarea.Model
-	editing           bool
-	editorMode        string
-	busy              bool
-	width             int
-	height            int
-	snapshot          runtimeapi.Snapshot
-	selectedSourceID  string
-	preview           runtimeapi.CandidatePreview
-	networkPreview    runtimeapi.NetworkPreview
-	mihomoUpdate      runtimeapi.MihomoUpdatePlan
-	productUpdate     runtimeapi.ProductUpdatePlan
-	networkEditorMode string
-	lastOperation     runtimeapi.Operation
-	verification      runtimeapi.ProxyVerification
-	status            string
-	err               error
-	sensitiveConfirm  string
-	revealedURL       string
-	diagnostics       runtimeapi.DiagnosticsPreview
-	diagnosticsFile   runtimeapi.DiagnosticsResult
-	backupPreview     runtimeapi.BackupPreview
-	backupRestore     runtimeapi.BackupRestorePreview
-	backupArchive     runtimeapi.BackupArchive
-	backupFile        string
-	page              pageID
-	focusIndex        int
-	palette           textinput.Model
-	paletteOpen       bool
-	paletteIndex      int
-	showHelp          bool
-	snapshotStale     bool
-	snapshotFault     error
-	watchingEvents    bool
-	reconnectAttempts int
-	observeGeneration uint64
+	ctx                context.Context
+	client             Client
+	editor             textarea.Model
+	editing            bool
+	editorMode         string
+	busy               bool
+	width              int
+	height             int
+	snapshot           runtimeapi.Snapshot
+	selectedSourceID   string
+	preview            runtimeapi.CandidatePreview
+	networkPreview     runtimeapi.NetworkPreview
+	mihomoUpdate       runtimeapi.MihomoUpdatePlan
+	productUpdate      runtimeapi.ProductUpdatePlan
+	networkEditorMode  string
+	lastOperation      runtimeapi.Operation
+	verification       runtimeapi.ProxyVerification
+	status             string
+	err                error
+	sensitiveConfirm   string
+	revealedURL        string
+	diagnostics        runtimeapi.DiagnosticsPreview
+	diagnosticsFile    runtimeapi.DiagnosticsResult
+	backupPreview      runtimeapi.BackupPreview
+	backupRestore      runtimeapi.BackupRestorePreview
+	backupArchive      runtimeapi.BackupArchive
+	backupFile         string
+	page               pageID
+	focusIndex         int
+	palette            textinput.Model
+	paletteOpen        bool
+	paletteIndex       int
+	showHelp           bool
+	snapshotStale      bool
+	snapshotFault      error
+	watchingEvents     bool
+	reconnectAttempts  int
+	observeGeneration  uint64
+	confirmation       *actionConfirmation
+	operationUncertain bool
+	operationFault     error
+	waitingOperationID string
 }
 
 const (
@@ -138,6 +142,21 @@ type runtimeWatchErrorMsg struct {
 
 type runtimeReconnectMsg struct{}
 
+type preparedActionMsg struct {
+	action runtimeapi.Action
+}
+
+type operationSubmitErrorMsg struct {
+	action runtimeapi.Action
+	err    error
+}
+
+type operationIOErrorMsg struct {
+	operationID string
+	mutating    bool
+	err         error
+}
+
 type importPreviewMsg struct {
 	content runtimeapi.ImportContent
 	preview runtimeapi.CandidatePreview
@@ -145,6 +164,7 @@ type importPreviewMsg struct {
 
 type operationMsg struct {
 	operation runtimeapi.Operation
+	fromWait  bool
 }
 
 type verificationMsg struct {
@@ -287,10 +307,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.snapshotFault = nil
 		m.reconnectAttempts = 0
 		m.status = "状态已更新"
-		if !m.watchingEvents {
-			m.watchingEvents = true
-			return m, m.watchEventsCmd(message.snapshot.LatestEventCursor)
-		}
+		return m, m.snapshotFollowUpCmd()
 	case snapshotErrorMsg:
 		if message.generation != m.observeGeneration {
 			return m, nil
@@ -298,13 +315,21 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.snapshotStale = true
 		m.snapshotFault = message.err
+		if m.runningOperation() || m.snapshot.Operations.CurrentOperationID != "" {
+			m.operationUncertain = true
+			m.operationFault = message.err
+		}
 		m.status = "Runtime 本机 IPC 暂时不可用，正在重连"
 		m.reconnectAttempts++
 		return m, reconnectCmd(m.reconnectAttempts)
 	case runtimeEventMsg:
 		m.watchingEvents = false
 		m.status = fmt.Sprintf("收到 Runtime 事件 %s，正在同步状态…", message.event.Type)
-		return m, m.startObserveCmd()
+		observe := m.startObserveCmd()
+		if message.event.OperationID != "" {
+			return m, tea.Batch(observe, m.getCmd(message.event.OperationID))
+		}
+		return m, observe
 	case runtimeWatchErrorMsg:
 		m.watchingEvents = false
 		if errors.Is(message.err, context.Canceled) ||
@@ -313,12 +338,51 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.snapshotStale = true
 		m.snapshotFault = message.err
+		if m.runningOperation() || m.snapshot.Operations.CurrentOperationID != "" {
+			m.operationUncertain = true
+			m.operationFault = message.err
+		}
 		m.status = "Runtime 事件连接已断开，保留上次数据并重连"
 		m.reconnectAttempts++
 		return m, reconnectCmd(m.reconnectAttempts)
 	case runtimeReconnectMsg:
 		m.status = "正在重新连接 Runtime 本机 IPC…"
 		return m, m.startObserveCmd()
+	case preparedActionMsg:
+		m.editing = false
+		m.editor.Blur()
+		m.prepareAction(message.action)
+		return m, nil
+	case operationSubmitErrorMsg:
+		m.busy = false
+		m.err = message.err
+		if operationOutcomeUncertain(message.err) {
+			m.operationUncertain = true
+			m.operationFault = message.err
+			m.status = "运行操作提交结果不确定；不会自动重放，请重新连接后核对运行操作"
+		} else {
+			m.operationUncertain = false
+			m.operationFault = nil
+			m.status = publicErrorMessage(message.err)
+		}
+		return m, nil
+	case operationIOErrorMsg:
+		if m.waitingOperationID == message.operationID {
+			m.waitingOperationID = ""
+		}
+		m.busy = false
+		m.err = message.err
+		if operationOutcomeUncertain(message.err) {
+			m.operationUncertain = true
+			m.operationFault = message.err
+			m.status = "运行操作状态暂时无法确认；等待重新连接后核对"
+			if message.mutating {
+				m.status = "取消请求结果不确定；不会自动重复取消，请重新连接后核对"
+			}
+		} else {
+			m.status = publicErrorMessage(message.err)
+		}
+		return m, nil
 	case importPreviewMsg:
 		m.page = pageConfig
 		m.focusIndex = 1
@@ -329,8 +393,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("候选配置已校验：%s", shortDigest(message.preview.CandidateSHA256))
 		m.editor.Blur()
 	case operationMsg:
-		m.openPage(pageForAction(message.operation.Action.Kind))
+		if m.waitingOperationID == message.operation.ID &&
+			(message.fromWait || operationTerminal(message.operation.State)) {
+			m.waitingOperationID = ""
+		}
 		m.lastOperation = message.operation
+		m.operationUncertain = false
+		m.operationFault = nil
 		m.busy = false
 		if m.editing {
 			m.editing = false
@@ -341,7 +410,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if operationTerminal(message.operation.State) {
 			return m, m.startObserveCmd()
 		}
-		return m, m.waitCmd(message.operation.ID)
+		return m, m.waitForOperationCmd(message.operation.ID)
 	case verificationMsg:
 		m.verification = message.verification
 		m.busy = false
@@ -622,6 +691,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if key, ok := message.(tea.KeyPressMsg); ok {
+		if m.confirmation != nil {
+			switch key.String() {
+			case "enter":
+				return m, m.confirmAction()
+			case "esc":
+				m.cancelActionConfirmation()
+				return m, nil
+			}
+		}
 		switch key.String() {
 		case "/", "ctrl+k":
 			return m.openPalette()
@@ -709,25 +787,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.err.Error()
 				return m, nil
 			}
-			m.busy = true
-			m.status = "正在提交候选配置…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind:   runtimeapi.ActionApplyImportedConfig,
 				Params: runtimeapi.ActionParams{ContentID: m.preview.ContentID},
 			})
+			return m, nil
 		case "s":
-			m.busy = true
-			m.status = "正在提交启动操作…"
-			return m, m.executeCmd(runtimeapi.Action{Kind: runtimeapi.ActionStartProxy})
+			m.prepareAction(runtimeapi.Action{Kind: runtimeapi.ActionStartProxy})
+			return m, nil
 		case "x":
-			m.busy = true
-			m.status = "正在提交停止操作…"
-			return m, m.executeCmd(runtimeapi.Action{Kind: runtimeapi.ActionStopProxy})
+			m.prepareAction(runtimeapi.Action{Kind: runtimeapi.ActionStopProxy})
+			return m, nil
 		case "w":
-			operationID := m.lastOperation.ID
-			if operationID == "" {
-				operationID = m.snapshot.Operations.CurrentOperationID
-			}
+			operationID := m.operationIDForControl()
 			if operationID == "" {
 				m.err = errors.New("当前没有可等待的运行操作")
 				m.status = m.err.Error()
@@ -735,12 +807,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.busy = true
 			m.status = "正在等待运行操作完成…"
-			return m, m.waitCmd(operationID)
+			return m, m.waitForOperationCmd(operationID)
 		case "g":
-			operationID := m.lastOperation.ID
-			if operationID == "" {
-				operationID = m.snapshot.Operations.CurrentOperationID
-			}
+			operationID := m.operationIDForControl()
 			if operationID == "" {
 				m.err = errors.New("当前没有可查询的运行操作")
 				m.status = m.err.Error()
@@ -750,18 +819,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "正在查询运行操作…"
 			return m, m.getCmd(operationID)
 		case "c":
-			operationID := m.lastOperation.ID
-			if operationID == "" {
-				operationID = m.snapshot.Operations.CurrentOperationID
-			}
+			operationID := m.operationIDForControl()
 			if operationID == "" {
 				m.err = errors.New("当前没有可取消的运行操作")
 				m.status = m.err.Error()
 				return m, nil
 			}
-			m.busy = true
-			m.status = "正在取消运行操作…"
-			return m, m.cancelCmd(operationID)
+			if m.lastOperation.ID != operationID {
+				m.busy = true
+				m.status = "正在读取 Runtime 声明的可取消状态…"
+				return m, m.getCmd(operationID)
+			}
+			if !m.lastOperation.Cancellable {
+				m.err = errors.New("Runtime 声明当前运行操作不可取消")
+				m.status = m.err.Error()
+				return m, nil
+			}
+			m.prepareCancellation(m.lastOperation)
+			return m, nil
 		case "v":
 			m.busy = true
 			m.status = "正在验证显式代理…"
@@ -826,26 +901,24 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.err.Error()
 				return m, nil
 			}
-			m.busy = true
-			m.status = "正在提交网络接管启用操作…"
 			actionKind := runtimeapi.ActionEnableTUN
 			if m.networkPreview.Mode == runtimeapi.RunModeGateway {
 				actionKind = runtimeapi.ActionEnableGateway
 			}
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind: actionKind,
 				Params: runtimeapi.ActionParams{
 					PlanID: m.networkPreview.PlanID,
 				},
 			})
+			return m, nil
 		case "ctrl+x":
-			m.busy = true
-			m.status = "正在提交网络接管停用操作…"
 			actionKind := runtimeapi.ActionDisableTUN
 			if m.snapshot.Network.Mode == runtimeapi.RunModeGateway {
 				actionKind = runtimeapi.ActionDisableGateway
 			}
-			return m, m.executeCmd(runtimeapi.Action{Kind: actionKind})
+			m.prepareAction(runtimeapi.Action{Kind: actionKind})
+			return m, nil
 		case "U":
 			if m.mihomoUpdate.PlanID == "" ||
 				!m.mihomoUpdate.ExpiresAt.IsZero() && !time.Now().Before(m.mihomoUpdate.ExpiresAt) {
@@ -860,21 +933,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "正在通过 TUF 检查官方 Mihomo 稳定更新…"
 				return m, m.previewMihomoUpdateCmd(client)
 			}
-			confirmation := "mihomo-update:" + m.mihomoUpdate.PlanID
-			if m.sensitiveConfirm != confirmation {
-				m.sensitiveConfirm = confirmation
-				m.err = nil
-				m.status = fmt.Sprintf(
-					"将把 Mihomo %s 更新为 %s，代理会短暂停止；再按一次 U 明确确认。",
-					valueOr(m.mihomoUpdate.CurrentVersion, "未安装"),
-					m.mihomoUpdate.Version,
-				)
-				return m, nil
-			}
 			m.sensitiveConfirm = ""
-			m.busy = true
-			m.status = "正在提交已确认的 Mihomo 更新…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind: runtimeapi.ActionUpdateMihomo,
 				Params: runtimeapi.ActionParams{
 					PlanID:  m.mihomoUpdate.PlanID,
@@ -882,29 +942,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					Confirm: true,
 				},
 			})
+			return m, nil
 		case "R":
 			if m.snapshot.Updates.MihomoPreviousVersion == "" {
 				m.err = errors.New("当前没有可回滚的上一版 Mihomo 核心")
 				m.status = m.err.Error()
 				return m, nil
 			}
-			if m.sensitiveConfirm != "mihomo-rollback" {
-				m.sensitiveConfirm = "mihomo-rollback"
-				m.err = nil
-				m.status = fmt.Sprintf(
-					"将从 Mihomo %s 回滚到 %s，代理会短暂停止；再按一次 R 明确确认。",
-					valueOr(m.snapshot.Updates.MihomoCurrentVersion, "未知"),
-					m.snapshot.Updates.MihomoPreviousVersion,
-				)
-				return m, nil
-			}
 			m.sensitiveConfirm = ""
-			m.busy = true
-			m.status = "正在提交已确认的 Mihomo 回滚…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind:   runtimeapi.ActionRollbackMihomo,
 				Params: runtimeapi.ActionParams{Confirm: true},
 			})
+			return m, nil
 		case "P":
 			if m.productUpdate.PlanID == "" ||
 				!m.productUpdate.ExpiresAt.IsZero() && !time.Now().Before(m.productUpdate.ExpiresAt) {
@@ -919,26 +969,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "正在通过 TUF 检查 Runtime 稳定产品更新；不会预下载程序…"
 				return m, m.previewProductUpdateCmd(client)
 			}
-			confirmation := "product-update:" + m.productUpdate.PlanID
 			if !m.productUpdate.Installable {
 				m.err = errors.New("当前平台安装器不可用；已验证计划只能查看，不能安装")
 				m.status = m.err.Error()
 				return m, nil
 			}
-			if m.sensitiveConfirm != confirmation {
-				m.sensitiveConfirm = confirmation
-				m.err = nil
-				m.status = fmt.Sprintf(
-					"将把 Runtime %s 更新为 %s；网络会先恢复直连，随后停止相关服务。再按一次 P 明确确认。",
-					valueOr(m.productUpdate.CurrentVersion, "未知"),
-					m.productUpdate.Version,
-				)
-				return m, nil
-			}
 			m.sensitiveConfirm = ""
-			m.busy = true
-			m.status = "正在提交已确认的 Runtime 产品更新…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind: runtimeapi.ActionUpdateProduct,
 				Params: runtimeapi.ActionParams{
 					PlanID:  m.productUpdate.PlanID,
@@ -946,6 +983,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					Confirm: true,
 				},
 			})
+			return m, nil
 		case "I":
 			if _, ok := m.client.(ProductUpdateClient); !ok {
 				m.err = errors.New("当前 TUI 客户端不支持 Runtime 产品更新")
@@ -966,23 +1004,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.err.Error()
 				return m, nil
 			}
-			if m.sensitiveConfirm != "product-rollback" {
-				m.sensitiveConfirm = "product-rollback"
-				m.err = nil
-				m.status = fmt.Sprintf(
-					"将从 Runtime %s 回滚到 %s；网络会先恢复直连。再按一次 O 明确确认。",
-					valueOr(m.snapshot.Updates.RuntimeCurrentVersion, "未知"),
-					m.snapshot.Updates.RuntimePreviousVersion,
-				)
-				return m, nil
-			}
 			m.sensitiveConfirm = ""
-			m.busy = true
-			m.status = "正在提交已确认的 Runtime 产品回滚…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind:   runtimeapi.ActionRollbackProduct,
 				Params: runtimeapi.ActionParams{Confirm: true},
 			})
+			return m, nil
 		case "b", "B":
 			client, ok := m.client.(BackupClient)
 			if !ok {
@@ -1010,18 +1037,16 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "输入尚不存在的输出文件后按 Ctrl+S 创建，Esc 取消"
 			return m, m.editor.Focus()
 		case "L":
-			confirmation := "backup-restore:" + m.backupRestore.ContentID
-			if m.backupRestore.ContentID != "" && m.sensitiveConfirm == confirmation {
+			if m.backupRestore.ContentID != "" {
 				m.sensitiveConfirm = ""
-				m.busy = true
-				m.status = "正在提交已确认的整体恢复操作…"
-				return m, m.executeCmd(runtimeapi.Action{
+				m.prepareAction(runtimeapi.Action{
 					Kind: runtimeapi.ActionRestoreBackup,
 					Params: runtimeapi.ActionParams{
 						ContentID: m.backupRestore.ContentID,
 						Confirm:   true,
 					},
 				})
+				return m, nil
 			}
 			if _, ok := m.client.(BackupClient); !ok {
 				m.err = errors.New("当前 TUI 客户端不支持备份恢复")
@@ -1060,15 +1085,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if key.String() == "m" {
 				route = runtimeapi.SourceRouteMihomo
 			}
-			m.busy = true
-			m.status = "正在提交来源刷新操作…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind: runtimeapi.ActionRefreshSource,
 				Params: runtimeapi.ActionParams{
 					SourceID: sourceID,
 					Route:    route,
 				},
 			})
+			return m, nil
 		case "[", "]":
 			m.selectAdjacentSource(key.String() == "]")
 			m.err = nil
@@ -1083,20 +1107,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.err.Error()
 				return m, nil
 			}
-			m.busy = true
 			useCached := key.String() == "k"
-			if useCached {
-				m.status = "正在刷新并切换来源；刷新失败时允许使用已验证缓存…"
-			} else {
-				m.status = "正在刷新并切换来源…"
-			}
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind: runtimeapi.ActionSwitchSource,
 				Params: runtimeapi.ActionParams{
 					SourceID:  sourceID,
 					UseCached: useCached,
 				},
 			})
+			return m, nil
 		case "z":
 			sourceID := m.selectedSource()
 			if sourceID == "" {
@@ -1104,14 +1123,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.err.Error()
 				return m, nil
 			}
-			m.busy = true
-			m.status = "正在删除所选来源…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind: runtimeapi.ActionDeleteSource,
 				Params: runtimeapi.ActionParams{
 					SourceID: sourceID,
+					Confirm:  true,
 				},
 			})
+			return m, nil
 		case "ctrl+d":
 			sourceID := m.selectedSource()
 			if sourceID == "" {
@@ -1119,15 +1138,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.err.Error()
 				return m, nil
 			}
-			m.busy = true
-			m.status = "正在确认删除所选来源…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind: runtimeapi.ActionDeleteSource,
 				Params: runtimeapi.ActionParams{
 					SourceID: sourceID,
 					Confirm:  true,
 				},
 			})
+			return m, nil
 		case "p":
 			sourceID := m.snapshot.Sources.CurrentSourceID
 			if sourceID == "" {
@@ -1135,14 +1153,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = m.err.Error()
 				return m, nil
 			}
-			m.busy = true
-			m.status = "正在提交来源应用操作…"
-			return m, m.executeCmd(runtimeapi.Action{
+			m.prepareAction(runtimeapi.Action{
 				Kind: runtimeapi.ActionApplySource,
 				Params: runtimeapi.ActionParams{
 					SourceID: sourceID,
 				},
 			})
+			return m, nil
 		}
 	}
 	return m, nil
@@ -1645,30 +1662,21 @@ func (m Model) importPreviewCmd(body []byte) tea.Cmd {
 }
 
 func (m Model) addSourceCmd(body []byte) tea.Cmd {
-	revision := m.snapshot.Revision
 	return func() tea.Msg {
 		content, err := m.client.UploadImport(m.ctx, runtimeapi.SourceDraftContentType, body)
 		if err != nil {
 			return errMsg{err: err}
 		}
-		operation, err := m.client.Execute(m.ctx, runtimeapi.CreateOperationRequest{
-			IfRevision: revision,
-			Action: runtimeapi.Action{
-				Kind: runtimeapi.ActionAddRemoteSource,
-				Params: runtimeapi.ActionParams{
-					ContentID: content.ID,
-				},
+		return preparedActionMsg{action: runtimeapi.Action{
+			Kind: runtimeapi.ActionAddRemoteSource,
+			Params: runtimeapi.ActionParams{
+				ContentID: content.ID,
 			},
-		})
-		if err != nil {
-			return errMsg{err: err}
-		}
-		return operationMsg{operation: operation}
+		}}
 	}
 }
 
 func (m Model) addImportedSourceCmd(draft importedSourceDraft) tea.Cmd {
-	revision := m.snapshot.Revision
 	return func() tea.Msg {
 		content, err := m.client.UploadImport(
 			m.ctx,
@@ -1678,25 +1686,17 @@ func (m Model) addImportedSourceCmd(draft importedSourceDraft) tea.Cmd {
 		if err != nil {
 			return errMsg{err: err}
 		}
-		operation, err := m.client.Execute(m.ctx, runtimeapi.CreateOperationRequest{
-			IfRevision: revision,
-			Action: runtimeapi.Action{
-				Kind: runtimeapi.ActionAddImportedSource,
-				Params: runtimeapi.ActionParams{
-					ContentID:  content.ID,
-					SourceName: draft.Name,
-				},
+		return preparedActionMsg{action: runtimeapi.Action{
+			Kind: runtimeapi.ActionAddImportedSource,
+			Params: runtimeapi.ActionParams{
+				ContentID:  content.ID,
+				SourceName: draft.Name,
 			},
-		})
-		if err != nil {
-			return errMsg{err: err}
-		}
-		return operationMsg{operation: operation}
+		}}
 	}
 }
 
 func (m Model) addResourceCmd(draft resourceDraft) tea.Cmd {
-	revision := m.snapshot.Revision
 	return func() tea.Msg {
 		content, err := m.client.UploadImport(
 			m.ctx,
@@ -1706,21 +1706,14 @@ func (m Model) addResourceCmd(draft resourceDraft) tea.Cmd {
 		if err != nil {
 			return errMsg{err: err}
 		}
-		operation, err := m.client.Execute(m.ctx, runtimeapi.CreateOperationRequest{
-			IfRevision: revision,
-			Action: runtimeapi.Action{
-				Kind: runtimeapi.ActionAddManagedResource,
-				Params: runtimeapi.ActionParams{
-					ContentID:    content.ID,
-					ResourceKind: draft.Kind,
-					ResourceName: draft.Name,
-				},
+		return preparedActionMsg{action: runtimeapi.Action{
+			Kind: runtimeapi.ActionAddManagedResource,
+			Params: runtimeapi.ActionParams{
+				ContentID:    content.ID,
+				ResourceKind: draft.Kind,
+				ResourceName: draft.Name,
 			},
-		})
-		if err != nil {
-			return errMsg{err: err}
-		}
-		return operationMsg{operation: operation}
+		}}
 	}
 }
 
@@ -1735,25 +1728,17 @@ func (m Model) getOverrideCmd() tea.Cmd {
 }
 
 func (m Model) setOverrideCmd(body []byte) tea.Cmd {
-	revision := m.snapshot.Revision
 	return func() tea.Msg {
 		content, err := m.client.UploadImport(m.ctx, "application/x-yaml", body)
 		if err != nil {
 			return errMsg{err: err}
 		}
-		operation, err := m.client.Execute(m.ctx, runtimeapi.CreateOperationRequest{
-			IfRevision: revision,
-			Action: runtimeapi.Action{
-				Kind: runtimeapi.ActionSetAdvancedOverride,
-				Params: runtimeapi.ActionParams{
-					ContentID: content.ID,
-				},
+		return preparedActionMsg{action: runtimeapi.Action{
+			Kind: runtimeapi.ActionSetAdvancedOverride,
+			Params: runtimeapi.ActionParams{
+				ContentID: content.ID,
 			},
-		})
-		if err != nil {
-			return errMsg{err: err}
-		}
-		return operationMsg{operation: operation}
+		}}
 	}
 }
 
@@ -1794,7 +1779,7 @@ func (m Model) executeCmd(action runtimeapi.Action) tea.Cmd {
 			Action:     action,
 		})
 		if err != nil {
-			return errMsg{err: err}
+			return operationSubmitErrorMsg{action: action, err: err}
 		}
 		return operationMsg{operation: operation}
 	}
@@ -1804,9 +1789,9 @@ func (m Model) waitCmd(operationID string) tea.Cmd {
 	return func() tea.Msg {
 		operation, err := m.client.WaitOperation(m.ctx, operationID, 250*time.Millisecond)
 		if err != nil {
-			return errMsg{err: err}
+			return operationIOErrorMsg{operationID: operationID, err: err}
 		}
-		return operationMsg{operation: operation}
+		return operationMsg{operation: operation, fromWait: true}
 	}
 }
 
@@ -1814,7 +1799,7 @@ func (m Model) getCmd(operationID string) tea.Cmd {
 	return func() tea.Msg {
 		operation, err := m.client.GetOperation(m.ctx, operationID)
 		if err != nil {
-			return errMsg{err: err}
+			return operationIOErrorMsg{operationID: operationID, err: err}
 		}
 		return operationMsg{operation: operation}
 	}
@@ -1827,7 +1812,7 @@ func (m Model) cancelCmd(operationID string) tea.Cmd {
 			IfRevision: revision,
 		})
 		if err != nil {
-			return errMsg{err: err}
+			return operationIOErrorMsg{operationID: operationID, mutating: true, err: err}
 		}
 		return operationMsg{operation: operation}
 	}

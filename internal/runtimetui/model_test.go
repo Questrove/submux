@@ -100,7 +100,7 @@ func (f *fakeClient) Execute(_ context.Context, request runtimeapi.CreateOperati
 
 func (f *fakeClient) GetOperation(_ context.Context, id string) (runtimeapi.Operation, error) {
 	f.gotten = id
-	return runtimeapi.Operation{ID: id, State: runtimeapi.OperationRunning, Stage: "working"}, nil
+	return runtimeapi.Operation{ID: id, State: runtimeapi.OperationRunning, Stage: "working", Cancellable: true}, nil
 }
 
 func (f *fakeClient) WaitOperation(_ context.Context, id string, _ time.Duration) (runtimeapi.Operation, error) {
@@ -340,10 +340,10 @@ func TestModelCreatesAndRestoresBackupWithExplicitConfirmation(t *testing.T) {
 
 	updated, command = model.Update(keyPress('L'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("confirmed backup restore did not execute")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("backup restore did not open the unified confirmation")
 	}
-	_, _ = model.Update(command())
+	model, command = confirmAndSubmit(t, model)
 	action := client.actions[len(client.actions)-1]
 	if action.Kind != runtimeapi.ActionRestoreBackup ||
 		!action.Params.Confirm ||
@@ -417,16 +417,10 @@ func TestModelMihomoUpdateAndRollbackRequireTwoStepConfirmation(t *testing.T) {
 
 	updated, command = model.Update(keyPress('U'))
 	model = updated.(Model)
-	if command != nil || model.sensitiveConfirm == "" {
-		t.Fatal("first Mihomo update confirmation did not stop before execution")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("Mihomo update did not open unified confirmation")
 	}
-	updated, command = model.Update(keyPress('U'))
-	model = updated.(Model)
-	if command == nil {
-		t.Fatal("second Mihomo update confirmation did not execute")
-	}
-	updated, _ = model.Update(command())
-	model = updated.(Model)
+	model, command = confirmAndSubmit(t, model)
 	updateAction := client.actions[len(client.actions)-1]
 	if updateAction.Kind != runtimeapi.ActionUpdateMihomo ||
 		!updateAction.Params.Confirm ||
@@ -435,17 +429,13 @@ func TestModelMihomoUpdateAndRollbackRequireTwoStepConfirmation(t *testing.T) {
 	}
 
 	model.busy = false
+	model.lastOperation.State = runtimeapi.OperationSucceeded
 	updated, command = model.Update(keyPress('R'))
 	model = updated.(Model)
-	if command != nil || model.sensitiveConfirm != "mihomo-rollback" {
-		t.Fatal("first Mihomo rollback confirmation did not stop before execution")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("Mihomo rollback did not open unified confirmation")
 	}
-	updated, command = model.Update(keyPress('R'))
-	model = updated.(Model)
-	if command == nil {
-		t.Fatal("second Mihomo rollback confirmation did not execute")
-	}
-	updated, _ = model.Update(command())
+	model, _ = confirmAndSubmit(t, model)
 	rollbackAction := client.actions[len(client.actions)-1]
 	if rollbackAction.Kind != runtimeapi.ActionRollbackMihomo || !rollbackAction.Params.Confirm {
 		t.Fatalf("unexpected Mihomo rollback action: %#v", rollbackAction)
@@ -478,15 +468,10 @@ func TestModelProductUpdateOnlineOfflineAndRollbackUseSameConfirmedActions(t *te
 	}
 	updated, command = model.Update(keyPress('P'))
 	model = updated.(Model)
-	if command != nil || model.sensitiveConfirm == "" {
-		t.Fatal("first Runtime product confirmation did not stop before execution")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("Runtime product update did not open unified confirmation")
 	}
-	updated, command = model.Update(keyPress('P'))
-	model = updated.(Model)
-	if command == nil {
-		t.Fatal("second Runtime product confirmation did not execute")
-	}
-	updated, _ = model.Update(command())
+	model, _ = confirmAndSubmit(t, model)
 	updateAction := client.actions[len(client.actions)-1]
 	if updateAction.Kind != runtimeapi.ActionUpdateProduct ||
 		updateAction.Params.Trust != runtimeapi.ProductUpdateTrustTUF ||
@@ -495,17 +480,13 @@ func TestModelProductUpdateOnlineOfflineAndRollbackUseSameConfirmedActions(t *te
 	}
 
 	model.busy = false
+	model.lastOperation.State = runtimeapi.OperationSucceeded
 	updated, command = model.Update(keyPress('O'))
 	model = updated.(Model)
-	if command != nil || model.sensitiveConfirm != "product-rollback" {
-		t.Fatal("first Runtime product rollback confirmation did not stop")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("Runtime product rollback did not open unified confirmation")
 	}
-	updated, command = model.Update(keyPress('O'))
-	model = updated.(Model)
-	if command == nil {
-		t.Fatal("second Runtime product rollback confirmation did not execute")
-	}
-	updated, _ = model.Update(command())
+	model, _ = confirmAndSubmit(t, model)
 	rollbackAction := client.actions[len(client.actions)-1]
 	if rollbackAction.Kind != runtimeapi.ActionRollbackProduct || !rollbackAction.Params.Confirm {
 		t.Fatalf("unexpected Runtime product rollback action: %#v", rollbackAction)
@@ -573,14 +554,17 @@ func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
 
 	updated, command = model.Update(keyPress('a'))
 	model = updated.(Model)
-	updated, _ = model.Update(command())
-	model = updated.(Model)
+	if command != nil || model.confirmation == nil {
+		t.Fatal("candidate apply did not open unified confirmation")
+	}
+	model, command = confirmAndSubmit(t, model)
 	if len(client.actions) != 1 || client.actions[0].Kind != runtimeapi.ActionApplyImportedConfig {
 		t.Fatalf("apply actions = %#v", client.actions)
 	}
 
-	updated, command = model.Update(keyPress('w'))
-	model = updated.(Model)
+	if command == nil {
+		t.Fatal("queued operation did not start background waiting")
+	}
 	updated, command = model.Update(command())
 	model = updated.(Model)
 	if client.waited != "op_test" || model.lastOperation.State != runtimeapi.OperationSucceeded {
@@ -602,8 +586,10 @@ func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
 
 	updated, command = model.Update(keyPress('c'))
 	model = updated.(Model)
-	updated, command = model.Update(command())
-	model = updated.(Model)
+	if command != nil || model.confirmation == nil {
+		t.Fatal("cancellable operation did not open cancellation confirmation")
+	}
+	model, command = confirmAndSubmit(t, model)
 	if client.cancelled != "op_test" || model.lastOperation.State != runtimeapi.OperationCancelled {
 		t.Fatalf("cancelled=%q operation=%#v", client.cancelled, model.lastOperation)
 	}
@@ -620,10 +606,13 @@ func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
 		{key: 's', action: runtimeapi.ActionStartProxy},
 		{key: 'x', action: runtimeapi.ActionStopProxy},
 	} {
+		model.lastOperation.State = runtimeapi.OperationSucceeded
 		updated, command = model.Update(keyPress(test.key))
 		model = updated.(Model)
-		updated, _ = model.Update(command())
-		model = updated.(Model)
+		if command != nil || model.confirmation == nil {
+			t.Fatalf("key %q did not open unified confirmation", test.key)
+		}
+		model, _ = confirmAndSubmit(t, model)
 		if client.actions[len(client.actions)-1].Kind != test.action {
 			t.Fatalf("key %q action = %#v", test.key, client.actions[len(client.actions)-1])
 		}
@@ -636,6 +625,8 @@ func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
 	if client.verifyCalls != 1 || !model.verification.Available {
 		t.Fatalf("verification calls=%d value=%#v", client.verifyCalls, model.verification)
 	}
+	updated, _ = model.Update(keyPress('1'))
+	model = updated.(Model)
 	if !strings.Contains(model.View().Content, "Submux Runtime") ||
 		!strings.Contains(model.View().Content, "Mihomo 实际") ||
 		!strings.Contains(model.View().Content, runtimeapi.MihomoDesiredRunning) ||
@@ -739,24 +730,23 @@ func TestModelPreviewsDisplaysAndControlsOrdinaryTUN(t *testing.T) {
 	model.networkPreview.Conflicts = nil
 	updated, command = model.Update(ctrlKey('e'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("ordinary TUN enable did not return a command")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("ordinary TUN enable did not open unified confirmation")
 	}
-	updated, _ = model.Update(command())
-	model = updated.(Model)
+	model, _ = confirmAndSubmit(t, model)
 	if len(client.actions) != 1 ||
 		client.actions[0].Kind != runtimeapi.ActionEnableTUN ||
 		client.actions[0].Params.PlanID != model.networkPreview.PlanID {
 		t.Fatalf("ordinary TUN enable actions=%#v", client.actions)
 	}
 	model.busy = false
+	model.lastOperation.State = runtimeapi.OperationSucceeded
 	updated, command = model.Update(ctrlKey('x'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("ordinary TUN disable did not return a command")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("ordinary TUN disable did not open unified confirmation")
 	}
-	updated, _ = model.Update(command())
-	model = updated.(Model)
+	model, _ = confirmAndSubmit(t, model)
 	if len(client.actions) != 2 || client.actions[1].Kind != runtimeapi.ActionDisableTUN {
 		t.Fatalf("ordinary TUN disable actions=%#v", client.actions)
 	}
@@ -844,25 +834,24 @@ func TestModelPreviewsDisplaysAndControlsLinuxGateway(t *testing.T) {
 	}
 	updated, command = model.Update(ctrlKey('e'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("Linux gateway enable did not return a command")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("Linux gateway enable did not open unified confirmation")
 	}
-	updated, _ = model.Update(command())
-	model = updated.(Model)
+	model, _ = confirmAndSubmit(t, model)
 	if len(client.actions) != 1 ||
 		client.actions[0].Kind != runtimeapi.ActionEnableGateway ||
 		client.actions[0].Params.PlanID != model.networkPreview.PlanID {
 		t.Fatalf("Linux gateway enable actions=%#v", client.actions)
 	}
 	model.busy = false
+	model.lastOperation.State = runtimeapi.OperationSucceeded
 	model.snapshot.Network.Mode = runtimeapi.RunModeGateway
 	updated, command = model.Update(ctrlKey('x'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("Linux gateway disable did not return a command")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("Linux gateway disable did not open unified confirmation")
 	}
-	updated, _ = model.Update(command())
-	model = updated.(Model)
+	model, _ = confirmAndSubmit(t, model)
 	if len(client.actions) != 2 || client.actions[1].Kind != runtimeapi.ActionDisableGateway {
 		t.Fatalf("Linux gateway disable actions=%#v", client.actions)
 	}
@@ -910,10 +899,13 @@ func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testin
 	model = updated.(Model)
 	if model.editing ||
 		client.uploadedType != runtimeapi.SourceDraftContentType ||
-		len(client.actions) != 1 ||
-		client.actions[0].Kind != runtimeapi.ActionAddRemoteSource {
+		model.confirmation == nil || len(client.actions) != 0 {
 		t.Fatalf("source add state: editing=%v type=%q actions=%#v",
 			model.editing, client.uploadedType, client.actions)
+	}
+	model, _ = confirmAndSubmit(t, model)
+	if len(client.actions) != 1 || client.actions[0].Kind != runtimeapi.ActionAddRemoteSource {
+		t.Fatalf("source add actions=%#v", client.actions)
 	}
 
 	for _, test := range []struct {
@@ -924,13 +916,13 @@ func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testin
 		{key: 'd', route: runtimeapi.SourceRouteDirect},
 		{key: 'm', route: runtimeapi.SourceRouteMihomo},
 	} {
+		model.lastOperation.State = runtimeapi.OperationSucceeded
 		updated, command = model.Update(keyPress(test.key))
 		model = updated.(Model)
-		if command == nil {
-			t.Fatalf("source refresh key %q did not return a command", test.key)
+		if command != nil || model.confirmation == nil {
+			t.Fatalf("source refresh key %q did not open unified confirmation", test.key)
 		}
-		updated, _ = model.Update(command())
-		model = updated.(Model)
+		model, _ = confirmAndSubmit(t, model)
 		action := client.actions[len(client.actions)-1]
 		if action.Kind != runtimeapi.ActionRefreshSource ||
 			action.Params.SourceID != sourceID ||
@@ -940,15 +932,16 @@ func TestModelAddsRefreshesAndDisplaysRemoteSourceThroughRuntimeClient(t *testin
 	}
 	updated, command = model.Update(keyPress('p'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("source apply did not return a command")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("source apply did not open unified confirmation")
 	}
-	updated, _ = model.Update(command())
-	model = updated.(Model)
+	model, _ = confirmAndSubmit(t, model)
 	applied := client.actions[len(client.actions)-1]
 	if applied.Kind != runtimeapi.ActionApplySource || applied.Params.SourceID != sourceID {
 		t.Fatalf("source apply action = %#v", applied)
 	}
+	updated, _ = model.Update(keyPress('2'))
+	model = updated.(Model)
 	view := model.View().Content
 	if !strings.Contains(view, "https://example.com:443/…") ||
 		!strings.Contains(view, "skip_tls_verify") {
@@ -1007,15 +1000,15 @@ func TestModelManagesMultipleSourceTypesAndSwitchesSelectedSource(t *testing.T) 
 		{key: 'f', kind: runtimeapi.ActionRefreshSource},
 		{key: 't', kind: runtimeapi.ActionSwitchSource},
 		{key: 'k', kind: runtimeapi.ActionSwitchSource, useCached: true},
-		{key: 'z', kind: runtimeapi.ActionDeleteSource},
+		{key: 'z', kind: runtimeapi.ActionDeleteSource, confirm: true},
 	} {
+		model.lastOperation.State = runtimeapi.OperationSucceeded
 		updated, command := model.Update(keyPress(test.key))
 		model = updated.(Model)
-		if command == nil {
-			t.Fatalf("source action key %q did not return a command", test.key)
+		if command != nil || model.confirmation == nil {
+			t.Fatalf("source action key %q did not open unified confirmation", test.key)
 		}
-		updated, _ = model.Update(command())
-		model = updated.(Model)
+		model, _ = confirmAndSubmit(t, model)
 		action := client.actions[len(client.actions)-1]
 		if action.Kind != test.kind ||
 			action.Params.SourceID != localSourceID ||
@@ -1025,13 +1018,13 @@ func TestModelManagesMultipleSourceTypesAndSwitchesSelectedSource(t *testing.T) 
 		}
 	}
 
+	model.lastOperation.State = runtimeapi.OperationSucceeded
 	updated, command := model.Update(ctrlKey('d'))
 	model = updated.(Model)
-	if command == nil {
-		t.Fatal("confirmed source delete did not return a command")
+	if command != nil || model.confirmation == nil {
+		t.Fatal("source delete did not open unified confirmation")
 	}
-	updated, _ = model.Update(command())
-	model = updated.(Model)
+	model, _ = confirmAndSubmit(t, model)
 	confirmedDelete := client.actions[len(client.actions)-1]
 	if confirmedDelete.Kind != runtimeapi.ActionDeleteSource ||
 		confirmedDelete.Params.SourceID != localSourceID ||
@@ -1050,8 +1043,13 @@ func TestModelManagesMultipleSourceTypesAndSwitchesSelectedSource(t *testing.T) 
 	if command == nil {
 		t.Fatal("imported source add did not return a command")
 	}
+	model.lastOperation.State = runtimeapi.OperationSucceeded
 	updated, _ = model.Update(command())
 	model = updated.(Model)
+	if model.confirmation == nil {
+		t.Fatal("imported source upload did not open unified confirmation")
+	}
+	model, _ = confirmAndSubmit(t, model)
 	imported := client.actions[len(client.actions)-1]
 	if client.uploadedType != "application/x-yaml" ||
 		imported.Kind != runtimeapi.ActionAddImportedSource ||
@@ -1060,6 +1058,8 @@ func TestModelManagesMultipleSourceTypesAndSwitchesSelectedSource(t *testing.T) 
 		t.Fatalf("imported source operation = type %q action %#v", client.uploadedType, imported)
 	}
 
+	updated, _ = model.Update(keyPress('2'))
+	model = updated.(Model)
 	view := model.View().Content
 	if !strings.Contains(view, "generated [当前]") ||
 		!strings.Contains(view, runtimeapi.SourceTypeSubmuxOutput) ||
@@ -1212,6 +1212,10 @@ func TestModelManagesResourcesOverridesAndLayeredPreviewThroughRuntimeClient(t *
 	}
 	updated, _ = model.Update(command())
 	model = updated.(Model)
+	if model.confirmation == nil {
+		t.Fatal("resource upload did not open unified confirmation")
+	}
+	model, _ = confirmAndSubmit(t, model)
 	resourceAction := client.actions[len(client.actions)-1]
 	if client.uploadedType != runtimeapi.ManagedResourceContentType ||
 		resourceAction.Kind != runtimeapi.ActionAddManagedResource ||
@@ -1252,14 +1256,21 @@ func TestModelManagesResourcesOverridesAndLayeredPreviewThroughRuntimeClient(t *
 	if command == nil {
 		t.Fatal("override set did not return a command")
 	}
+	model.lastOperation.State = runtimeapi.OperationSucceeded
 	updated, _ = model.Update(command())
 	model = updated.(Model)
+	if model.confirmation == nil {
+		t.Fatal("override upload did not open unified confirmation")
+	}
+	model, _ = confirmAndSubmit(t, model)
 	overrideAction := client.actions[len(client.actions)-1]
 	if client.uploadedType != "application/x-yaml" ||
 		overrideAction.Kind != runtimeapi.ActionSetAdvancedOverride {
 		t.Fatalf("override operation = type %q action %#v", client.uploadedType, overrideAction)
 	}
 
+	updated, _ = model.Update(keyPress('2'))
+	model = updated.(Model)
 	view := model.View().Content
 	if !strings.Contains(view, "provider.main") || !strings.Contains(view, "高级覆盖") {
 		t.Fatalf("layer view = %q", view)
@@ -1272,4 +1283,18 @@ func keyPress(character rune) tea.KeyPressMsg {
 
 func ctrlKey(character rune) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Code: character, Mod: tea.ModCtrl}
+}
+
+func confirmAndSubmit(t *testing.T, model Model) (Model, tea.Cmd) {
+	t.Helper()
+	if model.confirmation == nil {
+		t.Fatal("expected a pending Runtime operation confirmation")
+	}
+	updated, command := model.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	model = updated.(Model)
+	if command == nil {
+		t.Fatal("confirmed Runtime operation did not return a submit command")
+	}
+	updated, followUp := model.Update(command())
+	return updated.(Model), followUp
 }

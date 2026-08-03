@@ -38,6 +38,9 @@ func (m Model) View() tea.View {
 			lines = append(lines, m.renderStatusPage())
 		}
 	}
+	if m.confirmation != nil {
+		lines = append(lines, "", m.renderConfirmation())
+	}
 	lines = append(lines,
 		"",
 		m.renderShellFooter(),
@@ -326,10 +329,67 @@ func (m Model) renderShellFooter() string {
 	status := renderStatus(m.status, m.err, m.busy)
 	return strings.Join([]string{
 		status,
+		m.renderOperationStrip(),
 		warnStyle.Render(runtimeapi.SensitiveDataWarning),
 		fmt.Sprintf("焦点 %d/%d · %s  |  1–5 页面 · Tab 焦点 · / 搜索 · ? 帮助 · r 刷新 · q 退出", focus+1, len(definition.regions), region),
 		"所有客户端只通过 Runtime 本机 IPC 管理",
 	}, "\n")
+}
+
+func (m Model) renderConfirmation() string {
+	confirmation := m.confirmation
+	if confirmation == nil {
+		return ""
+	}
+	return strings.Join([]string{
+		warnStyle.Render("确认运行操作 · " + confirmation.Title),
+		"操作目标    " + confirmation.Target,
+		"影响        " + confirmation.Impact,
+		"可能中断    " + confirmation.Interruption,
+		"配置版本    " + confirmation.ConfigVersion,
+		"恢复方式    " + confirmation.Recovery,
+		"Enter 确认 · Esc 取消；确认前不会修改 Runtime 状态",
+	}, "\n")
+}
+
+func (m Model) renderOperationStrip() string {
+	operation := m.lastOperation
+	if currentID := m.snapshot.Operations.CurrentOperationID; currentID != "" && currentID != operation.ID {
+		return fmt.Sprintf("运行操作 · %s · 正在读取详情 · 队列 %d", currentID, m.snapshot.Operations.Queued)
+	}
+	if operation.ID == "" {
+		if m.operationUncertain {
+			return errorStyle.Render("运行操作 · 结果不确定 · 不会自动重放；重新连接后请核对运行操作")
+		}
+		if m.snapshot.Operations.CurrentOperationID != "" {
+			return fmt.Sprintf("运行操作 · %s · 正在读取详情 · 队列 %d", m.snapshot.Operations.CurrentOperationID, m.snapshot.Operations.Queued)
+		}
+		if m.snapshot.Operations.RecentOperationID != "" {
+			return fmt.Sprintf("最近运行操作 · %s · 正在读取结果 · 队列 %d", m.snapshot.Operations.RecentOperationID, m.snapshot.Operations.Queued)
+		}
+		return fmt.Sprintf("运行操作 · 无 · 队列 %d", m.snapshot.Operations.Queued)
+	}
+	state := fmt.Sprintf(
+		"运行操作 · %s · %s · %s · %d%% · 耗时 %s · 队列 %d",
+		operation.ID,
+		valueOr(operation.State, "未知"),
+		valueOr(operation.Stage, "未知阶段"),
+		operation.Progress,
+		operationElapsed(operation),
+		m.snapshot.Operations.Queued,
+	)
+	if operation.Cancellable {
+		state += " · 可取消"
+	} else if !operationTerminal(operation.State) {
+		state += " · 不可取消"
+	}
+	if m.operationUncertain {
+		state += " · 结果不确定 · 不会自动重放"
+	}
+	if operation.Error != nil {
+		state += " · " + operation.Error.Code + ": " + operation.Error.Message
+	}
+	return state
 }
 
 func (m Model) focusHeading(index int, title string) string {
@@ -352,6 +412,9 @@ func (m Model) currentSourceSummary() *runtimeapi.SourceSummary {
 
 func (m Model) operationLine() string {
 	operation := m.lastOperation
+	if currentID := m.snapshot.Operations.CurrentOperationID; currentID != "" && currentID != operation.ID {
+		return fmt.Sprintf("%s · 正在读取详情 · 队列 %d", currentID, m.snapshot.Operations.Queued)
+	}
 	if operation.ID == "" {
 		if m.snapshot.Operations.CurrentOperationID == "" {
 			return mutedStyle.Render("没有正在执行或排队的运行操作")

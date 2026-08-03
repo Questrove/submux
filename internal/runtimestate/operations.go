@@ -634,6 +634,7 @@ func operationSummary(transaction *bbolt.Tx, currentID string) (runtimeapi.Opera
 		return runtimeapi.OperationStatus{}, errors.New("Runtime operation state is unavailable")
 	}
 	status := runtimeapi.OperationStatus{CurrentOperationID: currentID}
+	var recentAt time.Time
 	err := bucket.ForEach(func(_, value []byte) error {
 		var operation runtimeapi.Operation
 		if err := json.Unmarshal(value, &operation); err != nil {
@@ -641,6 +642,11 @@ func operationSummary(transaction *bbolt.Tx, currentID string) (runtimeapi.Opera
 		}
 		if operation.State == runtimeapi.OperationQueued {
 			status.Queued++
+		}
+		if isTerminalOperationState(operation.State) &&
+			(status.RecentOperationID == "" || operation.UpdatedAt.After(recentAt)) {
+			status.RecentOperationID = operation.ID
+			recentAt = operation.UpdatedAt
 		}
 		return nil
 	})
