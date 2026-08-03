@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -116,6 +117,23 @@ func TestBackupExportPreviewAndRestore(t *testing.T) {
 		restorePreview.ManagedResourceCount != 1 || !restorePreview.HasAdvancedOverride ||
 		restorePreview.RecentConfigurationCount != 3 || len(restorePreview.PendingSettings) == 0 {
 		t.Fatalf("restore preview = %#v", restorePreview)
+	}
+	if !restorePreview.Compatibility.Compatible ||
+		restorePreview.Compatibility.RuntimeProtocol != runtimeapi.ProtocolVersion ||
+		restorePreview.Compatibility.PortableStateSchema != runtimestate.PortableStateSchema ||
+		len(restorePreview.Sources) != 1 || restorePreview.Sources[0].Name != "portable" || !restorePreview.Sources[0].Current ||
+		len(restorePreview.ManagedResources) != 1 || restorePreview.ManagedResources[0].Name != "secret.pem" ||
+		len(restorePreview.RecentConfigurations) == 0 || len(restorePreview.Covered) == 0 || len(restorePreview.Excluded) == 0 {
+		t.Fatalf("structured restore preview = %#v", restorePreview)
+	}
+	encodedPreview, err := json.Marshal(restorePreview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"backup-url-secret", "backup-user-secret", "backup-password-secret"} {
+		if bytes.Contains(encodedPreview, []byte(secret)) {
+			t.Fatalf("restore preview exposed %q", secret)
+		}
 	}
 
 	targetState := openBackupTestState(t, "target")

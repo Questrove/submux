@@ -15,39 +15,41 @@ import (
 )
 
 type fakeClient struct {
-	snapshot           runtimeapi.Snapshot
-	actions            []runtimeapi.Action
-	uploaded           []byte
-	uploadedType       string
-	previewed          string
-	gotten             string
-	waited             string
-	cancelled          string
-	verifyCalls        int
-	overrideReads      int
-	revealCalls        int
-	diagnosticPreviews int
-	diagnosticCreates  int
-	operationSerial    int
-	networkRequests    []runtimeapi.NetworkPreviewRequest
-	networkPreview     runtimeapi.NetworkPreview
-	updatePreview      runtimeapi.MihomoUpdatePlan
-	productRequests    []runtimeapi.ProductUpdatePreviewRequest
-	productPreview     runtimeapi.ProductUpdatePlan
-	backupPreviews     int
-	backupExports      int
-	backupInspections  int
-	lastBackupExport   runtimeapi.BackupExportRequest
-	trafficRequests    []runtimeapi.TrafficHistoryRequest
-	trafficHistories   []runtimeapi.TrafficHistory
-	trafficError       error
-	connectionRequests []runtimeapi.ConnectionQuery
-	connectionPages    []runtimeapi.ConnectionPage
-	connectionError    error
-	ruleRequests       []runtimeapi.RuleQuery
-	ruleSets           []runtimeapi.RuleSet
-	ruleError          error
-	candidateRequests  []runtimeapi.PreviewCandidateRequest
+	snapshot                  runtimeapi.Snapshot
+	actions                   []runtimeapi.Action
+	uploaded                  []byte
+	uploadedType              string
+	previewed                 string
+	gotten                    string
+	waited                    string
+	cancelled                 string
+	verifyCalls               int
+	overrideReads             int
+	revealCalls               int
+	diagnosticPreviews        int
+	diagnosticCreates         int
+	diagnosticPreviewRequests []runtimeapi.DiagnosticsRequest
+	diagnosticCreateRequests  []runtimeapi.DiagnosticsRequest
+	operationSerial           int
+	networkRequests           []runtimeapi.NetworkPreviewRequest
+	networkPreview            runtimeapi.NetworkPreview
+	updatePreview             runtimeapi.MihomoUpdatePlan
+	productRequests           []runtimeapi.ProductUpdatePreviewRequest
+	productPreview            runtimeapi.ProductUpdatePlan
+	backupPreviews            int
+	backupExports             int
+	backupInspections         int
+	lastBackupExport          runtimeapi.BackupExportRequest
+	trafficRequests           []runtimeapi.TrafficHistoryRequest
+	trafficHistories          []runtimeapi.TrafficHistory
+	trafficError              error
+	connectionRequests        []runtimeapi.ConnectionQuery
+	connectionPages           []runtimeapi.ConnectionPage
+	connectionError           error
+	ruleRequests              []runtimeapi.RuleQuery
+	ruleSets                  []runtimeapi.RuleSet
+	ruleError                 error
+	candidateRequests         []runtimeapi.PreviewCandidateRequest
 }
 
 func (f *fakeClient) Rules(_ context.Context, query runtimeapi.RuleQuery) (runtimeapi.RuleSet, error) {
@@ -199,10 +201,11 @@ func (f *fakeClient) RevealSourceURL(
 }
 
 func (f *fakeClient) PreviewDiagnostics(
-	context.Context,
-	runtimeapi.DiagnosticsRequest,
+	_ context.Context,
+	request runtimeapi.DiagnosticsRequest,
 ) (runtimeapi.DiagnosticsPreview, error) {
 	f.diagnosticPreviews++
+	f.diagnosticPreviewRequests = append(f.diagnosticPreviewRequests, request)
 	return runtimeapi.DiagnosticsPreview{
 		Warning: runtimeapi.SensitiveDataWarning,
 		Items:   []runtimeapi.DiagnosticItem{{Name: "snapshot.json", Included: true, Size: 10}},
@@ -210,10 +213,11 @@ func (f *fakeClient) PreviewDiagnostics(
 }
 
 func (f *fakeClient) CreateDiagnostics(
-	context.Context,
-	runtimeapi.DiagnosticsRequest,
+	_ context.Context,
+	request runtimeapi.DiagnosticsRequest,
 ) (runtimeapi.DiagnosticsResult, error) {
 	f.diagnosticCreates++
+	f.diagnosticCreateRequests = append(f.diagnosticCreateRequests, request)
 	return runtimeapi.DiagnosticsResult{FileName: "diagnostics.zip", Size: 10}, nil
 }
 

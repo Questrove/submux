@@ -151,6 +151,33 @@ func (s *Service) Inspect(body []byte, contentID string) (runtimeapi.BackupResto
 	if err != nil {
 		return runtimeapi.BackupRestorePreview{}, err
 	}
+	sources := make([]runtimeapi.BackupRestoreSource, 0, len(parsed.State.Sources))
+	for _, source := range parsed.State.Sources {
+		sources = append(sources, runtimeapi.BackupRestoreSource{
+			ID:      source.Record.ID,
+			Name:    source.Record.Name,
+			Type:    source.Record.Type,
+			Current: source.Record.ID == parsed.State.CurrentSourceID,
+		})
+	}
+	resources := make([]runtimeapi.BackupRestoreResource, 0, len(parsed.State.ManagedResources))
+	for _, resource := range parsed.State.ManagedResources {
+		resources = append(resources, runtimeapi.BackupRestoreResource{
+			ID:     resource.Record.ID,
+			Name:   resource.Record.Name,
+			Kind:   resource.Record.Kind,
+			Size:   resource.Record.Size,
+			SHA256: resource.Record.SHA256,
+		})
+	}
+	recent := make([]runtimeapi.BackupRestoreEntry, 0, len(parsed.Manifest.RecentConfigurations))
+	for _, entry := range parsed.Manifest.RecentConfigurations {
+		recent = append(recent, runtimeapi.BackupRestoreEntry{
+			Name:   entry.Name,
+			Size:   entry.Size,
+			SHA256: entry.SHA256,
+		})
+	}
 	return runtimeapi.BackupRestorePreview{
 		ContentID:                contentID,
 		FormatVersion:            parsed.Manifest.FormatVersion,
@@ -161,6 +188,24 @@ func (s *Service) Inspect(body []byte, contentID string) (runtimeapi.BackupResto
 		ManagedResourceCount:     len(parsed.State.ManagedResources),
 		HasAdvancedOverride:      parsed.State.AdvancedOverride != nil,
 		RecentConfigurationCount: countConfigurationSets(parsed.Manifest.RecentConfigurations),
+		Compatibility: runtimeapi.BackupRestoreCompatibility{
+			Compatible:          true,
+			RuntimeProtocol:     parsed.Manifest.RuntimeProtocol,
+			PortableStateSchema: parsed.State.Schema,
+		},
+		Sources:              sources,
+		ManagedResources:     resources,
+		RecentConfigurations: recent,
+		Covered: []string{
+			"configuration_sources",
+			"managed_resources",
+			"advanced_override",
+			"traffic_policy",
+			"proxy_selections",
+			"machine_settings",
+			"recent_good_configurations",
+		},
+		Excluded: append([]string(nil), parsed.Manifest.Excluded...),
 		MachineSettings: map[string]string{
 			"run_mode":             parsed.Manifest.MachineSettings.RunMode,
 			"mihomo_desired_state": parsed.Manifest.MachineSettings.MihomoDesiredState,

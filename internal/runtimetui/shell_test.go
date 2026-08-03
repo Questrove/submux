@@ -150,7 +150,7 @@ func TestRuntimeTUIReadOnlyRegionsGiveConsistentKeyboardFeedback(t *testing.T) {
 	client := &scriptedEventClient{fakeClient: &fakeClient{snapshot: shellSnapshot(7, 4)}}
 	model, _ := initializeShellModel(t, client)
 
-	for _, page := range []rune{'3', '4', '5'} {
+	for _, page := range []rune{'3', '4'} {
 		updated, _ := model.Update(keyPress(page))
 		model = updated.(Model)
 		updated, _ = model.Update(tea.KeyPressMsg{Code: tea.KeyDown})

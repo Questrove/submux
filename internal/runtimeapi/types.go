@@ -395,19 +395,52 @@ type BackupRestorePreviewRequest struct {
 	ContentID string `json:"content_id"`
 }
 
+type BackupRestoreCompatibility struct {
+	Compatible          bool `json:"compatible"`
+	RuntimeProtocol     int  `json:"runtime_protocol"`
+	PortableStateSchema int  `json:"portable_state_schema"`
+}
+
+type BackupRestoreSource struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Current bool   `json:"current"`
+}
+
+type BackupRestoreResource struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
+type BackupRestoreEntry struct {
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+}
+
 type BackupRestorePreview struct {
-	ContentID                string            `json:"content_id"`
-	FormatVersion            int               `json:"format_version"`
-	CreatedAt                time.Time         `json:"created_at"`
-	SourceInstallationID     string            `json:"source_installation_id"`
-	Restorable               bool              `json:"restorable"`
-	SourceCount              int               `json:"source_count"`
-	ManagedResourceCount     int               `json:"managed_resource_count"`
-	HasAdvancedOverride      bool              `json:"has_advanced_override"`
-	RecentConfigurationCount int               `json:"recent_configuration_count"`
-	MachineSettings          map[string]string `json:"machine_settings"`
-	PendingSettings          []string          `json:"pending_settings"`
-	Warning                  string            `json:"warning"`
+	ContentID                string                     `json:"content_id"`
+	FormatVersion            int                        `json:"format_version"`
+	CreatedAt                time.Time                  `json:"created_at"`
+	SourceInstallationID     string                     `json:"source_installation_id"`
+	Restorable               bool                       `json:"restorable"`
+	SourceCount              int                        `json:"source_count"`
+	ManagedResourceCount     int                        `json:"managed_resource_count"`
+	HasAdvancedOverride      bool                       `json:"has_advanced_override"`
+	RecentConfigurationCount int                        `json:"recent_configuration_count"`
+	Compatibility            BackupRestoreCompatibility `json:"compatibility"`
+	Sources                  []BackupRestoreSource      `json:"sources"`
+	ManagedResources         []BackupRestoreResource    `json:"managed_resources"`
+	RecentConfigurations     []BackupRestoreEntry       `json:"recent_configurations"`
+	Covered                  []string                   `json:"covered"`
+	Excluded                 []string                   `json:"excluded"`
+	MachineSettings          map[string]string          `json:"machine_settings"`
+	PendingSettings          []string                   `json:"pending_settings"`
+	Warning                  string                     `json:"warning"`
 }
 
 type Event struct {

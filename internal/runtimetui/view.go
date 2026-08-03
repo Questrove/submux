@@ -2,6 +2,7 @@ package runtimetui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,16 @@ import (
 )
 
 func (m Model) View() tea.View {
+	if m.operationDetailOpen {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderOperationDetail(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
 	if m.proxyGroupOpen {
 		return tea.NewView(strings.Join([]string{
 			m.renderShellHeader(),
@@ -487,45 +498,222 @@ func connectionRulePayloadSuffix(payload string) string {
 func (m Model) renderMaintenancePage() string {
 	lines := []string{
 		m.focusHeading(0, "更新与回滚"),
-		fmt.Sprintf("Runtime %s · 上一版 %s", valueOr(m.snapshot.Updates.RuntimeCurrentVersion, "未知"), valueOr(m.snapshot.Updates.RuntimePreviousVersion, "无")),
-		fmt.Sprintf("Mihomo %s · 上一版 %s", valueOr(m.snapshot.Updates.MihomoCurrentVersion, "未安装"), valueOr(m.snapshot.Updates.MihomoPreviousVersion, "无")),
+		fmt.Sprintf("Runtime 当前 %s · 回滚目标 %s", valueOr(m.snapshot.Updates.RuntimeCurrentVersion, "未知"), valueOr(m.snapshot.Updates.RuntimePreviousVersion, "无")),
+		fmt.Sprintf("Mihomo 当前 %s · 回滚目标 %s", valueOr(m.snapshot.Updates.MihomoCurrentVersion, "未安装"), valueOr(m.snapshot.Updates.MihomoPreviousVersion, "无")),
+		fmt.Sprintf("Mihomo 回滚 · 来源 本机保留的已验证版本 · 可用 %s", boolLabel(m.snapshot.Updates.MihomoPreviousVersion != "")),
+		"校验 回滚后执行 Mihomo 运行状态和健康检查 · 可能中断 代理短暂停止",
+		"恢复 回滚版本验证失败时恢复操作前核心",
+		fmt.Sprintf("Runtime 回滚 · 来源 本机已验证的产品恢复点 · 可用 %s", boolLabel(m.snapshot.Updates.RuntimePreviousVersion != "")),
+		"校验 回滚后执行产品健康检查并恢复预期运行状态 · 可能中断 先恢复直连并短暂停止 Runtime 服务",
+		"恢复 由平台安装器使用产品恢复点处理失败",
 	}
 	if m.mihomoUpdate.PlanID != "" {
-		lines = append(lines, fmt.Sprintf("Mihomo 更新计划 · %s · %s", m.mihomoUpdate.Version, m.mihomoUpdate.PlanID))
+		verification := "静态配置未通过"
+		if m.mihomoUpdate.StaticConfigVerified {
+			verification = "静态配置通过"
+		}
+		lines = append(lines,
+			fmt.Sprintf("Mihomo 目标 %s → %s · 计划 %s", valueOr(m.mihomoUpdate.CurrentVersion, "未知"), m.mihomoUpdate.Version, m.mihomoUpdate.PlanID),
+			fmt.Sprintf("来源 %s · 信任 %s · 仓库 %s", valueOr(m.mihomoUpdate.Source, "未知"), valueOr(m.mihomoUpdate.Trust, "未知"), valueOr(m.mihomoUpdate.Repository, "未知")),
+			fmt.Sprintf("校验 %s · 资产 %s", verification, shortDigest(m.mihomoUpdate.AssetSHA256)),
+			"可能中断 Mihomo 将短暂重启",
+			fmt.Sprintf("恢复 可回滚到上一版 Mihomo %s", valueOr(m.mihomoUpdate.PreviousVersion, m.snapshot.Updates.MihomoPreviousVersion)),
+		)
+		if m.mihomoUpdate.Warning != "" {
+			lines = append(lines, warnStyle.Render(m.mihomoUpdate.Warning))
+		}
 	}
 	if m.productUpdate.PlanID != "" {
-		lines = append(lines, fmt.Sprintf("Runtime 更新计划 · %s · %s", m.productUpdate.Version, m.productUpdate.PlanID))
+		verification := "不可安装"
+		if m.productUpdate.Installable {
+			verification = "校验通过，可安装"
+		}
+		migration := fmt.Sprintf("数据库 %d → %d", m.productUpdate.Migration.CurrentSchema, m.productUpdate.Migration.TargetSchema)
+		if !m.productUpdate.Migration.Required {
+			migration += " · 无需迁移"
+		} else if m.productUpdate.Migration.Reversible {
+			migration += " · 可逆"
+		} else {
+			migration += " · 不可逆"
+		}
+		lines = append(lines,
+			fmt.Sprintf("Runtime 目标 %s → %s · 计划 %s", valueOr(m.productUpdate.CurrentVersion, "未知"), m.productUpdate.Version, m.productUpdate.PlanID),
+			fmt.Sprintf("来源 %s · 信任 %s · %s", valueOr(m.productUpdate.Source, "未知"), valueOr(m.productUpdate.Trust, "未知"), verification),
+			fmt.Sprintf("校验 资产 %s · %s", shortDigest(m.productUpdate.AssetSHA256), migration),
+			"可能中断 "+valueOr(m.productUpdate.NetworkInterruption, "Runtime 将短暂重启"),
+			"恢复 可回滚程序与 Runtime 数据库",
+		)
+		if m.productUpdate.Warning != "" {
+			lines = append(lines, warnStyle.Render(m.productUpdate.Warning))
+		}
 	}
+	lines = append(lines, mutedStyle.Render("Enter 检查两类更新 · U/P 确认更新 · R/O 回滚"))
 
 	lines = append(lines, "", m.focusHeading(1, "备份与恢复"))
 	if len(m.backupPreview.Items) == 0 && m.backupRestore.ContentID == "" && m.backupFile == "" {
-		lines = append(lines, mutedStyle.Render("尚未预览备份或恢复"))
+		lines = append(lines, mutedStyle.Render("尚未预览备份或恢复；Enter 预览脱敏清单"))
+	}
+	if len(m.backupPreview.Items) > 0 {
+		lines = append(lines, fmt.Sprintf("备份预览 · 格式 %d · 可恢复 %s · 包含秘密 %s", m.backupPreview.FormatVersion, boolLabel(m.backupPreview.Restorable), boolLabel(m.backupPreview.IncludeSecrets)))
 	}
 	for _, item := range m.backupPreview.Items {
-		if item.Included {
-			lines = append(lines, fmt.Sprintf("%s · %d 项 · %d 字节", item.Name, item.Count, item.Size))
-		}
+		lines = append(lines, fmt.Sprintf("%s · %s · %s · %d 项 · %d 字节", item.Name, includedLabel(item.Included), sensitivityLabel(item.Sensitive), item.Count, item.Size))
+	}
+	if len(m.backupPreview.Excluded) > 0 {
+		lines = append(lines, "排除 "+strings.Join(m.backupPreview.Excluded, "、"))
+	}
+	if m.backupPreview.Warning != "" {
+		lines = append(lines, warnStyle.Render(m.backupPreview.Warning))
 	}
 	if m.backupFile != "" {
-		lines = append(lines, okStyle.Render("备份已保存："+m.backupFile))
+		lines = append(lines, okStyle.Render("备份已保存："+m.backupFile+" · "+shortDigest(m.backupArchive.SHA256)))
 	}
 	if m.backupRestore.ContentID != "" {
-		lines = append(lines, fmt.Sprintf("恢复预览 · %d 个来源 · %d 个托管资源", m.backupRestore.SourceCount, m.backupRestore.ManagedResourceCount))
+		lines = append(lines,
+			fmt.Sprintf("恢复预览 · 格式 %d · 可恢复 %s", m.backupRestore.FormatVersion, boolLabel(m.backupRestore.Restorable)),
+			fmt.Sprintf("%d 个来源 · %d 个托管资源 · %d 份近期配置", m.backupRestore.SourceCount, m.backupRestore.ManagedResourceCount, m.backupRestore.RecentConfigurationCount),
+			"高级覆盖 "+includedLabel(m.backupRestore.HasAdvancedOverride),
+		)
+		if m.backupRestore.Compatibility.RuntimeProtocol > 0 || m.backupRestore.Compatibility.PortableStateSchema > 0 {
+			lines = append(lines, fmt.Sprintf(
+				"兼容性 %s · Runtime 协议 %d · 状态格式 %d",
+				compatibilityLabel(m.backupRestore.Compatibility.Compatible),
+				m.backupRestore.Compatibility.RuntimeProtocol,
+				m.backupRestore.Compatibility.PortableStateSchema,
+			))
+		}
+		if len(m.backupRestore.Covered) > 0 {
+			lines = append(lines, "覆盖 "+strings.Join(m.backupRestore.Covered, "、"))
+		}
+		for _, source := range m.backupRestore.Sources {
+			current := ""
+			if source.Current {
+				current = " · 当前来源"
+			}
+			lines = append(lines, fmt.Sprintf("来源 %s · %s%s", valueOr(source.Name, source.ID), valueOr(source.Type, "未知类型"), current))
+		}
+		for _, resource := range m.backupRestore.ManagedResources {
+			lines = append(lines, fmt.Sprintf("托管资源 %s · %s · %d 字节 · %s", valueOr(resource.Name, resource.ID), valueOr(resource.Kind, "未知类型"), resource.Size, shortDigest(resource.SHA256)))
+		}
+		for _, entry := range m.backupRestore.RecentConfigurations {
+			lines = append(lines, fmt.Sprintf("近期配置 %s · %d 字节 · %s", entry.Name, entry.Size, shortDigest(entry.SHA256)))
+		}
+		if len(m.backupRestore.Excluded) > 0 {
+			lines = append(lines, "不覆盖 "+strings.Join(m.backupRestore.Excluded, "、"))
+		}
+		settings := make([]string, 0, len(m.backupRestore.MachineSettings))
+		for name, value := range m.backupRestore.MachineSettings {
+			settings = append(settings, name+" = "+value)
+		}
+		sort.Strings(settings)
+		lines = append(lines, settings...)
+		if len(m.backupRestore.PendingSettings) > 0 {
+			lines = append(lines, "恢复后待应用 "+strings.Join(m.backupRestore.PendingSettings, "、"))
+		}
+		if m.backupRestore.Warning != "" {
+			lines = append(lines, warnStyle.Render(m.backupRestore.Warning))
+		}
 	}
 
 	lines = append(lines, "", m.focusHeading(2, "诊断"))
 	if len(m.diagnostics.Items) == 0 {
-		lines = append(lines, mutedStyle.Render("Ctrl+G 预览或生成脱敏诊断包"))
+		lines = append(lines, mutedStyle.Render("Enter/Ctrl+G 预览默认脱敏诊断包 · G 预览完整诊断内容"))
 	}
 	for _, item := range m.diagnostics.Items {
-		lines = append(lines, fmt.Sprintf("%s · %d 字节", item.Name, item.Size))
+		lines = append(lines, fmt.Sprintf("%s · %s · %s · %d 字节", item.Name, includedLabel(item.Included), sensitivityLabel(item.Sensitive), item.Size))
+	}
+	if m.diagnostics.Warning != "" {
+		lines = append(lines, warnStyle.Render(m.diagnostics.Warning))
 	}
 	if m.diagnosticsFile.FileName != "" {
-		lines = append(lines, okStyle.Render("诊断包已保存："+m.diagnosticsFile.FileName))
+		lines = append(lines, okStyle.Render(fmt.Sprintf("诊断包已保存：%s · %d 字节 · %s · %s", m.diagnosticsFile.FileName, m.diagnosticsFile.Size, shortDigest(m.diagnosticsFile.SHA256), formatPreviewTime(m.diagnosticsFile.CreatedAt))))
 	}
 
-	lines = append(lines, "", m.focusHeading(3, "运行操作"), m.operationLine())
+	lines = append(lines, "", m.focusHeading(3, "运行操作"), m.operationLine(), mutedStyle.Render("Enter 查看阶段、错误、恢复和产物详情"))
 	return strings.Join(lines, "\n")
+}
+
+func (m Model) renderOperationDetail() string {
+	operation := m.lastOperation
+	if operation.ID == "" {
+		return strings.Join([]string{
+			titleStyle.Render("运行操作详情"),
+			mutedStyle.Render("尚未读取到运行操作详情"),
+			"Esc 或 Enter 返回",
+		}, "\n")
+	}
+	description := m.describeAction(operation.Action)
+	lines := []string{
+		titleStyle.Render("运行操作详情"),
+		fmt.Sprintf("%s · %s · %s", operation.ID, valueOr(description.Title, operation.Action.Kind), valueOr(operation.State, "未知")),
+		fmt.Sprintf("阶段 %s · %d%%", valueOr(operation.Stage, "未知"), operation.Progress),
+		fmt.Sprintf("创建 %s · 更新 %s · 耗时 %s", formatOperationTime(operation.CreatedAt), formatOperationTime(operation.UpdatedAt), operationElapsed(operation)),
+		fmt.Sprintf("可取消 %s · 调用方 %s", boolLabel(operation.Cancellable), valueOr(operation.CallerIdentity, "未知")),
+		"操作目标 " + description.Target,
+		"影响 " + description.Impact,
+		"可能中断 " + description.Interruption,
+		"恢复方式 " + description.Recovery,
+	}
+	if operation.Error != nil {
+		lines = append(lines, fmt.Sprintf("错误 %s · %s · 可重试 %s", operation.Error.Code, operation.Error.Message, boolLabel(operation.Error.Retryable)))
+	}
+	if result := operation.Result; result != nil {
+		if result.AutomaticBackupFile != "" {
+			lines = append(lines, "自动备份 "+result.AutomaticBackupFile)
+		}
+		if result.BackupSHA256 != "" {
+			lines = append(lines, "备份摘要 "+shortDigest(result.BackupSHA256))
+		}
+		if result.ConfigRevision != "" {
+			lines = append(lines, "配置版本 "+result.ConfigRevision)
+		}
+		if result.CoreVersion != "" || result.PreviousCoreVersion != "" {
+			lines = append(lines, fmt.Sprintf("Mihomo %s ← %s", valueOr(result.CoreVersion, "未知"), valueOr(result.PreviousCoreVersion, "未知")))
+		}
+		if result.RuntimeVersion != "" || result.PreviousRuntimeVersion != "" {
+			lines = append(lines, fmt.Sprintf("Runtime %s ← %s", valueOr(result.RuntimeVersion, "未知"), valueOr(result.PreviousRuntimeVersion, "未知")))
+		}
+		if result.ProductRollback != "" {
+			lines = append(lines, "产品恢复点 "+result.ProductRollback)
+		}
+	}
+	lines = append(lines, "", "Esc 或 Enter 返回")
+	return strings.Join(lines, "\n")
+}
+
+func boolLabel(value bool) string {
+	if value {
+		return "是"
+	}
+	return "否"
+}
+
+func includedLabel(value bool) string {
+	if value {
+		return "包含"
+	}
+	return "不包含"
+}
+
+func sensitivityLabel(value bool) string {
+	if value {
+		return "敏感"
+	}
+	return "已脱敏"
+}
+
+func compatibilityLabel(value bool) string {
+	if value {
+		return "通过"
+	}
+	return "不兼容"
+}
+
+func formatOperationTime(value time.Time) string {
+	if value.IsZero() {
+		return "未知"
+	}
+	return value.Local().Format("2006-01-02 15:04:05")
 }
 
 func (m Model) renderPalette() string {
@@ -561,6 +749,7 @@ func (m Model) renderHelp() string {
 		"配置页的本机配置层：Enter 或 Ctrl+Y 选择流量策略并生成候选确认",
 		"配置页最终规则：Enter 或 Ctrl+R 打开；监控页活动连接：Ctrl+R 定位命中规则",
 		"状态页主要代理组、配置页代理组与节点：Enter 或 Ctrl+N 打开选择器",
+		"维护页：Enter 打开区域的安全默认操作；Ctrl+G 生成脱敏诊断，G 需单独确认完整内容",
 		"/ 或 Ctrl+K 搜索页面和操作 · Esc 返回 · ? 关闭帮助 · q 退出",
 		"现有字母快捷键继续可用，页面底部会显示当前焦点。",
 	}, "\n")

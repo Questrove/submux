@@ -93,6 +93,7 @@ type Model struct {
 	revealedURL           string
 	diagnostics           runtimeapi.DiagnosticsPreview
 	diagnosticsFile       runtimeapi.DiagnosticsResult
+	diagnosticsRequest    runtimeapi.DiagnosticsRequest
 	backupPreview         runtimeapi.BackupPreview
 	backupRestore         runtimeapi.BackupRestorePreview
 	backupArchive         runtimeapi.BackupArchive
@@ -112,6 +113,7 @@ type Model struct {
 	operationUncertain    bool
 	operationFault        error
 	waitingOperationID    string
+	operationDetailOpen   bool
 	trafficHistory        []runtimeapi.TrafficSample
 	trafficCursor         uint64
 	trafficRange          time.Duration
@@ -272,6 +274,7 @@ type revealSourceURLMsg struct {
 
 type diagnosticsPreviewMsg struct {
 	preview runtimeapi.DiagnosticsPreview
+	request runtimeapi.DiagnosticsRequest
 }
 
 type diagnosticsResultMsg struct {
@@ -677,8 +680,14 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.busy = false
 		m.err = nil
 		m.diagnostics = message.preview
-		m.sensitiveConfirm = "diagnostics"
-		m.status = "诊断包内容已预览；再次按 Ctrl+G 生成默认脱敏诊断包"
+		m.diagnosticsRequest = message.request
+		if diagnosticsRequestSensitive(message.request) {
+			m.sensitiveConfirm = "diagnostics-full"
+			m.status = "完整诊断内容已预览；再次按 G 明确确认生成"
+		} else {
+			m.sensitiveConfirm = "diagnostics"
+			m.status = "诊断包内容已预览；再次按 Ctrl+G 生成默认脱敏诊断包"
+		}
 	case diagnosticsResultMsg:
 		m.page = pageMaintenance
 		m.focusIndex = 2
@@ -773,6 +782,18 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.proxyGroupOpen {
 		return m.updateProxyGroups(message)
+	}
+	if m.operationDetailOpen {
+		if key, ok := message.(tea.KeyPressMsg); ok {
+			switch key.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			case "esc", "enter":
+				m.operationDetailOpen = false
+				m.status = "已关闭运行操作详情"
+			}
+		}
+		return m, nil
 	}
 
 	if m.sourceForm != nil {
@@ -1128,11 +1149,29 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.sensitiveConfirm != "diagnostics" {
 				m.busy = true
 				m.status = runtimeapi.SensitiveDataWarning + " 正在生成默认脱敏预览…"
-				return m, m.previewDiagnosticsCmd()
+				return m, m.previewDiagnosticsCmd(runtimeapi.DiagnosticsRequest{})
 			}
 			m.busy = true
 			m.status = "正在生成默认脱敏诊断包…"
-			return m, m.createDiagnosticsCmd()
+			return m, m.createDiagnosticsCmd(runtimeapi.DiagnosticsRequest{})
+		case "G":
+			if m.page != pageMaintenance || m.focusIndex != 2 {
+				m.status = "完整诊断包只在维护页的诊断区域生成"
+				return m, nil
+			}
+			request := runtimeapi.DiagnosticsRequest{
+				IncludeRawConfig:   true,
+				IncludeFullLogs:    true,
+				IncludeNetworkInfo: true,
+			}
+			m.busy = true
+			if m.sensitiveConfirm != "diagnostics-full" {
+				m.status = runtimeapi.SensitiveDataWarning + " 正在预览完整诊断内容…"
+				return m, m.previewDiagnosticsCmd(request)
+			}
+			request.ConfirmSensitive = true
+			m.status = "正在生成已明确确认的完整诊断包…"
+			return m, m.createDiagnosticsCmd(request)
 		case "ctrl+p":
 			m.networkForm = newNetworkForm(runtimeapi.RunModeExplicit)
 			m.err = nil
@@ -2138,24 +2177,28 @@ func (m Model) revealSourceURLCmd(sourceID string) tea.Cmd {
 	}
 }
 
-func (m Model) previewDiagnosticsCmd() tea.Cmd {
+func (m Model) previewDiagnosticsCmd(request runtimeapi.DiagnosticsRequest) tea.Cmd {
 	return func() tea.Msg {
-		preview, err := m.client.PreviewDiagnostics(m.ctx, runtimeapi.DiagnosticsRequest{})
+		preview, err := m.client.PreviewDiagnostics(m.ctx, request)
 		if err != nil {
 			return errMsg{err: err}
 		}
-		return diagnosticsPreviewMsg{preview: preview}
+		return diagnosticsPreviewMsg{preview: preview, request: request}
 	}
 }
 
-func (m Model) createDiagnosticsCmd() tea.Cmd {
+func (m Model) createDiagnosticsCmd(request runtimeapi.DiagnosticsRequest) tea.Cmd {
 	return func() tea.Msg {
-		result, err := m.client.CreateDiagnostics(m.ctx, runtimeapi.DiagnosticsRequest{})
+		result, err := m.client.CreateDiagnostics(m.ctx, request)
 		if err != nil {
 			return errMsg{err: err}
 		}
 		return diagnosticsResultMsg{result: result}
 	}
+}
+
+func diagnosticsRequestSensitive(request runtimeapi.DiagnosticsRequest) bool {
+	return request.IncludeRawConfig || request.IncludeFullLogs || request.IncludeNetworkInfo
 }
 
 func renderStatus(status string, err error, busy bool) string {

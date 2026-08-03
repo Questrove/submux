@@ -175,6 +175,57 @@ func (m *Model) activateFocus() tea.Cmd {
 			m.status = "编辑运行方式；Ctrl+S 生成预览或进入统一确认"
 			return m.networkForm.loadActiveField()
 		}
+	case pageMaintenance:
+		switch m.focusIndex {
+		case 0:
+			commands := make([]tea.Cmd, 0, 2)
+			if client, ok := m.client.(MihomoUpdateClient); ok {
+				m.mihomoUpdate = runtimeapi.MihomoUpdatePlan{}
+				commands = append(commands, m.previewMihomoUpdateCmd(client))
+			}
+			if client, ok := m.client.(ProductUpdateClient); ok {
+				m.productUpdate = runtimeapi.ProductUpdatePlan{}
+				commands = append(commands, m.previewProductUpdateCmd(client))
+			}
+			if len(commands) == 0 {
+				m.status = "当前 TUI 客户端不支持更新检查"
+				return nil
+			}
+			m.busy = true
+			m.err = nil
+			m.status = "正在检查 Mihomo 与 Runtime 更新…"
+			return tea.Batch(commands...)
+		case 1:
+			client, ok := m.client.(BackupClient)
+			if !ok {
+				m.status = "当前 TUI 客户端不支持备份预览"
+				return nil
+			}
+			m.busy = true
+			m.err = nil
+			m.backupPreview = runtimeapi.BackupPreview{}
+			m.status = "正在预览不含秘密的备份清单…"
+			return m.previewBackupCmd(client, false)
+		case 2:
+			m.busy = true
+			m.err = nil
+			m.status = "正在预览默认脱敏诊断包…"
+			return m.previewDiagnosticsCmd(runtimeapi.DiagnosticsRequest{})
+		case 3:
+			if m.lastOperation.ID != "" {
+				m.operationDetailOpen = true
+				m.status = "已打开运行操作详情"
+				return nil
+			}
+			if operationID := m.operationIDForControl(); operationID != "" {
+				m.busy = true
+				m.operationDetailOpen = true
+				m.status = "正在读取运行操作详情…"
+				return m.getCmd(operationID)
+			}
+			m.status = "当前没有可查看的运行操作"
+			return nil
+		}
 	}
 	m.status = "当前区域为只读；使用 Tab 切换焦点或 / 搜索操作"
 	return nil
@@ -209,6 +260,7 @@ func paletteCommands() []paletteCommand {
 		{label: "切换到所选来源", keywords: "应用", key: "t"},
 		{label: "编辑本机高级覆盖", keywords: "YAML 敏感", key: "o"},
 		{label: "预览或生成诊断包", keywords: "日志 故障", key: "ctrl+g"},
+		{label: "预览或生成完整诊断包", keywords: "完整日志 配置 网络 敏感", key: "G"},
 		{label: "检查 Mihomo 更新", keywords: "核心 升级", key: "U"},
 		{label: "检查 Runtime 产品更新", keywords: "升级", key: "P"},
 		{label: "创建脱敏备份清单", keywords: "导出", key: "b"},
