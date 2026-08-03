@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 
@@ -20,6 +21,7 @@ import (
 
 type Client interface {
 	Observe(context.Context) (runtimeapi.Snapshot, error)
+	WatchEvents(context.Context, uint64, func(runtimeapi.Event) error) error
 	UploadImport(context.Context, string, []byte) (runtimeapi.ImportContent, error)
 	GetAdvancedOverride(context.Context, bool) (runtimeapi.AdvancedOverrideDocument, error)
 	PreviewCandidate(context.Context, string) (runtimeapi.CandidatePreview, error)
@@ -80,6 +82,17 @@ type Model struct {
 	backupRestore     runtimeapi.BackupRestorePreview
 	backupArchive     runtimeapi.BackupArchive
 	backupFile        string
+	page              pageID
+	focusIndex        int
+	palette           textinput.Model
+	paletteOpen       bool
+	paletteIndex      int
+	showHelp          bool
+	snapshotStale     bool
+	snapshotFault     error
+	watchingEvents    bool
+	reconnectAttempts int
+	observeGeneration uint64
 }
 
 const (
@@ -106,8 +119,24 @@ type importedSourceDraft struct {
 }
 
 type snapshotMsg struct {
-	snapshot runtimeapi.Snapshot
+	snapshot   runtimeapi.Snapshot
+	generation uint64
 }
+
+type snapshotErrorMsg struct {
+	err        error
+	generation uint64
+}
+
+type runtimeEventMsg struct {
+	event runtimeapi.Event
+}
+
+type runtimeWatchErrorMsg struct {
+	err error
+}
+
+type runtimeReconnectMsg struct{}
 
 type importPreviewMsg struct {
 	content runtimeapi.ImportContent
@@ -172,12 +201,13 @@ type errMsg struct {
 }
 
 var (
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7DD3FC"))
-	labelStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CBD5E1"))
-	okStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC"))
-	warnStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("#FDE68A"))
-	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCA5A5"))
-	mutedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#94A3B8"))
+	errRuntimeEventReceived = errors.New("Runtime event received")
+	titleStyle              = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7DD3FC"))
+	labelStyle              = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CBD5E1"))
+	okStyle                 = lipgloss.NewStyle().Foreground(lipgloss.Color("#86EFAC"))
+	warnStyle               = lipgloss.NewStyle().Foreground(lipgloss.Color("#FDE68A"))
+	errorStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#FCA5A5"))
+	mutedStyle              = lipgloss.NewStyle().Foreground(lipgloss.Color("#94A3B8"))
 )
 
 func New(ctx context.Context, client Client) Model {
@@ -189,12 +219,20 @@ func New(ctx context.Context, client Client) Model {
 	editor.SetWidth(80)
 	editor.SetHeight(16)
 	editor.ShowLineNumbers = true
+	palette := textinput.New()
+	palette.Prompt = "搜索 › "
+	palette.Placeholder = "输入页面或操作，例如：来源、启动、诊断"
+	palette.CharLimit = 80
+	palette.SetWidth(64)
 	return Model{
-		ctx:    ctx,
-		client: client,
-		editor: editor,
-		status: "正在读取 Runtime 状态…",
-		busy:   true,
+		ctx:               ctx,
+		client:            client,
+		editor:            editor,
+		page:              pageStatus,
+		palette:           palette,
+		status:            "正在读取 Runtime 状态…",
+		busy:              true,
+		observeGeneration: 1,
 	}
 }
 
@@ -213,7 +251,7 @@ func Run(ctx context.Context, client Client, input io.Reader, output io.Writer) 
 }
 
 func (m Model) Init() tea.Cmd {
-	return m.observeCmd()
+	return m.observeCmd(m.observeGeneration)
 }
 
 func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
@@ -238,12 +276,52 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.editor.SetHeight(height)
 	case snapshotMsg:
+		if message.generation != m.observeGeneration {
+			return m, nil
+		}
 		m.snapshot = message.snapshot
 		m.syncSelectedSource()
 		m.busy = false
 		m.err = nil
+		m.snapshotStale = false
+		m.snapshotFault = nil
+		m.reconnectAttempts = 0
 		m.status = "状态已更新"
+		if !m.watchingEvents {
+			m.watchingEvents = true
+			return m, m.watchEventsCmd(message.snapshot.LatestEventCursor)
+		}
+	case snapshotErrorMsg:
+		if message.generation != m.observeGeneration {
+			return m, nil
+		}
+		m.busy = false
+		m.snapshotStale = true
+		m.snapshotFault = message.err
+		m.status = "Runtime 本机 IPC 暂时不可用，正在重连"
+		m.reconnectAttempts++
+		return m, reconnectCmd(m.reconnectAttempts)
+	case runtimeEventMsg:
+		m.watchingEvents = false
+		m.status = fmt.Sprintf("收到 Runtime 事件 %s，正在同步状态…", message.event.Type)
+		return m, m.startObserveCmd()
+	case runtimeWatchErrorMsg:
+		m.watchingEvents = false
+		if errors.Is(message.err, context.Canceled) ||
+			(m.ctx.Err() != nil && errors.Is(message.err, m.ctx.Err())) {
+			return m, nil
+		}
+		m.snapshotStale = true
+		m.snapshotFault = message.err
+		m.status = "Runtime 事件连接已断开，保留上次数据并重连"
+		m.reconnectAttempts++
+		return m, reconnectCmd(m.reconnectAttempts)
+	case runtimeReconnectMsg:
+		m.status = "正在重新连接 Runtime 本机 IPC…"
+		return m, m.startObserveCmd()
 	case importPreviewMsg:
+		m.page = pageConfig
+		m.focusIndex = 1
 		m.preview = message.preview
 		m.busy = false
 		m.editing = false
@@ -251,6 +329,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = fmt.Sprintf("候选配置已校验：%s", shortDigest(message.preview.CandidateSHA256))
 		m.editor.Blur()
 	case operationMsg:
+		m.openPage(pageForAction(message.operation.Action.Kind))
 		m.lastOperation = message.operation
 		m.busy = false
 		if m.editing {
@@ -260,7 +339,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = nil
 		m.status = operationStatus(message.operation)
 		if operationTerminal(message.operation.State) {
-			return m, m.observeCmd()
+			return m, m.startObserveCmd()
 		}
 		return m, m.waitCmd(message.operation.ID)
 	case verificationMsg:
@@ -273,6 +352,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "显式代理当前不可用"
 		}
 	case overrideDocumentMsg:
+		m.page = pageConfig
+		m.focusIndex = 2
 		m.busy = false
 		m.editing = true
 		m.editorMode = editorModeOverride
@@ -282,29 +363,39 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "编辑高级覆盖后按 Ctrl+S 校验并保存，Esc 取消"
 		return m, m.editor.Focus()
 	case overridePreviewMsg:
+		m.page = pageConfig
+		m.focusIndex = 2
 		m.preview = message.preview
 		m.busy = false
 		m.err = nil
 		m.status = fmt.Sprintf("高级覆盖预览已校验：%s；Ctrl+S 保存", shortDigest(message.preview.CandidateSHA256))
 	case revealSourceURLMsg:
+		m.page = pageConfig
+		m.focusIndex = 0
 		m.busy = false
 		m.err = nil
 		m.sensitiveConfirm = ""
 		m.revealedURL = message.response.URL
 		m.status = "已临时显示来源原始地址；离开当前界面后不会保存"
 	case diagnosticsPreviewMsg:
+		m.page = pageMaintenance
+		m.focusIndex = 2
 		m.busy = false
 		m.err = nil
 		m.diagnostics = message.preview
 		m.sensitiveConfirm = "diagnostics"
 		m.status = "诊断包内容已预览；再次按 Ctrl+G 生成默认脱敏诊断包"
 	case diagnosticsResultMsg:
+		m.page = pageMaintenance
+		m.focusIndex = 2
 		m.busy = false
 		m.err = nil
 		m.sensitiveConfirm = ""
 		m.diagnosticsFile = message.result
 		m.status = fmt.Sprintf("诊断包已保存：%s", message.result.FileName)
 	case networkPreviewMsg:
+		m.page = pageNetwork
+		m.focusIndex = 1
 		m.networkPreview = message.preview
 		m.busy = false
 		m.editing = false
@@ -312,12 +403,16 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.Blur()
 		m.status = fmt.Sprintf("%s 网络预览已生成：%s", message.preview.Mode, message.preview.PlanID)
 	case mihomoUpdateMsg:
+		m.page = pageMaintenance
+		m.focusIndex = 0
 		m.mihomoUpdate = message.preview
 		m.busy = false
 		m.err = nil
 		m.sensitiveConfirm = ""
 		m.status = fmt.Sprintf("Mihomo %s 更新计划已验证；再按 U 查看确认提示", message.preview.Version)
 	case productUpdateMsg:
+		m.page = pageMaintenance
+		m.focusIndex = 0
 		m.productUpdate = message.preview
 		m.busy = false
 		m.editing = false
@@ -326,6 +421,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.editor.Blur()
 		m.status = fmt.Sprintf("Runtime %s 产品更新计划已验证；再按 P 查看确认提示", message.preview.Version)
 	case backupPreviewMsg:
+		m.page = pageMaintenance
+		m.focusIndex = 1
 		m.backupPreview = message.preview
 		m.busy = false
 		m.err = nil
@@ -337,6 +434,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = message.preview.Warning + " 再按一次 b 选择新输出文件。"
 		}
 	case backupExportMsg:
+		m.page = pageMaintenance
+		m.focusIndex = 1
 		m.backupArchive = message.archive
 		m.backupFile = message.path
 		m.busy = false
@@ -350,6 +449,8 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status = fmt.Sprintf("%s已保存：%s", kind, message.path)
 	case backupRestorePreviewMsg:
+		m.page = pageMaintenance
+		m.focusIndex = 1
 		m.backupRestore = message.preview
 		m.busy = false
 		m.editing = false
@@ -516,7 +617,44 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, command
 	}
 
+	if m.paletteOpen {
+		return m.updatePalette(message)
+	}
+
 	if key, ok := message.(tea.KeyPressMsg); ok {
+		switch key.String() {
+		case "/", "ctrl+k":
+			return m.openPalette()
+		case "?":
+			m.showHelp = !m.showHelp
+			return m, nil
+		case "1", "2", "3", "4", "5":
+			m.openPage(pageFromKey(key.String()))
+			return m, nil
+		case "tab":
+			m.moveFocus(1)
+			return m, nil
+		case "shift+tab":
+			m.moveFocus(-1)
+			return m, nil
+		case "up", "down":
+			if command := m.moveSelection(key.String() == "down"); command != nil {
+				return m, command
+			}
+			return m, nil
+		case "enter":
+			if command := m.activateFocus(); command != nil {
+				return m, command
+			}
+			return m, nil
+		case "esc":
+			if m.showHelp {
+				m.showHelp = false
+			} else if m.page != pageStatus {
+				m.openPage(pageStatus)
+			}
+			return m, nil
+		}
 		if m.busy && key.String() != "q" && key.String() != "ctrl+c" {
 			return m, nil
 		}
@@ -526,7 +664,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			m.busy = true
 			m.status = "正在读取 Runtime 状态…"
-			return m, m.observeCmd()
+			return m, m.startObserveCmd()
 		case "i":
 			m.editing = true
 			m.editorMode = editorModeConfig
@@ -1010,7 +1148,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) View() tea.View {
+func (m Model) legacyView() tea.View {
 	if m.editing {
 		editorTitle := "Submux Runtime · 导入本机配置副本"
 		editorHelp := "Ctrl+S 上传并预览 · Esc 取消"
@@ -1341,14 +1479,46 @@ func (m Model) View() tea.View {
 	return tea.NewView(strings.Join(lines, "\n"))
 }
 
-func (m Model) observeCmd() tea.Cmd {
+func (m *Model) startObserveCmd() tea.Cmd {
+	m.observeGeneration++
+	return m.observeCmd(m.observeGeneration)
+}
+
+func (m Model) observeCmd(generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		snapshot, err := m.client.Observe(m.ctx)
 		if err != nil {
-			return errMsg{err: err}
+			return snapshotErrorMsg{err: err, generation: generation}
 		}
-		return snapshotMsg{snapshot: snapshot}
+		return snapshotMsg{snapshot: snapshot, generation: generation}
 	}
+}
+
+func (m Model) watchEventsCmd(after uint64) tea.Cmd {
+	return func() tea.Msg {
+		var received runtimeapi.Event
+		err := m.client.WatchEvents(m.ctx, after, func(event runtimeapi.Event) error {
+			received = event
+			return errRuntimeEventReceived
+		})
+		if errors.Is(err, errRuntimeEventReceived) {
+			return runtimeEventMsg{event: received}
+		}
+		return runtimeWatchErrorMsg{err: err}
+	}
+}
+
+func reconnectCmd(attempt int) tea.Cmd {
+	delay := 250 * time.Millisecond
+	for index := 1; index < attempt && delay < 5*time.Second; index++ {
+		delay *= 2
+	}
+	if delay > 5*time.Second {
+		delay = 5 * time.Second
+	}
+	return tea.Tick(delay, func(time.Time) tea.Msg {
+		return runtimeReconnectMsg{}
+	})
 }
 
 func (m Model) previewMihomoUpdateCmd(client MihomoUpdateClient) tea.Cmd {

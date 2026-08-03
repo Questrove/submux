@@ -44,6 +44,11 @@ func (f *fakeClient) Observe(context.Context) (runtimeapi.Snapshot, error) {
 	return f.snapshot, nil
 }
 
+func (f *fakeClient) WatchEvents(ctx context.Context, _ uint64, _ func(runtimeapi.Event) error) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
 func (f *fakeClient) UploadImport(_ context.Context, contentType string, body []byte) (runtimeapi.ImportContent, error) {
 	f.uploaded = append([]byte(nil), body...)
 	f.uploadedType = contentType
@@ -548,8 +553,8 @@ func TestModelUsesOneClientForImportPreviewApplyStartStopAndWait(t *testing.T) {
 	model := New(t.Context(), client)
 	updated, command := model.Update(model.Init()())
 	model = updated.(Model)
-	if command != nil {
-		t.Fatal("snapshot update unexpectedly returned a command")
+	if command == nil {
+		t.Fatal("snapshot update did not start Runtime event watching")
 	}
 
 	updated, _ = model.Update(keyPress('i'))
