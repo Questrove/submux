@@ -52,7 +52,8 @@ func pageForAction(kind string) pageID {
 		runtimeapi.ActionSwitchSource,
 		runtimeapi.ActionDeleteSource,
 		runtimeapi.ActionAddManagedResource,
-		runtimeapi.ActionSetAdvancedOverride:
+		runtimeapi.ActionSetAdvancedOverride,
+		runtimeapi.ActionSetTrafficPolicy:
 		return pageConfig
 	case runtimeapi.ActionEnableTUN,
 		runtimeapi.ActionDisableTUN,
@@ -144,6 +145,11 @@ func (m *Model) activateFocus() tea.Cmd {
 	case pageConfig:
 		if m.focusIndex == 0 && m.selectedSource() != "" {
 			updated, command := m.Update(commandKey("y"))
+			*m = updated.(Model)
+			return command
+		}
+		if m.focusIndex == 2 {
+			updated, command := m.Update(tea.KeyPressMsg{Code: 'y', Mod: tea.ModCtrl})
 			*m = updated.(Model)
 			return command
 		}

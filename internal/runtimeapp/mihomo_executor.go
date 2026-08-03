@@ -84,7 +84,7 @@ func (e *MihomoExecutor) PreviewCandidate(
 			Cause:   err,
 		}
 	}
-	detailed, err := e.buildDetailedCandidate(body, override)
+	detailed, err := e.buildDetailedCandidateWithPolicy(body, override, request.TrafficPolicy)
 	if err != nil {
 		return runtimeapi.CandidatePreview{}, &PublicError{
 			Code:    runtimeapi.ErrorInvalidRequest,
@@ -122,6 +122,7 @@ func (e *MihomoExecutor) PreviewCandidate(
 		ReferencedResources: append([]string(nil), detailed.ReferencedResources...),
 		SourceSHA256:        sourceDigest,
 		OverrideSHA256:      overrideDigest,
+		TrafficPolicy:       detailed.TrafficPolicy,
 		Validated:           true,
 	}, nil
 }
@@ -140,6 +141,8 @@ func (e *MihomoExecutor) Execute(
 		return nil, errors.New("Mihomo Runtime executor is incomplete")
 	}
 	switch operation.Action.Kind {
+	case runtimeapi.ActionSetTrafficPolicy:
+		return e.setTrafficPolicy(ctx, operation, report)
 	case runtimeapi.ActionCloseConnection:
 		return e.closeConnection(ctx, operation, report)
 	case runtimeapi.ActionCloseConnections:
@@ -1024,13 +1027,30 @@ func (e *MihomoExecutor) buildDetailedCandidate(
 	source []byte,
 	override []byte,
 ) (mihomo.DetailedCandidate, error) {
-	return e.buildDetailedCandidateForNetwork(source, override, nil)
+	return e.buildDetailedCandidateWithPolicy(source, override, "")
+}
+
+func (e *MihomoExecutor) buildDetailedCandidateWithPolicy(
+	source []byte,
+	override []byte,
+	trafficPolicy string,
+) (mihomo.DetailedCandidate, error) {
+	return e.buildDetailedCandidateForNetworkWithPolicy(source, override, nil, trafficPolicy)
 }
 
 func (e *MihomoExecutor) buildDetailedCandidateForNetwork(
 	source []byte,
 	override []byte,
 	tun *mihomo.TUNCandidateSettings,
+) (mihomo.DetailedCandidate, error) {
+	return e.buildDetailedCandidateForNetworkWithPolicy(source, override, tun, "")
+}
+
+func (e *MihomoExecutor) buildDetailedCandidateForNetworkWithPolicy(
+	source []byte,
+	override []byte,
+	tun *mihomo.TUNCandidateSettings,
+	trafficPolicy string,
 ) (mihomo.DetailedCandidate, error) {
 	resources, err := e.State.ManagedResources()
 	if err != nil {
@@ -1044,13 +1064,88 @@ func (e *MihomoExecutor) buildDetailedCandidateForNetwork(
 			Path: resource.Path,
 		})
 	}
+	if trafficPolicy == "" {
+		trafficPolicy, err = e.State.TrafficPolicy()
+		if err != nil {
+			return mihomo.DetailedCandidate{}, err
+		}
+	}
 	builder := mihomo.ExplicitCandidateBuilder{
 		Port:            e.ProxyPort,
 		ControlEndpoint: e.ControlEndpoint,
 		Platform:        e.Platform,
 		TUN:             tun,
+		TrafficPolicy:   trafficPolicy,
 	}
 	return builder.BuildDetailed(source, override, managed)
+}
+
+func (e *MihomoExecutor) AppliedTrafficPolicy(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if e == nil || e.ConfigRoot == "" {
+		return "", errors.New("Runtime configuration root is unavailable")
+	}
+	body, err := os.ReadFile(filepath.Join(e.ConfigRoot, "current", "config.yaml"))
+	if errors.Is(err, os.ErrNotExist) {
+		return "unconfigured", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read current Mihomo traffic policy: %w", err)
+	}
+	return mihomo.TrafficPolicyFromConfiguration(body)
+}
+
+func (e *MihomoExecutor) setTrafficPolicy(
+	ctx context.Context,
+	operation runtimeapi.Operation,
+	report StageReporter,
+) (*runtimeapi.OperationResult, error) {
+	selection := operation.Action.Params.TrafficPolicy
+	if err := report("building_traffic_policy_candidate", 20, true); err != nil {
+		return nil, err
+	}
+	current, err := e.State.CurrentSource()
+	if err != nil {
+		return nil, &PublicError{Code: runtimeapi.ErrorNotFound, Message: "A current configuration source is required before changing the traffic policy", Cause: err}
+	}
+	source, _, err := e.State.ReadSourceRevision(current)
+	if err != nil {
+		return nil, err
+	}
+	override, _, err := e.State.AdvancedOverride()
+	if err != nil {
+		return nil, err
+	}
+	detailed, err := e.buildDetailedCandidateWithPolicy(source, override, selection)
+	if err != nil {
+		return nil, &PublicError{Code: runtimeapi.ErrorInvalidRequest, Message: "The selected traffic policy cannot produce a safe candidate configuration", Cause: err}
+	}
+	if err := report("validating_traffic_policy_candidate", 55, true); err != nil {
+		return nil, err
+	}
+	binaryPath, exactVersion, err := e.currentCore()
+	if err != nil {
+		return nil, &PublicError{Code: runtimeapi.ErrorServiceUnavailable, Message: "A verified Mihomo core must be installed before changing the traffic policy", Cause: err}
+	}
+	validator, err := e.configValidator(binaryPath, exactVersion)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePreviewCandidate(ctx, e.ConfigRoot, validator, detailed.YAML); err != nil {
+		return nil, &PublicError{Code: runtimeapi.ErrorInvalidRequest, Message: "Mihomo rejected the traffic policy candidate configuration", Cause: err}
+	}
+	if err := report("saving_traffic_policy", 85, false); err != nil {
+		return nil, err
+	}
+	if err := e.State.SetTrafficPolicy(selection, operation.ID, e.now()); err != nil {
+		return nil, err
+	}
+	return &runtimeapi.OperationResult{
+		TrafficPolicySelected:  selection,
+		TrafficPolicyEffective: detailed.TrafficPolicy,
+	}, nil
 }
 
 func (e *MihomoExecutor) addManagedResource(

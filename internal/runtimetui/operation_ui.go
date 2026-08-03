@@ -99,6 +99,10 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 	}
 
 	switch action.Kind {
+	case runtimeapi.ActionSetTrafficPolicy:
+		description.Impact = fmt.Sprintf("把本机流量策略保存为%s；候选配置已通过校验", trafficPolicyLabel(action.Params.TrafficPolicy))
+		description.Interruption = "不会立即切换当前配置或重启 Mihomo；下次应用配置后生效"
+		description.Recovery = "可重新选择其他策略，或恢复为跟随来源以删除本机覆盖"
 	case runtimeapi.ActionCloseConnection:
 		description.Impact = "关闭所选 Mihomo 活动连接"
 		description.Interruption = "现有会话立即中断，应用可能自行重新连接"
@@ -163,6 +167,7 @@ func (m Model) describeAction(action runtimeapi.Action) actionConfirmation {
 
 func actionTitle(kind string) string {
 	titles := map[string]string{
+		runtimeapi.ActionSetTrafficPolicy:    "设置流量策略",
 		runtimeapi.ActionCloseConnection:     "关闭活动连接",
 		runtimeapi.ActionCloseConnections:    "关闭当前范围内全部连接",
 		runtimeapi.ActionApplyImportedConfig: "应用导入的候选配置",
@@ -195,6 +200,8 @@ func actionTitle(kind string) string {
 func actionTarget(action runtimeapi.Action) string {
 	params := action.Params
 	switch {
+	case params.TrafficPolicy != "":
+		return trafficPolicyLabel(params.TrafficPolicy)
 	case params.ConnectionID != "":
 		return valueOr(params.ConnectionTarget, "未知目标") + " · " + params.ConnectionID
 	case params.ConnectionScope != nil:
@@ -239,6 +246,8 @@ func (m Model) actionConflict(action runtimeapi.Action) string {
 
 func actionConflictGroup(kind string) string {
 	switch kind {
+	case runtimeapi.ActionSetTrafficPolicy:
+		return "configuration"
 	case runtimeapi.ActionCloseConnection, runtimeapi.ActionCloseConnections:
 		return "connection-control"
 	case runtimeapi.ActionAddRemoteSource,

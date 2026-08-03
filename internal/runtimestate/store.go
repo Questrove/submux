@@ -147,6 +147,10 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 		if err != nil {
 			return err
 		}
+		trafficPolicy, err := trafficPolicySummary(transaction)
+		if err != nil {
+			return err
+		}
 		backups, err := portableRestoreSummary(metadata)
 		if err != nil {
 			return err
@@ -163,6 +167,7 @@ func (s *Store) Observe(runtimeVersion string, observedAt time.Time) (runtimeapi
 			Sources:           sources,
 			Resources:         resources,
 			AdvancedOverride:  override,
+			TrafficPolicy:     trafficPolicy,
 			Operations:        operations,
 			Updates:           runtimeapi.UpdateStatus{},
 			Backups:           backups,

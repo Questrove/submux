@@ -55,7 +55,15 @@ type ExplicitCandidateBuilder struct {
 	ControlEndpoint string
 	Platform        string
 	TUN             *TUNCandidateSettings
+	TrafficPolicy   string
 }
+
+const (
+	TrafficPolicyFollowSource = "follow_source"
+	TrafficPolicyRule         = "rule"
+	TrafficPolicyGlobal       = "global"
+	TrafficPolicyDirect       = "direct"
+)
 
 type TUNCandidateSettings struct {
 	Device      string

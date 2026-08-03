@@ -167,6 +167,8 @@ func auditForOperation(
 
 func auditObjectID(action runtimeapi.Action) string {
 	switch {
+	case action.Params.TrafficPolicy != "":
+		return action.Params.TrafficPolicy
 	case action.Params.ConnectionID != "":
 		return action.Params.ConnectionID
 	case action.Params.ConnectionScope != nil:

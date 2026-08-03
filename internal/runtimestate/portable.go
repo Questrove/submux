@@ -32,6 +32,7 @@ type PortableState struct {
 	Sources               []PortableSource        `json:"sources"`
 	AdvancedOverride      *PortableOverride       `json:"advanced_override,omitempty"`
 	ManagedResources      []PortableResource      `json:"managed_resources"`
+	TrafficPolicy         string                  `json:"traffic_policy,omitempty"`
 	MachineSettings       PortableMachineSettings `json:"machine_settings"`
 	CurrentConfigRevision string                  `json:"current_config_revision,omitempty"`
 	CurrentConfigSHA256   string                  `json:"current_config_sha256,omitempty"`
@@ -93,6 +94,7 @@ func (s *Store) ExportPortableState(includeSecrets bool, exportedAt time.Time) (
 		result.CurrentSourceID = string(metadata.Get(currentSourceIDKey))
 		result.CurrentConfigRevision = string(metadata.Get(currentConfigRevisionKey))
 		result.CurrentConfigSHA256 = string(metadata.Get(currentConfigSHA256Key))
+		result.TrafficPolicy = defaultString(string(metadata.Get(trafficPolicyKey)), runtimeapi.TrafficPolicyFollowSource)
 		result.MachineSettings = PortableMachineSettings{
 			RunMode:            defaultString(string(metadata.Get(runModeKey)), runtimeapi.RunModeUnconfigured),
 			MihomoDesiredState: desiredMihomoState(metadata),
@@ -281,6 +283,14 @@ func (s *Store) ReplacePortableState(
 				return err
 			}
 		}
+		trafficPolicy := state.TrafficPolicy
+		if trafficPolicy == "" || trafficPolicy == runtimeapi.TrafficPolicyFollowSource {
+			if err := metadata.Delete(trafficPolicyKey); err != nil {
+				return err
+			}
+		} else if err := metadata.Put(trafficPolicyKey, []byte(trafficPolicy)); err != nil {
+			return err
+		}
 		if err := recordExplicitMihomoStop(metadata); err != nil {
 			return err
 		}
@@ -357,6 +367,9 @@ func portableRestoreSummary(metadata *bbolt.Bucket) (runtimeapi.BackupStatus, er
 func validatePortableState(state PortableState) error {
 	if state.Schema != PortableStateSchema || !state.Complete || state.ExportedAt.IsZero() {
 		return errors.New("Runtime portable state is incomplete or uses an unsupported schema")
+	}
+	if state.TrafficPolicy != "" && !validTrafficPolicy(state.TrafficPolicy) {
+		return errors.New("Runtime portable traffic policy is invalid")
 	}
 	sourceIDs := make(map[string]struct{}, len(state.Sources))
 	for _, source := range state.Sources {

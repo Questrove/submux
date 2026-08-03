@@ -76,6 +76,10 @@ type TrafficService interface {
 	Connections(runtimeapi.ConnectionQuery) runtimeapi.ConnectionPage
 }
 
+type TrafficPolicyObserver interface {
+	AppliedTrafficPolicy(context.Context) (string, error)
+}
+
 func (c *Coordinator) Connections(
 	ctx context.Context,
 	peer runtimeapi.PeerIdentity,
@@ -154,6 +158,13 @@ func (c *Coordinator) Observe(ctx context.Context, peer runtimeapi.PeerIdentity)
 	}
 	if c.Traffic != nil {
 		snapshot.Traffic = c.Traffic.Status()
+	}
+	if observer, ok := c.Executor.(TrafficPolicyObserver); ok {
+		if applied, observeErr := observer.AppliedTrafficPolicy(ctx); observeErr == nil {
+			snapshot.TrafficPolicy.Applied = applied
+		} else {
+			snapshot.TrafficPolicy.Applied = "unknown"
+		}
 	}
 	if c.Network == nil {
 		snapshot.Network = runtimeapi.NetworkStatus{
@@ -944,6 +955,10 @@ func (c *Coordinator) now() time.Time {
 }
 
 func validateAction(action runtimeapi.Action) error {
+	trafficPolicyAction := action.Kind == runtimeapi.ActionSetTrafficPolicy
+	if !trafficPolicyAction && action.Params.TrafficPolicy != "" {
+		return errors.New("traffic_policy is only accepted by a traffic policy action")
+	}
 	connectionAction := action.Kind == runtimeapi.ActionCloseConnection || action.Kind == runtimeapi.ActionCloseConnections
 	if !connectionAction && (action.Params.ConnectionID != "" ||
 		action.Params.ConnectionTarget != "" ||
@@ -965,6 +980,25 @@ func validateAction(action runtimeapi.Action) error {
 		return errors.New("plan_id is only accepted by a network enable, Mihomo update, or Runtime product update action")
 	}
 	switch action.Kind {
+	case runtimeapi.ActionSetTrafficPolicy:
+		if !validTrafficPolicy(action.Params.TrafficPolicy) ||
+			action.Params.ContentID != "" ||
+			action.Params.SourceID != "" ||
+			action.Params.SourceName != "" ||
+			action.Params.Route != "" ||
+			action.Params.UseCached ||
+			action.Params.Confirm ||
+			action.Params.ResourceKind != "" ||
+			action.Params.ResourceName != "" ||
+			action.Params.PlanID != "" ||
+			action.Params.Trust != "" ||
+			action.Params.ConnectionID != "" ||
+			action.Params.ConnectionTarget != "" ||
+			action.Params.ConnectionScope != nil ||
+			action.Params.ConnectionScopeToken != "" ||
+			action.Params.ConnectionCount != 0 {
+			return errors.New("traffic_policy.set requires only a supported traffic_policy")
+		}
 	case runtimeapi.ActionCloseConnection:
 		if !validConnectionID(action.Params.ConnectionID) ||
 			!validOptionalConnectionText(action.Params.ConnectionTarget, 512) ||
@@ -1231,6 +1265,18 @@ func validConnectionID(id string) bool {
 	return id != "" && len(id) <= 128 && validOptionalConnectionText(id, 128) && strings.TrimSpace(id) == id
 }
 
+func validTrafficPolicy(selection string) bool {
+	switch selection {
+	case runtimeapi.TrafficPolicyFollowSource,
+		runtimeapi.TrafficPolicyRule,
+		runtimeapi.TrafficPolicyGlobal,
+		runtimeapi.TrafficPolicyDirect:
+		return true
+	default:
+		return false
+	}
+}
+
 func validConnectionScope(scope runtimeapi.ConnectionQuery) bool {
 	return scope.Page == 0 && scope.PageSize == 0 &&
 		validOptionalConnectionText(scope.Target, 256) &&
@@ -1318,6 +1364,8 @@ func validResourceName(name string) bool {
 
 func publicExecutionMessage(kind string) string {
 	switch kind {
+	case runtimeapi.ActionSetTrafficPolicy:
+		return "Runtime could not save the traffic policy"
 	case runtimeapi.ActionCloseConnection:
 		return "Runtime could not close the selected Mihomo connection"
 	case runtimeapi.ActionCloseConnections:

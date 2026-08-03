@@ -80,6 +80,53 @@ log-level: debug
 	assertFieldOrigin(t, result.FieldOrigins, "rules", CandidateOriginRuntime, CandidateStatusReplaced, CandidateOriginSource)
 }
 
+func TestDetailedCandidateAppliesRuntimeTrafficPolicyAfterAdvancedOverride(t *testing.T) {
+	builder := ExplicitCandidateBuilder{
+		ControlEndpoint: filepath.Join(t.TempDir(), "mihomo.sock"),
+		Platform:        "linux",
+		TrafficPolicy:   TrafficPolicyRule,
+	}
+	result, err := builder.BuildDetailed(
+		[]byte("mode: global\nproxy-groups:\n  - name: PROXY\n    type: select\n    proxies: [DIRECT]\nrules: [MATCH,PROXY]\n"),
+		[]byte("mode: direct\n"),
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidate map[string]any
+	if err := yaml.Unmarshal(result.YAML, &candidate); err != nil {
+		t.Fatal(err)
+	}
+	if candidate["mode"] != "rule" || result.TrafficPolicy != TrafficPolicyRule {
+		t.Fatalf("traffic policy candidate=%#v detail=%#v", candidate["mode"], result)
+	}
+	assertFieldOrigin(t, result.FieldOrigins, "mode", CandidateOriginRuntime, CandidateStatusReplaced, CandidateOriginOverride)
+}
+
+func TestDetailedCandidateRejectsGlobalTrafficPolicyWithoutProxyGroup(t *testing.T) {
+	builder := ExplicitCandidateBuilder{
+		ControlEndpoint: filepath.Join(t.TempDir(), "mihomo.sock"),
+		Platform:        "linux",
+		TrafficPolicy:   TrafficPolicyGlobal,
+	}
+	if _, err := builder.BuildDetailed([]byte("proxies: []\nrules: [MATCH,DIRECT]\n"), nil, nil); err == nil || !strings.Contains(err.Error(), "proxy group") {
+		t.Fatalf("global traffic policy error=%v", err)
+	}
+
+	builder.TrafficPolicy = TrafficPolicyFollowSource
+	if _, err := builder.BuildDetailed([]byte("mode: global\nproxies: []\nrules: [MATCH,DIRECT]\n"), nil, nil); err == nil || !strings.Contains(err.Error(), "proxy group") {
+		t.Fatalf("follow-source global traffic policy error=%v", err)
+	}
+}
+
+func TestTrafficPolicyFromConfigurationReportsAppliedGlobalWithoutRevalidatingCandidate(t *testing.T) {
+	policy, err := TrafficPolicyFromConfiguration([]byte("mode: global\nproxies: []\nrules: [MATCH,DIRECT]\n"))
+	if err != nil || policy != TrafficPolicyGlobal {
+		t.Fatalf("applied traffic policy=%q error=%v", policy, err)
+	}
+}
+
 func TestDetailedCandidateRejectsRuntimeOwnedOverrideAndUnknownSensitiveFields(t *testing.T) {
 	builder := ExplicitCandidateBuilder{
 		ControlEndpoint: filepath.Join(t.TempDir(), "mihomo.sock"),

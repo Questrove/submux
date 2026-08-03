@@ -29,21 +29,28 @@ func (p PeerIdentity) Key() string {
 }
 
 type Snapshot struct {
-	ProtocolVersion   int             `json:"protocol_version"`
-	Revision          uint64          `json:"revision"`
-	Runtime           RuntimeStatus   `json:"runtime"`
-	Mihomo            MihomoStatus    `json:"mihomo"`
-	RunMode           string          `json:"run_mode"`
-	Network           NetworkStatus   `json:"network"`
-	Sources           SourceStatus    `json:"sources"`
-	Resources         ResourceStatus  `json:"resources"`
-	AdvancedOverride  OverrideStatus  `json:"advanced_override"`
-	Operations        OperationStatus `json:"operations"`
-	Updates           UpdateStatus    `json:"updates"`
-	Backups           BackupStatus    `json:"backups"`
-	Traffic           TrafficStatus   `json:"traffic"`
-	LatestEventCursor uint64          `json:"latest_event_cursor"`
-	ObservedAt        time.Time       `json:"observed_at"`
+	ProtocolVersion   int                 `json:"protocol_version"`
+	Revision          uint64              `json:"revision"`
+	Runtime           RuntimeStatus       `json:"runtime"`
+	Mihomo            MihomoStatus        `json:"mihomo"`
+	RunMode           string              `json:"run_mode"`
+	Network           NetworkStatus       `json:"network"`
+	Sources           SourceStatus        `json:"sources"`
+	Resources         ResourceStatus      `json:"resources"`
+	AdvancedOverride  OverrideStatus      `json:"advanced_override"`
+	TrafficPolicy     TrafficPolicyStatus `json:"traffic_policy"`
+	Operations        OperationStatus     `json:"operations"`
+	Updates           UpdateStatus        `json:"updates"`
+	Backups           BackupStatus        `json:"backups"`
+	Traffic           TrafficStatus       `json:"traffic"`
+	LatestEventCursor uint64              `json:"latest_event_cursor"`
+	ObservedAt        time.Time           `json:"observed_at"`
+}
+
+type TrafficPolicyStatus struct {
+	Selection   string `json:"selection"`
+	FieldOrigin string `json:"field_origin"`
+	Applied     string `json:"applied,omitempty"`
 }
 
 type RuntimeStatus struct {
@@ -154,6 +161,7 @@ type PreviewCandidateRequest struct {
 	ContentID         string `json:"content_id,omitempty"`
 	SourceID          string `json:"source_id,omitempty"`
 	OverrideContentID string `json:"override_content_id,omitempty"`
+	TrafficPolicy     string `json:"traffic_policy,omitempty"`
 }
 
 type CandidatePreview struct {
@@ -167,6 +175,7 @@ type CandidatePreview struct {
 	ReferencedResources []string               `json:"referenced_resources,omitempty"`
 	SourceSHA256        string                 `json:"source_sha256"`
 	OverrideSHA256      string                 `json:"override_sha256,omitempty"`
+	TrafficPolicy       string                 `json:"traffic_policy"`
 	Validated           bool                   `json:"validated"`
 }
 
@@ -198,6 +207,7 @@ type ActionParams struct {
 	ConnectionScope      *ConnectionQuery `json:"connection_scope,omitempty"`
 	ConnectionScopeToken string           `json:"connection_scope_token,omitempty"`
 	ConnectionCount      int              `json:"connection_count,omitempty"`
+	TrafficPolicy        string           `json:"traffic_policy,omitempty"`
 }
 
 type CreateOperationRequest struct {
@@ -278,6 +288,8 @@ type OperationResult struct {
 	ClosedConnections        int            `json:"closed_connections,omitempty"`
 	AlreadyClosedConnections int            `json:"already_closed_connections,omitempty"`
 	ConnectionAlreadyClosed  bool           `json:"connection_already_closed,omitempty"`
+	TrafficPolicySelected    string         `json:"traffic_policy_selected,omitempty"`
+	TrafficPolicyEffective   string         `json:"traffic_policy_effective,omitempty"`
 }
 
 type OperationResponse struct {
@@ -522,6 +534,14 @@ const (
 const SensitiveDataWarning = "敏感内容可能包含访问凭据、配置正文、完整日志或本机信息；仅在确认当前显示与保存环境安全时继续。"
 
 const (
+	TrafficPolicyFollowSource = "follow_source"
+	TrafficPolicyRule         = "rule"
+	TrafficPolicyGlobal       = "global"
+	TrafficPolicyDirect       = "direct"
+
+	TrafficPolicyOriginSource  = "source"
+	TrafficPolicyOriginRuntime = "runtime"
+
 	ActionApplyImportedConfig = "proxy.apply_import"
 	ActionStartProxy          = "proxy.start"
 	ActionStopProxy           = "proxy.stop"
@@ -533,6 +553,7 @@ const (
 	ActionDeleteSource        = "source.delete"
 	ActionAddManagedResource  = "resource.add"
 	ActionSetAdvancedOverride = "override.set"
+	ActionSetTrafficPolicy    = "traffic_policy.set"
 	ActionEnableTUN           = "network.enable_tun"
 	ActionDisableTUN          = "network.disable_tun"
 	ActionEnableGateway       = "network.enable_gateway"

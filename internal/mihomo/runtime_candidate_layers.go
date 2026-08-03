@@ -50,6 +50,7 @@ type DetailedCandidate struct {
 	YAML                []byte
 	FieldOrigins        []CandidateFieldOrigin
 	ReferencedResources []string
+	TrafficPolicy       string
 }
 
 func (b ExplicitCandidateBuilder) BuildDetailed(
@@ -84,6 +85,10 @@ func (b ExplicitCandidateBuilder) BuildDetailed(
 		return DetailedCandidate{}, err
 	}
 	if err := rejectUnknownSensitiveFields(sourceRoot, ""); err != nil {
+		return DetailedCandidate{}, err
+	}
+	trafficPolicy, err := applyTrafficPolicy(sourceRoot, tracker, b.TrafficPolicy)
+	if err != nil {
 		return DetailedCandidate{}, err
 	}
 	if err := prependRuntimeHealthRules(sourceRoot); err != nil {
@@ -156,7 +161,88 @@ func (b ExplicitCandidateBuilder) BuildDetailed(
 		YAML:                candidate,
 		FieldOrigins:        tracker.sorted(),
 		ReferencedResources: tracker.sortedReferences(),
+		TrafficPolicy:       trafficPolicy,
 	}, nil
+}
+
+func applyTrafficPolicy(root *yaml.Node, tracker *candidateOriginTracker, selection string) (string, error) {
+	if selection == "" {
+		selection = TrafficPolicyFollowSource
+	}
+	if selection == TrafficPolicyFollowSource {
+		effective, err := trafficPolicyValue(root)
+		if err != nil {
+			return "", err
+		}
+		if err := validateEffectiveTrafficPolicy(root, effective); err != nil {
+			return "", err
+		}
+		return effective, nil
+	}
+	if !validCandidateTrafficPolicy(selection) {
+		return "", errors.New("Runtime traffic policy is invalid")
+	}
+	if err := validateEffectiveTrafficPolicy(root, selection); err != nil {
+		return "", err
+	}
+	tracker.setRuntimeScalar(root, "mode", selection, "!!str")
+	return selection, nil
+}
+
+func TrafficPolicyFromConfiguration(body []byte) (string, error) {
+	root, err := parseConfigurationLayer(body, "configuration")
+	if err != nil {
+		return "", err
+	}
+	return trafficPolicyValue(root)
+}
+
+func trafficPolicyValue(root *yaml.Node) (string, error) {
+	mode := mappingValue(root, "mode")
+	if mode == nil {
+		return TrafficPolicyRule, nil
+	}
+	if mode.Kind != yaml.ScalarNode {
+		return "", errors.New("Mihomo traffic policy mode must be a scalar")
+	}
+	effective := strings.ToLower(strings.TrimSpace(mode.Value))
+	if !validCandidateTrafficPolicy(effective) {
+		return "", errors.New("Mihomo traffic policy mode is invalid")
+	}
+	return effective, nil
+}
+
+func validateEffectiveTrafficPolicy(root *yaml.Node, effective string) error {
+	if effective == TrafficPolicyGlobal && !hasProxyGroup(root) {
+		return errors.New("global traffic policy requires at least one proxy group")
+	}
+	return nil
+}
+
+func validCandidateTrafficPolicy(selection string) bool {
+	switch selection {
+	case TrafficPolicyRule, TrafficPolicyGlobal, TrafficPolicyDirect:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasProxyGroup(root *yaml.Node) bool {
+	groups := mappingValue(root, "proxy-groups")
+	if groups == nil || groups.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, group := range groups.Content {
+		if group.Kind != yaml.MappingNode {
+			continue
+		}
+		name := mappingValue(group, "name")
+		if name != nil && name.Kind == yaml.ScalarNode && strings.TrimSpace(name.Value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidateManagedResource(kind string, body []byte) error {

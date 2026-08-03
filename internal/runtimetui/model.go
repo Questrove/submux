@@ -124,6 +124,8 @@ type Model struct {
 	connectionsPolling    bool
 	connectionsGeneration uint64
 	connectionFailures    int
+	trafficPolicyEditing  bool
+	trafficPolicyDraft    string
 }
 
 const (
@@ -188,6 +190,11 @@ type connectionPageErrorMsg struct {
 
 type connectionTickMsg struct {
 	generation uint64
+}
+
+type trafficPolicyPreviewMsg struct {
+	preview   runtimeapi.CandidatePreview
+	selection string
 }
 
 type preparedActionMsg struct {
@@ -475,6 +482,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.connectionsCmd()
+	case trafficPolicyPreviewMsg:
+		m.page = pageConfig
+		m.focusIndex = 2
+		m.preview = message.preview
+		m.previewSourceID = m.snapshot.Sources.CurrentSourceID
+		m.trafficPolicyEditing = false
+		m.busy = false
+		m.err = nil
+		m.status = "流量策略候选配置已通过校验，等待确认保存"
+		m.prepareAction(runtimeapi.Action{
+			Kind:   runtimeapi.ActionSetTrafficPolicy,
+			Params: runtimeapi.ActionParams{TrafficPolicy: message.selection},
+		})
+		return m, nil
 	case preparedActionMsg:
 		m.editing = false
 		m.editor.Blur()
@@ -685,6 +706,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.connectionFilter != nil {
 		return m.updateConnectionFilter(message)
+	}
+	if m.trafficPolicyEditing {
+		return m.updateTrafficPolicyEditor(message)
 	}
 
 	if m.editing {
@@ -972,6 +996,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.busy = true
 			m.status = "正在读取来源原始地址…"
 			return m, m.revealSourceURLCmd(sourceID)
+		case "ctrl+y":
+			if m.page != pageConfig || m.focusIndex != 2 {
+				m.status = "流量策略只在配置页的本机配置层中修改"
+				return m, nil
+			}
+			selection := m.snapshot.TrafficPolicy.Selection
+			if selection == "" {
+				selection = runtimeapi.TrafficPolicyFollowSource
+			}
+			m.trafficPolicyEditing = true
+			m.trafficPolicyDraft = selection
+			m.err = nil
+			m.status = "选择流量策略后按 Enter 生成候选配置，Esc 取消"
+			return m, nil
 		case "ctrl+g":
 			if m.sensitiveConfirm != "diagnostics" {
 				m.busy = true

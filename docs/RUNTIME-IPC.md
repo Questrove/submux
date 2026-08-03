@@ -70,7 +70,7 @@ Snapshot 至少包含：
 - 当前十分钟窗口内已使用的自动重启次数、下次重试时间和脱敏故障；
 - 当前运行方式及脱敏的网络设置；
 - 配置来源摘要、当前来源和最近刷新结果；
-- 托管资源的类型、摘要和总量，以及本机高级覆盖的摘要；
+- 托管资源的类型、摘要和总量，本机高级覆盖的摘要，以及流量策略的当前选择、字段来源和实际应用值；
 - 当前运行操作、排队数量和最近一个终态运行操作的标识；
 - 产品与核心更新状态；
 - 最近一次整体恢复和机器设置待确认状态；
@@ -123,7 +123,7 @@ POST /v1/candidates/preview
 Content-Type: application/json
 ```
 
-请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回经过结构化脱敏的最终候选配置、摘要、显式代理监听、引用的托管资源，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不切换当前配置，也不启动 Mihomo。响应始终使用 `Cache-Control: no-store`。
+请求必须且只能选择当前调用者尚未消费的配置 `content_id`，或已经保存的 `source_id`；还可以提供尚未消费的高级覆盖 `content_id` 来预览保存前结果，并用可选的 `traffic_policy` 预览跟随来源、规则、全局或直连的选择。Runtime 依次合并来源、本机高级覆盖和 Runtime 保留设置，再用准备运行的 Mihomo 精确版本完成静态校验。响应返回经过结构化脱敏的最终候选配置、摘要、显式代理监听、引用的托管资源、有效流量策略，以及每个字段的来源和替换状态。预览不消费导入内容、不创建运行操作、不保存流量策略、不切换当前配置，也不启动 Mihomo。响应始终使用 `Cache-Control: no-store`。
 
 ### 读取本机高级覆盖
 
@@ -172,7 +172,10 @@ Action 使用固定 `kind` 和严格参数结构，不能承载 Shell、argv、�
 
 - `resource.add` 只接受资源内容的 `content_id`、固定 `resource_kind` 和安全 `resource_name`；
 - `override.set` 只接受 YAML 的 `content_id`；
+- `traffic_policy.set` 只接受 `traffic_policy`，值为 `follow_source`、`rule`、`global` 或 `direct`；
 - `backup.restore` 只接受备份的 `content_id` 和 `confirm: true`。
+
+流量策略默认是 `follow_source`。明确选择 `rule`、`global` 或 `direct` 后，Runtime 把它作为本机运行设置持久化，并在配置来源和本机高级覆盖之后写入候选，因此该字段拥有最终优先级；改回 `follow_source` 会删除持久设置。`global` 候选必须包含至少一个具名策略组。`traffic_policy.set` 在保存前使用当前来源、本机高级覆盖和已安装的 Mihomo 精确版本重新生成并校验候选；保存成功只改变本机运行设置，不立即应用配置或重启 Mihomo。
 
 产品更新使用固定的稳定频道和以下 Action：
 

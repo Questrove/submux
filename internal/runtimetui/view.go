@@ -52,6 +52,16 @@ func (m Model) View() tea.View {
 			m.renderShellFooter(),
 		}, "\n"))
 	}
+	if m.trafficPolicyEditing {
+		return tea.NewView(strings.Join([]string{
+			m.renderShellHeader(),
+			m.renderTabs(),
+			"",
+			m.renderTrafficPolicyEditor(),
+			"",
+			m.renderShellFooter(),
+		}, "\n"))
+	}
 	if m.editing {
 		return m.legacyView()
 	}
@@ -200,6 +210,17 @@ func (m Model) renderConfigPage() string {
 	}
 
 	lines = append(lines, "", m.focusHeading(2, "本机配置层"))
+	policy := m.snapshot.TrafficPolicy
+	policyLine := fmt.Sprintf(
+		"流量策略 · 当前 %s · 字段来源 %s · 实际应用 %s",
+		trafficPolicyLabel(policy.Selection),
+		trafficPolicyOriginLabel(policy.FieldOrigin),
+		trafficPolicyLabel(policy.Applied),
+	)
+	if policy.Selection != "" && policy.Selection != runtimeapi.TrafficPolicyFollowSource && policy.Applied != "" && policy.Selection != policy.Applied {
+		policyLine += " · 待应用"
+	}
+	lines = append(lines, policyLine)
 	if m.snapshot.AdvancedOverride.Present {
 		lines = append(lines, fmt.Sprintf("高级覆盖 · %s · %d 字节", shortDigest(m.snapshot.AdvancedOverride.SHA256), m.snapshot.AdvancedOverride.Size))
 	} else {
@@ -212,7 +233,7 @@ func (m Model) renderConfigPage() string {
 	lines = append(lines,
 		"",
 		m.focusHeading(3, "配置操作"),
-		"u 添加远程来源 · n 添加本机来源 · y 生成候选 · f/d/m 刷新 · t/k 切换 · o 高级覆盖 · e 托管资源 · Ctrl+U 只读诊断",
+		"u 添加远程来源 · n 添加本机来源 · y 生成候选 · f/d/m 刷新 · t/k 切换 · o 高级覆盖 · e 托管资源 · Ctrl+Y 流量策略 · Ctrl+U 只读诊断",
 	)
 	return strings.Join(lines, "\n")
 }
@@ -496,6 +517,7 @@ func (m Model) renderHelp() string {
 		titleStyle.Render("键盘帮助"),
 		"1–5 切换页面 · Tab/Shift+Tab 移动页内焦点",
 		"↑↓ 选择当前区域条目 · Enter 打开或执行当前区域的安全默认操作",
+		"配置页的本机配置层：Enter 或 Ctrl+Y 选择流量策略并生成候选确认",
 		"/ 或 Ctrl+K 搜索页面和操作 · Esc 返回 · ? 关闭帮助 · q 退出",
 		"现有字母快捷键继续可用，页面底部会显示当前焦点。",
 	}, "\n")

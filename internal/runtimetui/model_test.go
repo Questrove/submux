@@ -44,6 +44,7 @@ type fakeClient struct {
 	connectionRequests []runtimeapi.ConnectionQuery
 	connectionPages    []runtimeapi.ConnectionPage
 	connectionError    error
+	candidateRequests  []runtimeapi.PreviewCandidateRequest
 }
 
 func (f *fakeClient) Connections(_ context.Context, query runtimeapi.ConnectionQuery) (runtimeapi.ConnectionPage, error) {
@@ -115,11 +116,14 @@ func (f *fakeClient) PreviewCandidateRequest(
 	_ context.Context,
 	request runtimeapi.PreviewCandidateRequest,
 ) (runtimeapi.CandidatePreview, error) {
+	f.candidateRequests = append(f.candidateRequests, request)
 	contentID := request.ContentID
 	if contentID == "" {
 		contentID = request.SourceID
 	}
-	return f.PreviewCandidate(context.Background(), contentID)
+	preview, err := f.PreviewCandidate(context.Background(), contentID)
+	preview.TrafficPolicy = request.TrafficPolicy
+	return preview, err
 }
 
 func (f *fakeClient) Execute(_ context.Context, request runtimeapi.CreateOperationRequest) (runtimeapi.Operation, error) {
