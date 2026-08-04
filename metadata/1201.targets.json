@@ -2,20 +2,20 @@
 	"signatures": [
 		{
 			"keyid": "36fc9ffbc9b2393262b3e62ac5fd13b4b2e21af66a25876fc1b753ce9e88d0bb",
-			"sig": "dca3bee35bff2b8de4792cb9693483ee7fdaf1452f25417b152907311c4b442fbe69cae9bdb7bf7802d60ec977dab939a74034785c1bb8074055334344670b0b"
+			"sig": "79cb976fdd8580ec15de5f317468fab91c91a4e181bd16e38421c3cc98cc3a103fea68cfd11944841b54b603e74184e562b40d228b8c5a092f73df8bcad1f60f"
 		},
 		{
 			"keyid": "6cbae3b5426715b45f998fd9a1d59bc2317ec8b11f27470a10f142dafe67f28f",
-			"sig": "78f5f432c20d853ad75a0199bc623ceea20c0fd4ac522ebab3bc181826bd3fc2f81f3358987d1ab6f694a5fb37736100a61118e8fcdda24b4a2d60c45fb2e60e"
+			"sig": "df163947ab703bf2899b5e30c081a7414033eeb8659a6e709caadfb6f6e741b3bad166f97b60f4228b2cd339a378233a76a9fefff4aedfbe37a517c966b8d505"
 		},
 		{
 			"keyid": "13e0652714079f0563f4cd731acc86af8db0b144c0e45599483b7f67bf98923e",
-			"sig": "2d76ce42f38df8c3d2352ab54356879e149494e23f7f71733f05e5e356f4d08d555ccf26f8952c1897df2fb21e4770c3c769aec42ddf02b483276409459e330d"
+			"sig": "7f9eb7ef38cffe9bb6f37eeb3c7c38410fc2df24cedeb40ae5c62c81723ce8c45c0752f3f62a5e1f45cf53569c0c1fd9f44462ba301aa3ad0e92a694564e7f00"
 		}
 	],
 	"signed": {
 		"_type": "targets",
-		"expires": "2026-10-30T11:37:08Z",
+		"expires": "2026-11-02T05:26:32Z",
 		"spec_version": "1.0.31",
 		"targets": {
 			"mihomo/v1.19.29/darwin/amd64/mihomo-darwin-amd64-compatible-v1.19.29.gz": {
@@ -108,22 +108,22 @@
 				},
 				"length": 15430938
 			},
-			"product/v2.0.2/darwin/amd64/submux-runtime-v2.0.2-darwin-amd64.zip": {
+			"product/v2.1.0/darwin/amd64/submux-runtime-v2.1.0-darwin-amd64.zip": {
 				"custom": {
 					"kind": "submux-runtime-product",
-					"version": "v2.0.2",
+					"version": "v2.1.0",
 					"platform": "darwin",
 					"arch": "amd64",
 					"channel": "stable",
-					"asset_name": "submux-runtime-v2.0.2-darwin-amd64.zip",
-					"release_notes": "Submux Runtime v2.0.2 preview.",
+					"asset_name": "submux-runtime-v2.1.0-darwin-amd64.zip",
+					"release_notes": "Submux Runtime v2.1.0 preview.",
 					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
 					"runtime_schema_min": 1,
 					"runtime_schema_max": 1,
 					"runtime_schema_target": 1,
 					"protocol_min": 1,
 					"protocol_max": 1,
-					"required_free_bytes": 48480048,
+					"required_free_bytes": 49795244,
 					"components": [
 						"submux-runtime",
 						"submux-runtime-net",
@@ -131,26 +131,26 @@
 					]
 				},
 				"hashes": {
-					"sha256": "61be6d0eec665bd4a7f3f4dcf77cbd2956421292aede3c3a5475932e3fcad2f3"
+					"sha256": "c8372ffdff86ebe2d96bf0111e91c230561398affe4d3d95cbf942fe40c837bc"
 				},
-				"length": 12120012
+				"length": 12448811
 			},
-			"product/v2.0.2/darwin/arm64/submux-runtime-v2.0.2-darwin-arm64.zip": {
+			"product/v2.1.0/darwin/arm64/submux-runtime-v2.1.0-darwin-arm64.zip": {
 				"custom": {
 					"kind": "submux-runtime-product",
-					"version": "v2.0.2",
+					"version": "v2.1.0",
 					"platform": "darwin",
 					"arch": "arm64",
 					"channel": "stable",
-					"asset_name": "submux-runtime-v2.0.2-darwin-arm64.zip",
-					"release_notes": "Submux Runtime v2.0.2 preview.",
+					"asset_name": "submux-runtime-v2.1.0-darwin-arm64.zip",
+					"release_notes": "Submux Runtime v2.1.0 preview.",
 					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
 					"runtime_schema_min": 1,
 					"runtime_schema_max": 1,
 					"runtime_schema_target": 1,
 					"protocol_min": 1,
 					"protocol_max": 1,
-					"required_free_bytes": 45812388,
+					"required_free_bytes": 47104572,
 					"components": [
 						"submux-runtime",
 						"submux-runtime-net",
@@ -158,26 +158,26 @@
 					]
 				},
 				"hashes": {
-					"sha256": "33d9fa81d2be8880fdb7b8f498d9c287f9a59b847f65e773298af89902cbe655"
+					"sha256": "29d85020754d6c19616ed8ada913887dd2b1e0b27df82e9d937af24b13e4ee9b"
 				},
-				"length": 11453097
+				"length": 11776143
 			},
-			"product/v2.0.2/linux/amd64/submux-runtime-v2.0.2-linux-amd64.zip": {
+			"product/v2.1.0/linux/amd64/submux-runtime-v2.1.0-linux-amd64.zip": {
 				"custom": {
 					"kind": "submux-runtime-product",
-					"version": "v2.0.2",
+					"version": "v2.1.0",
 					"platform": "linux",
 					"arch": "amd64",
 					"channel": "stable",
-					"asset_name": "submux-runtime-v2.0.2-linux-amd64.zip",
-					"release_notes": "Submux Runtime v2.0.2 preview.",
+					"asset_name": "submux-runtime-v2.1.0-linux-amd64.zip",
+					"release_notes": "Submux Runtime v2.1.0 preview.",
 					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
 					"runtime_schema_min": 1,
 					"runtime_schema_max": 1,
 					"runtime_schema_target": 1,
 					"protocol_min": 1,
 					"protocol_max": 1,
-					"required_free_bytes": 48023060,
+					"required_free_bytes": 49321112,
 					"components": [
 						"submux-runtime",
 						"submux-runtime-net",
@@ -185,26 +185,26 @@
 					]
 				},
 				"hashes": {
-					"sha256": "d36619f438c7951b761288a1199d2cce9ac370ae282889d9388369e4110972f3"
+					"sha256": "2ba18f884ca3e569e3eea41e8413670ea573ba7755e96673d0e9892753c4d4ad"
 				},
-				"length": 12005765
+				"length": 12330278
 			},
-			"product/v2.0.2/windows/amd64/submux-runtime-v2.0.2-windows-amd64.zip": {
+			"product/v2.1.0/windows/amd64/submux-runtime-v2.1.0-windows-amd64.zip": {
 				"custom": {
 					"kind": "submux-runtime-product",
-					"version": "v2.0.2",
+					"version": "v2.1.0",
 					"platform": "windows",
 					"arch": "amd64",
 					"channel": "stable",
-					"asset_name": "submux-runtime-v2.0.2-windows-amd64.zip",
-					"release_notes": "Submux Runtime v2.0.2 preview.",
+					"asset_name": "submux-runtime-v2.1.0-windows-amd64.zip",
+					"release_notes": "Submux Runtime v2.1.0 preview.",
 					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
 					"runtime_schema_min": 1,
 					"runtime_schema_max": 1,
 					"runtime_schema_target": 1,
 					"protocol_min": 1,
 					"protocol_max": 1,
-					"required_free_bytes": 47928740,
+					"required_free_bytes": 49250892,
 					"components": [
 						"submux-runtime",
 						"submux-runtime-net",
@@ -212,26 +212,26 @@
 					]
 				},
 				"hashes": {
-					"sha256": "69761c31a41d64ea9cab1a19a9001643844ae9ec3b0cc062331bef9cf2152d02"
+					"sha256": "354e873c9b9984b847a6e5a00b81a8c203de547c550a29605791a18c26273eee"
 				},
-				"length": 11982185
+				"length": 12312723
 			},
-			"product/v2.0.2/windows/arm64/submux-runtime-v2.0.2-windows-arm64.zip": {
+			"product/v2.1.0/windows/arm64/submux-runtime-v2.1.0-windows-arm64.zip": {
 				"custom": {
 					"kind": "submux-runtime-product",
-					"version": "v2.0.2",
+					"version": "v2.1.0",
 					"platform": "windows",
 					"arch": "arm64",
 					"channel": "stable",
-					"asset_name": "submux-runtime-v2.0.2-windows-arm64.zip",
-					"release_notes": "Submux Runtime v2.0.2 preview.",
+					"asset_name": "submux-runtime-v2.1.0-windows-arm64.zip",
+					"release_notes": "Submux Runtime v2.1.0 preview.",
 					"migration_summary": "Runtime schema compatibility is declared by the signed product manifest.",
 					"runtime_schema_min": 1,
 					"runtime_schema_max": 1,
 					"runtime_schema_target": 1,
 					"protocol_min": 1,
 					"protocol_max": 1,
-					"required_free_bytes": 43464524,
+					"required_free_bytes": 44710716,
 					"components": [
 						"submux-runtime",
 						"submux-runtime-net",
@@ -239,11 +239,11 @@
 					]
 				},
 				"hashes": {
-					"sha256": "771a73593f343eb5d994f901de043a5423da5738eae36a5e914c6e4faa4d9036"
+					"sha256": "72ce758fbee82930a5ebcf660cce9e5d20e12348c3d286fd7fd35192694212cf"
 				},
-				"length": 10866131
+				"length": 11177679
 			}
 		},
-		"version": 1101
+		"version": 1201
 	}
 }
