@@ -733,6 +733,14 @@ jobs:
             echo
             echo "Support channel: **${{ steps.channel.outputs.value }}**."
             echo
+            echo "This release introduces the redesigned five-page keyboard TUI for status, configuration,"
+            echo "network, monitoring and maintenance workflows. Runtime state changes use one preview and"
+            echo "confirmation flow over local IPC, with event-driven Snapshot refresh and reconnect recovery."
+            echo
+            echo "Monitoring includes current speed, per-Mihomo-run upload/download totals, 1/5/15 minute"
+            echo "in-memory history, bounded active connections, final-rule lookup, proxy groups, fixed-scope"
+            echo "latency tests and redacted logs. Traffic history is not persisted across Runtime restarts."
+            echo
             echo "The machine-readable evidence matrix is included in the source at docs/runtime-support.json."
             echo "Windows MSI files are unsigned and may show Unknown Publisher."
             echo "macOS PKG files are unsigned and unnotarized."

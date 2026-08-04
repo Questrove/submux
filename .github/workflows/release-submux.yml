@@ -96,6 +96,7 @@ jobs:
           - Removes the legacy remote Agent, enrollment, heartbeat and remote-job control surfaces.
           - Keeps Runtime local-only: submux publishes configuration; Runtime independently manages one local Mihomo.
           - Improves durable output publication, deletion validation and consistent console snapshots.
+          - Adds a built-in installation, operation, backup and uninstall guide for the redesigned Runtime TUI.
           - Provides static Linux, macOS and Windows binaries for amd64 and arm64.
           - Includes install-submux.sh for verified online or transferred offline service installation.
 

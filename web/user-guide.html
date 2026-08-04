@@ -26,9 +26,9 @@
 <a class="skip" href="#main">跳到正文</a>
 <header class="hero"><div class="hero-inner">
   <div class="brandbar"><div class="brand"><span class="brand-mark">S</span><span><strong>submux</strong><span>配置生成与本机代理运行</span></span></div><nav class="top-links" aria-label="页头链接"><a href="https://github.com/Questrove/submux/releases" target="_blank" rel="noreferrer">下载发行版</a><a data-control-plane-link hidden href="/" title="仅当本页由 submux 控制面提供时，返回同一服务的配置编排页面">返回配置编排台</a></nav></div>
-  <span class="eyebrow">用户手册 · v2.0.2</span><h1>从安装到卸载，按实际操作顺序说明</h1>
+  <span class="eyebrow">用户手册 · v2.1.0</span><h1>从安装到卸载，按实际操作顺序说明</h1>
   <p class="lead">这份说明同时覆盖 submux 控制面和 Submux Runtime。你可以只安装其中一个，也可以组合使用：先由控制面生成输出订阅，再交给 Runtime 在本机运行。</p>
-  <div class="badges"><span class="badge"><i></i>控制面 v2.0.2 · Stable</span><span class="badge preview"><i></i>Runtime v2.0.2 · Preview</span><span class="badge">Windows · Linux · macOS</span></div>
+  <div class="badges"><span class="badge"><i></i>控制面 v2.1.0 · Stable</span><span class="badge preview"><i></i>Runtime v2.1.0 · Preview</span><span class="badge">Windows · Linux · macOS</span></div>
 </div></header>
 <div class="layout">
 <aside class="toc" aria-label="本页目录"><div class="toc-title">本页目录</div><a href="#choose">先选安装内容</a><a href="#prepare">安装前准备</a><a href="#install">安装软件</a><a href="#first-run">首次使用</a><a href="#daily">日常操作</a><a href="#maintain">更新与备份</a><a href="#uninstall">卸载与清理</a><a href="#troubleshoot">常见问题</a><a class="back" data-control-plane-link hidden href="/">返回配置编排台<span class="back-note">仅在本页由同一控制面提供时显示，目标是该服务的配置编排页面。</span></a></aside>
@@ -45,20 +45,20 @@
   <div class="notice danger" style="margin-top:18px"><strong>当前签名状态：</strong>Windows Runtime MSI 尚未签名，可能显示 Unknown Publisher；macOS PKG 尚未签名和公证。Runtime 仍处于 Preview，请先在可恢复的环境中使用。</div>
 </section>
 
-<section id="install" class="section"><span class="section-kicker">03 · 安装</span><h2>按操作系统安装</h2><p class="muted">下面默认安装 v2.0.2。在线 Runtime 包不含 Mihomo，安装服务后还要执行“安装 Mihomo”步骤；完整离线包已经包含固定版本的官方 Mihomo。</p>
+<section id="install" class="section"><span class="section-kicker">03 · 安装</span><h2>按操作系统安装</h2><p class="muted">下面默认安装 v2.1.0。在线 Runtime 包不含 Mihomo，安装服务后还要执行“安装 Mihomo”步骤；完整离线包已经包含固定版本的官方 Mihomo。</p>
   <div class="tabs" role="tablist" aria-label="选择操作系统"><button type="button" class="active" role="tab" aria-selected="true" data-os="linux">Linux</button><button type="button" role="tab" aria-selected="false" data-os="windows">Windows</button><button type="button" role="tab" aria-selected="false" data-os="macos">macOS</button></div>
   <div id="os-linux" class="os-panel active" data-label="Linux"><div class="step-list">
     <article class="step"><h3>安装控制面</h3><p>安装固定版本并创建 <code>submux.service</code>。</p><div class="command"><button class="copy" type="button">复制</button><pre>curl -fsSL \
-  https://github.com/Questrove/submux/releases/download/submux-v2.0.2/install-submux.sh | \
-  bash -s -- --version submux-v2.0.2 --service
+  https://github.com/Questrove/submux/releases/download/submux-v2.1.0/install-submux.sh | \
+  bash -s -- --version submux-v2.1.0 --service
 systemctl status submux</pre></div></article>
     <article class="step"><h3>安装 Runtime</h3><p>桌面机器建议安装时授权当前用户，服务器可以不加授权变量。</p><div class="command"><button class="copy" type="button">复制</button><pre># Debian / Ubuntu
 sudo env SUBMUX_RUNTIME_AUTHORIZE_USER="$USER" \
-  dpkg -i submux-runtime_2.0.2_amd64_online.deb
+  dpkg -i submux-runtime_2.1.0_amd64_online.deb
 
 # Fedora / RHEL
 sudo env SUBMUX_RUNTIME_AUTHORIZE_USER="$USER" \
-  rpm -Uvh submux-runtime_2.0.2_amd64_online.rpm</pre></div><p class="subtle">其他 systemd / glibc 发行版可解压 online.tar.zst，然后执行其中的 <code>sudo ./install.sh --authorize-desktop "$USER"</code>。</p></article>
+  rpm -Uvh submux-runtime_2.1.0_amd64_online.rpm</pre></div><p class="subtle">其他 systemd / glibc 发行版可解压 online.tar.zst，然后执行其中的 <code>sudo ./install.sh --authorize-desktop "$USER"</code>。</p></article>
     <article class="step"><h3>在线安装 Mihomo</h3><div class="command"><button class="copy" type="button">复制</button><pre>PLAN_ID="$(sudo submux-runtime mihomo check --json | \
   sed -n 's/.*"plan_id":"\([^"]*\)".*/\1/p')"
 test -n "$PLAN_ID"
@@ -66,23 +66,23 @@ sudo submux-runtime mihomo install \
   --plan "$PLAN_ID" --trust tuf --confirm --wait --json</pre></div></article>
     <article class="step"><h3>检查服务</h3><div class="command"><button class="copy" type="button">复制</button><pre>systemctl status submux-runtime submux-runtime-net
 sudo submux-runtime status --json</pre></div><p>安装后才授权桌面用户时，执行 <code>sudo submux-runtime-authorize-user --confirm "$USER"</code>，然后重新登录。</p></article>
-  </div><details><summary>完全离线：使用 Linux airgap 包</summary><div><p>airgap 包可以只装控制面、只装 Runtime 或全部安装，目标机器不需要访问网络。</p><div class="command"><button class="copy" type="button">复制</button><pre>sha256sum --check submux-airgap_2.0.2_linux_amd64.tar.gz.sha256
-tar -xzf submux-airgap_2.0.2_linux_amd64.tar.gz
-cd submux-airgap_2.0.2_linux_amd64
+  </div><details><summary>完全离线：使用 Linux airgap 包</summary><div><p>airgap 包可以只装控制面、只装 Runtime 或全部安装，目标机器不需要访问网络。</p><div class="command"><button class="copy" type="button">复制</button><pre>sha256sum --check submux-airgap_2.1.0_linux_amd64.tar.gz.sha256
+tar -xzf submux-airgap_2.1.0_linux_amd64.tar.gz
+cd submux-airgap_2.1.0_linux_amd64
 ./install.sh verify
 sudo ./install.sh all
 # 或：sudo ./install.sh control
 # 或：sudo ./install.sh runtime --authorize-desktop "$USER"</pre></div></div></details></div>
 
   <div id="os-windows" class="os-panel" data-label="Windows"><div class="step-list">
-    <article class="step"><h3>下载并运行控制面</h3><p>从 <a href="https://github.com/Questrove/submux/releases/tag/submux-v2.0.2" target="_blank" rel="noreferrer">控制面发行页</a>下载对应架构的 exe 与 <code>checksums.txt</code>。校验后直接运行；当前不会注册为 Windows Service。</p><div class="command"><button class="copy" type="button">复制</button><pre>$Program = 'submux-windows-amd64.exe'
+    <article class="step"><h3>下载并运行控制面</h3><p>从 <a href="https://github.com/Questrove/submux/releases/tag/submux-v2.1.0" target="_blank" rel="noreferrer">控制面发行页</a>下载对应架构的 exe 与 <code>checksums.txt</code>。校验后直接运行；当前不会注册为 Windows Service。</p><div class="command"><button class="copy" type="button">复制</button><pre>$Program = 'submux-windows-amd64.exe'
 $Line = (Get-Content checksums.txt | Select-String \
   ('  ' + [regex]::Escape($Program) + '$')).Line
 $Expected = ($Line -split '\s+')[0]
 $Actual = (Get-FileHash $Program -Algorithm SHA256).Hash
 if ($Actual.ToLower() -ne $Expected.ToLower()) { throw 'checksum mismatch' }
 & ".\$Program"</pre></div></article>
-    <article class="step"><h3>安装 Runtime MSI</h3><p>下载 online MSI 和对应的 <code>.sha256</code>，核对后以管理员权限安装。参数会授权当前用户。</p><div class="command"><button class="copy" type="button">复制</button><pre>$Package = 'submux-runtime_2.0.2_amd64_online.msi'
+    <article class="step"><h3>安装 Runtime MSI</h3><p>下载 online MSI 和对应的 <code>.sha256</code>，核对后以管理员权限安装。参数会授权当前用户。</p><div class="command"><button class="copy" type="button">复制</button><pre>$Package = 'submux-runtime_2.1.0_amd64_online.msi'
 $Expected = ((Get-Content "$Package.sha256") -split '\s+')[0]
 $Actual = (Get-FileHash $Package -Algorithm SHA256).Hash
 if ($Actual.ToLower() -ne $Expected.ToLower()) { throw 'checksum mismatch' }
@@ -103,10 +103,10 @@ $Plan = (& $Runtime mihomo import --json .\offline-verification-bundle.zip |
 
   <div id="os-macos" class="os-panel" data-label="macOS"><div class="step-list">
     <article class="step"><h3>安装控制面</h3><p>程序安装到 <code>/usr/local/bin/submux</code>，不会创建 LaunchDaemon。</p><div class="command"><button class="copy" type="button">复制</button><pre>curl -fsSL \
-  https://github.com/Questrove/submux/releases/download/submux-v2.0.2/install-submux.sh | \
-  bash -s -- --version submux-v2.0.2
+  https://github.com/Questrove/submux/releases/download/submux-v2.1.0/install-submux.sh | \
+  bash -s -- --version submux-v2.1.0
 submux</pre></div></article>
-    <article class="step"><h3>安装 Runtime PKG 并授权用户</h3><div class="command"><button class="copy" type="button">复制</button><pre>PACKAGE="submux-runtime_2.0.2_universal_online_unsigned.pkg"
+    <article class="step"><h3>安装 Runtime PKG 并授权用户</h3><div class="command"><button class="copy" type="button">复制</button><pre>PACKAGE="submux-runtime_2.1.0_universal_online_unsigned.pkg"
 shasum -a 256 -c "${PACKAGE}.sha256"
 sudo installer -pkg "$PACKAGE" -target /
 sudo /usr/local/sbin/submux-runtime-authorize-user --confirm "$USER"</pre></div></article>
@@ -186,7 +186,7 @@ powershell -File .\Uninstall-SubmuxRuntime.ps1 -Purge</pre></div><p class="subtl
 # 同时清除 Runtime 状态
 sudo /usr/local/sbin/submux-runtime-uninstall --purge</pre></div></div>
   <div class="danger-zone"><h3>卸载控制面</h3><p>Linux 或 macOS 使用同一个安装脚本。Linux 会移除由安装器管理的 systemd unit，但保留 <code>/var/lib/submux</code>。</p><div class="command"><button class="copy" type="button">复制</button><pre>curl -fsSL \
-  https://github.com/Questrove/submux/releases/download/submux-v2.0.2/install-submux.sh | \
+  https://github.com/Questrove/submux/releases/download/submux-v2.1.0/install-submux.sh | \
   bash -s -- --uninstall</pre></div></div>
 </section>
 
@@ -199,7 +199,7 @@ sudo /usr/local/sbin/submux-runtime-uninstall --purge</pre></div></div>
   <details><summary>卸载失败并提示网络残留</summary><div>卸载器会停止清理，避免删除状态后留下不可追踪的网络修改。先确认 Runtime 创建的服务、路由、DNS、防火墙、TUN 和 Socket 已撤销，再重试。</div></details>
 </section>
 
-<footer class="footer"><p><strong>说明依据：</strong>本页按仓库中的 README、Runtime 设计、安装与发行说明及三平台安装脚本编写，版本为 v2.0.2。具体平台支持状态以发行包内说明和 Runtime 支持矩阵为准。</p><p class="print-only">打印提示：网页中的 Linux、Windows 和 macOS 内容会全部展开。</p></footer>
+<footer class="footer"><p><strong>说明依据：</strong>本页按仓库中的 README、Runtime 设计、安装与发行说明及三平台安装脚本编写，版本为 v2.1.0。具体平台支持状态以发行包内说明和 Runtime 支持矩阵为准。</p><p class="print-only">打印提示：网页中的 Linux、Windows 和 macOS 内容会全部展开。</p></footer>
 </main></div>
 <script>
 function activatePanels(buttonSelector,panelPrefix,dataName){const buttons=[...document.querySelectorAll(buttonSelector)];buttons.forEach(button=>button.addEventListener('click',()=>{buttons.forEach(item=>{item.classList.toggle('active',item===button);item.setAttribute('aria-selected',String(item===button))});document.querySelectorAll(`[id^="${panelPrefix}"]`).forEach(panel=>panel.classList.toggle('active',panel.id===panelPrefix+button.dataset[dataName]))}))}

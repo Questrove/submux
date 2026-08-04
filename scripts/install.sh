@@ -19,7 +19,7 @@ usage() {
   cat <<'EOF'
 Usage: install.sh [options]
 
-  --version TAG       install an exact release tag (for example submux-v2.0.2)
+  --version TAG       install an exact release tag (for example submux-v2.1.0)
   --channel CHANNEL   stable (default) or alpha
   --offline-dir DIR   install from a transferred asset directory without network access
   --service           install or update the Linux systemd service
